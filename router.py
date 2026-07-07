@@ -13,7 +13,7 @@ OVERRIDE_LOCAL_RE = re.compile(r"^\s*use\s+local\b\s*[:,]?\s*(.*)$", re.IGNORECA
 REMEMBER_RE = re.compile(r"^(?:remember|note|save this)\s*:\s*(.+)$", re.IGNORECASE)
 
 RECALL_PHRASES = ("what do you remember", "what do you know about me")
-TIME_PHRASES = ("what time is it", "date today", "what is today's date")
+TIME_RE = re.compile(r"\bwhat('s| is)?\s+(the\s+)?(time|date)\b|\btoday'?s\s+date\b", re.IGNORECASE)
 LOOK_PHRASES = (
     "look at this",
     "take a look",
@@ -45,7 +45,7 @@ class RouteDecision:
 def route_intent(text: str) -> RouteDecision:
     stripped = text.strip()
     lowered = stripped.lower()
-
+    
     override = OVERRIDE_CLAUDE_RE.match(stripped)
     if override:
         return RouteDecision(mode="claude", payload=override.group(1).strip() or stripped)
@@ -60,8 +60,8 @@ def route_intent(text: str) -> RouteDecision:
 
     if any(phrase in lowered for phrase in RECALL_PHRASES):
         return RouteDecision(mode="tool", tool="recall", payload=stripped)
-
-    if any(phrase in lowered for phrase in TIME_PHRASES):
+    
+    if TIME_RE.search(stripped):
         return RouteDecision(mode="tool", tool="time", payload=stripped)
 
     if any(phrase in lowered for phrase in LOOK_PHRASES):

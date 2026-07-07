@@ -58,6 +58,23 @@ def test_time_phrase():
     assert decision.tool == "time"
 
 
+def test_todays_date_phrase():
+    decision = route_intent("what is today's date")
+    assert decision.mode == "tool"
+    assert decision.tool == "time"
+
+
+def test_time_word_does_not_false_trigger():
+    decision = route_intent("I don't have time to deal with this today")
+    assert decision.tool != "time"
+    assert decision.mode == "local"
+
+
+def test_date_word_does_not_steal_claude_domain_question():
+    decision = route_intent("should i invest before the tax deadline date")
+    assert decision.mode == "claude"
+
+
 def test_look_phrases_route_to_camera_tool():
     for phrase in (
         "look at this",

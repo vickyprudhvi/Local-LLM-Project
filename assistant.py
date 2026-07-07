@@ -1,11 +1,13 @@
-"""Main loop. Phase 2: router wired in, routing decisions printed each turn."""
+"""Main loop. Phase 3: push-to-talk + spoken answers wired in."""
 
 from datetime import datetime
 
 from rich.console import Console
 
 from brain import ask_local, load_system_prompt
+from ears import listen_push_to_talk
 from router import route_intent
+from voice import speak
 
 console = Console()
 
@@ -21,24 +23,37 @@ def dispatch(decision, user_text, history, system_prompt):
     return reply
 
 
+def get_user_text(mode):
+    if mode == "p":
+        text = listen_push_to_talk()
+        console.print(f"[dim]heard: {text}[/dim]")
+        return text
+    return input("> ").strip()
+
+
 def main():
     system_prompt = load_system_prompt()
     history = []
 
-    console.print("[bold]home-ai — text loop (Phase 2)[/bold]  (type 'q' to quit)")
+    console.print("[bold]home-ai (Phase 3)[/bold]")
 
     while True:
-        user_text = input("> ").strip()
+        mode = input("mode [t=text, p=push-to-talk, q=quit]: ").strip().lower()
+        if mode == "q":
+            break
+        if mode not in ("t", "p"):
+            continue
+
+        user_text = get_user_text(mode)
         if not user_text:
             continue
-        if user_text.lower() in ("q", "quit", "exit"):
-            break
 
         decision = route_intent(user_text)
         console.print(f"[dim]routing: mode={decision.mode} tool={decision.tool}[/dim]")
 
         reply = dispatch(decision, user_text, history, system_prompt)
         console.print(f"[cyan]{reply}[/cyan]")
+        speak(reply)
 
         history.append({"role": "user", "content": user_text})
         history.append({"role": "assistant", "content": reply})
