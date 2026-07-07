@@ -1,0 +1,12 @@
+requests
+anthropic
+chromadb
+faster-whisper
+sounddevice
+soundfile
+opencv-python
+numpy
+pyttsx3
+python-dotenv
+rich
+webrtcvad-wheels
