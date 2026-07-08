@@ -1,9 +1,11 @@
-"""Main loop. Phase 5: Claude escalation live."""
+"""Main loop. Phase 6: eyes.py + camera commands wired in."""
 
+import re
 from datetime import datetime
 
 from rich.console import Console
 
+import eyes
 import memory_store
 from brain import ask_claude, ask_local, load_system_prompt
 from ears import listen_push_to_talk
@@ -11,6 +13,12 @@ from router import route_intent
 from voice import speak
 
 console = Console()
+
+CLAUDE_VISION_RE = re.compile(r"\b(read|text|question|document|screen)\b|ask claude", re.IGNORECASE)
+
+
+def _use_claude_vision(text):
+    return bool(CLAUDE_VISION_RE.search(text))
 
 
 def _enrich_with_memory(user_text):
@@ -37,6 +45,16 @@ def dispatch(decision, user_text, history, system_prompt):
             return "I don't have anything remembered yet."
         return "Here's what I remember: " + "; ".join(f["text"] for f in facts)
 
+    if decision.mode == "tool" and decision.tool == "look":
+        try:
+            path = eyes.snapshot()
+        except RuntimeError as e:
+            return f"Sorry, I couldn't use the camera: {e}"
+
+        if _use_claude_vision(user_text):
+            return eyes.describe_claude(path, user_text, history, system_prompt)
+        return eyes.describe_local(path, user_text)
+
     if decision.mode == "tool":
         return f"[{decision.tool} isn't wired up yet — coming in a later phase]"
 
@@ -61,7 +79,7 @@ def main():
     system_prompt = load_system_prompt()
     history = []
 
-    console.print("[bold]home-ai (Phase 5)[/bold]")
+    console.print("[bold]home-ai (Phase 6)[/bold]")
 
     while True:
         mode = input("mode [t=text, p=push-to-talk, q=quit]: ").strip().lower()
