@@ -10,7 +10,7 @@ from typing import Optional
 OVERRIDE_CLAUDE_RE = re.compile(r"^\s*ask\s+claude\b\s*[:,]?\s*(.*)$", re.IGNORECASE)
 OVERRIDE_LOCAL_RE = re.compile(r"^\s*use\s+local\b\s*[:,]?\s*(.*)$", re.IGNORECASE)
 
-REMEMBER_RE = re.compile(r"^(?:remember|note|save this)\s*:\s*(.+)$", re.IGNORECASE)
+REMEMBER_RE = re.compile(r"^(?:remember|note|save this)\b\s*:?\s*(.+)$", re.IGNORECASE)
 
 RECALL_PHRASES = ("what do you remember", "what do you know about me")
 TIME_RE = re.compile(r"\bwhat('s| is)?\s+(the\s+)?(time|date)\b|\btoday'?s\s+date\b", re.IGNORECASE)

@@ -20,6 +20,18 @@ def test_remember_extracts_fact():
     assert decision.payload == "dentist on July 14"
 
 
+def test_remember_without_colon_extracts_fact():
+    decision = route_intent("remember my birthday is on july 13th")
+    assert decision.mode == "tool"
+    assert decision.tool == "remember"
+    assert decision.payload == "my birthday is on july 13th"
+
+
+def test_remembered_does_not_false_trigger():
+    decision = route_intent("I remembered to buy milk today")
+    assert decision.tool != "remember"
+
+
 def test_note_and_save_this_are_aliases_for_remember():
     assert route_intent("note: buy milk").tool == "remember"
     assert route_intent("save this: wifi password is hunter2").tool == "remember"
