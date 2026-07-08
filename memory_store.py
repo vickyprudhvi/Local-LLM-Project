@@ -62,7 +62,10 @@ def remember(text, kind="fact", source="user", confidence=0.85):
     return fact_id
 
 
-def recall(query, n_results=3):
+MAX_RELEVANT_DISTANCE = 1.5
+
+
+def recall(query, n_results=3, max_distance=MAX_RELEVANT_DISTANCE):
     collection = _get_collection()
     count = collection.count()
     if count == 0:
@@ -81,4 +84,5 @@ def recall(query, n_results=3):
     return [
         {"text": text, "metadata": metadata, "distance": distance}
         for text, metadata, distance in zip(documents, metadatas, distances)
+        if distance <= max_distance
     ]

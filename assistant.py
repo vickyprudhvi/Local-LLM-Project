@@ -1,11 +1,11 @@
-"""Main loop. Phase 4: memory_store wired in — manual remember/recall + automatic recall enrichment."""
+"""Main loop. Phase 5: Claude escalation live."""
 
 from datetime import datetime
 
 from rich.console import Console
 
 import memory_store
-from brain import ask_local, load_system_prompt
+from brain import ask_claude, ask_local, load_system_prompt
 from ears import listen_push_to_talk
 from router import route_intent
 from voice import speak
@@ -41,7 +41,10 @@ def dispatch(decision, user_text, history, system_prompt):
         return f"[{decision.tool} isn't wired up yet — coming in a later phase]"
 
     prompt = _enrich_with_memory(user_text)
-    # claude escalation goes live in Phase 5; for now every non-tool route answers locally
+    if decision.mode == "claude":
+        
+        return ask_claude(prompt, history, system_prompt)
+
     reply, _metrics = ask_local(prompt, history, system_prompt)
     return reply
 
@@ -58,7 +61,7 @@ def main():
     system_prompt = load_system_prompt()
     history = []
 
-    console.print("[bold]home-ai (Phase 4)[/bold]")
+    console.print("[bold]home-ai (Phase 5)[/bold]")
 
     while True:
         mode = input("mode [t=text, p=push-to-talk, q=quit]: ").strip().lower()
