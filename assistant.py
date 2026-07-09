@@ -1,4 +1,4 @@
-"""Main loop. Phase 6: eyes.py + camera commands wired in."""
+"""Main loop. Phase 7: system_prompt polish."""
 
 import re
 from datetime import datetime
@@ -60,7 +60,6 @@ def dispatch(decision, user_text, history, system_prompt):
 
     prompt = _enrich_with_memory(user_text)
     if decision.mode == "claude":
-        
         return ask_claude(prompt, history, system_prompt)
 
     reply, _metrics = ask_local(prompt, history, system_prompt)
@@ -79,7 +78,7 @@ def main():
     system_prompt = load_system_prompt()
     history = []
 
-    console.print("[bold]home-ai (Phase 6)[/bold]")
+    console.print("[bold]home-ai (Phase 7)[/bold]")
 
     while True:
         mode = input("mode [t=text, p=push-to-talk, q=quit]: ").strip().lower()
