@@ -1,4 +1,4 @@
-"""Main loop. Phase 7: system_prompt polish."""
+"""Main loop. v2: single-model unified routing + answering to avoid VRAM swap-thrashing."""
 
 import re
 from datetime import datetime
@@ -7,9 +7,9 @@ from rich.console import Console
 
 import eyes
 import memory_store
-from brain import ask_claude, ask_local, load_system_prompt
+from brain import ask_claude, load_system_prompt
 from ears import listen_push_to_talk
-from router import route_intent
+from router import route_and_answer
 from voice import speak
 
 console = Console()
@@ -29,7 +29,7 @@ def _enrich_with_memory(user_text):
     return f"{facts_block}\n\n{user_text}"
 
 
-def dispatch(decision, user_text, history, system_prompt):
+def dispatch(decision, user_text, prompt, history, system_prompt):
     if decision.mode == "tool" and decision.tool == "time":
         return datetime.now().strftime("%A, %B %d %Y, %I:%M %p")
 
@@ -58,12 +58,11 @@ def dispatch(decision, user_text, history, system_prompt):
     if decision.mode == "tool":
         return f"[{decision.tool} isn't wired up yet — coming in a later phase]"
 
-    prompt = _enrich_with_memory(user_text)
     if decision.mode == "claude":
         return ask_claude(prompt, history, system_prompt)
 
-    reply, _metrics = ask_local(prompt, history, system_prompt)
-    return reply
+    # mode == "local" — the answer was already generated in the same call that routed it
+    return decision.answer or "Sorry, I didn't catch that."
 
 
 def get_user_text(mode):
@@ -78,7 +77,7 @@ def main():
     system_prompt = load_system_prompt()
     history = []
 
-    console.print("[bold]home-ai (Phase 7)[/bold]")
+    console.print("[bold]home-ai (LLM router v2 — consolidated)[/bold]")
 
     while True:
         mode = input("mode [t=text, p=push-to-talk, q=quit]: ").strip().lower()
@@ -91,10 +90,11 @@ def main():
         if not user_text:
             continue
 
-        decision = route_intent(user_text)
+        prompt = _enrich_with_memory(user_text)
+        decision = route_and_answer(prompt, history, system_prompt)
         console.print(f"[dim]routing: mode={decision.mode} tool={decision.tool}[/dim]")
 
-        reply = dispatch(decision, user_text, history, system_prompt)
+        reply = dispatch(decision, user_text, prompt, history, system_prompt)
         console.print(f"[cyan]{reply}[/cyan]")
         speak(reply)
 

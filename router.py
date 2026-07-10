@@ -1,8 +1,16 @@
-"""LLM-based intent routing via LOCAL_MODEL_TINY (qwen3:4b). route_intent(text) -> RouteDecision.
+"""LLM-based routing + answering, unified into one call to LOCAL_MODEL. route_and_answer(...) -> RouteDecision.
 
-Not pure — makes an Ollama tool-calling call. Falls back to mode="local" on any
-failure (timeout, malformed response, unknown tool name), per the same
-readable-error-instead-of-crash rule as every other Ollama/Anthropic call.
+Originally used a separate tiny model (qwen3:4b) just for routing, with a second
+call to the big model for the actual answer. On this machine's 4GB GPU, those two
+models can't both stay resident — every turn evicted one to load the other, which
+was slow enough to blow past ask_local's timeout. Consolidated to one model: the
+same tool-calling call that decides whether a tool applies also produces the final
+answer when no tool is needed, so only one model is ever loaded and local chat
+turns need no second round trip.
+
+Not pure — makes an Ollama tool-calling call. Falls back to mode="local" with a
+readable error message on any failure (timeout, malformed response, unknown tool),
+per the same rule as every other Ollama/Anthropic call.
 """
 
 import os
@@ -13,18 +21,20 @@ import requests
 from dotenv import load_dotenv
 from rich.console import Console
 
+from brain import trim_history
+
 load_dotenv()
 console = Console()
 
 OLLAMA_URL = "http://localhost:11434"
-ROUTER_MODEL = os.environ.get("LOCAL_MODEL_TINY", "qwen3:4b")
-ROUTER_TIMEOUT = 120
+ROUTER_MODEL = os.environ.get("LOCAL_MODEL", "qwen3:30b-a3b")
+ROUTER_TIMEOUT = 180
 
-SYSTEM_PROMPT = (
-    "You are a strict intent router for a personal voice assistant. For every message, decide whether to "
-    "call exactly one tool, or respond normally as plain conversation if none apply. If the user explicitly "
-    "says to use Claude or use the local model, respect that override regardless of topic. Do not explain "
-    "your choice."
+ROUTER_INSTRUCTIONS = (
+    "\n\nYou also have tools available. For every message, call exactly one tool if it matches a "
+    "tool description below; otherwise just answer normally, in character. If the user explicitly "
+    "says to use Claude or use the local model, respect that override regardless of topic. Do not "
+    "explain your tool choice — either call the tool, or just answer."
 )
 
 TOOLS = [
@@ -96,20 +106,22 @@ class RouteDecision:
     mode: str  # "tool" | "claude" | "local"
     tool: Optional[str] = None
     payload: Optional[str] = None
+    answer: Optional[str] = None  # pre-generated answer text, populated when mode == "local"
 
 
-def route_intent(text: str) -> RouteDecision:
+def route_and_answer(text: str, history, system_prompt: str) -> RouteDecision:
     stripped = text.strip()
+    trimmed = trim_history(history, 12)
+    messages = [{"role": "system", "content": system_prompt + ROUTER_INSTRUCTIONS}]
+    messages.extend(trimmed)
+    messages.append({"role": "user", "content": stripped})
 
     try:
         resp = requests.post(
             f"{OLLAMA_URL}/api/chat",
             json={
                 "model": ROUTER_MODEL,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": stripped},
-                ],
+                "messages": messages,
                 "tools": TOOLS,
                 "stream": False,
                 "keep_alive": "10m",
@@ -118,14 +130,15 @@ def route_intent(text: str) -> RouteDecision:
         )
         resp.raise_for_status()
     except requests.exceptions.RequestException as e:
-        console.print(f"[red]Router model call failed, falling back to local: {e}[/red]")
-        return RouteDecision(mode="local", payload=stripped)
+        console.print(f"[red]Local model call failed: {e}[/red]")
+        return RouteDecision(mode="local", payload=stripped, answer="Sorry, I couldn't reach the local model just now.")
 
     message = resp.json().get("message", {})
     tool_calls = message.get("tool_calls") or []
 
     if not tool_calls:
-        return RouteDecision(mode="local", payload=stripped)
+        answer = (message.get("content") or "").strip()
+        return RouteDecision(mode="local", payload=stripped, answer=answer)
 
     call = tool_calls[0].get("function", {})
     name = call.get("name")
@@ -137,7 +150,7 @@ def route_intent(text: str) -> RouteDecision:
     tool = _TOOL_NAME_MAP.get(name)
     if tool is None:
         console.print(f"[red]Router returned unknown tool '{name}', falling back to local.[/red]")
-        return RouteDecision(mode="local", payload=stripped)
+        return RouteDecision(mode="local", payload=stripped, answer="")
 
     payload = args.get("fact", stripped) if tool == "remember" else stripped
     return RouteDecision(mode="tool", tool=tool, payload=payload)

@@ -18,6 +18,8 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 
 _anthropic_client = None
 
+CLAUDE_TOOLS = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}]
+
 
 def load_system_prompt(path="system_prompt.txt"):
     try:
@@ -73,7 +75,7 @@ def ask_claude(prompt, history, system_prompt, image_path=None):
     """Uses the Anthropic SDK. Returns text. Attaches an image before the text block if given."""
     global _anthropic_client
     if _anthropic_client is None:
-        _anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60.0)
+        _anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY, timeout=90.0)
 
     trimmed = trim_history(history, 6)
 
@@ -98,6 +100,7 @@ def ask_claude(prompt, history, system_prompt, image_path=None):
             max_tokens=2000,
             system=system_prompt,
             messages=messages,
+            tools=CLAUDE_TOOLS,
         )
     except Exception as e:
         console.print(f"[red]Claude call failed: {e}[/red]")
