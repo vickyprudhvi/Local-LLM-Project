@@ -45,7 +45,7 @@ def dispatch(decision, user_text, prompt, history, system_prompt):
         return f"Got it, I'll remember: {decision.payload}", {}
 
     if decision.mode == "tool" and decision.tool == "recall":
-        facts = memory_store.recall(user_text, n_results=3)
+        facts = memory_store.list_all(n_results=10)
         if not facts:
             return "I don't have anything remembered yet.", {}
         return "Here's what I remember: " + "; ".join(f["text"] for f in facts), {}

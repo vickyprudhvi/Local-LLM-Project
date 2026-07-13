@@ -62,6 +62,24 @@ def remember(text, kind="fact", source="user", confidence=0.85):
     return fact_id
 
 
+def list_all(n_results=10):
+    """Return the most recent remembered facts, unfiltered by relevance.
+
+    For explicit "what do you remember" style requests, where there's no topic
+    to match against — a similarity search against a generic query embeds far
+    from every specific fact and would filter everything out. See recall()
+    below for the topical-matching version used to enrich prompts.
+    """
+    collection = _get_collection()
+    if collection.count() == 0:
+        return []
+
+    data = collection.get(include=["documents", "metadatas"])
+    facts = [{"text": text, "metadata": metadata} for text, metadata in zip(data["documents"], data["metadatas"])]
+    facts.sort(key=lambda f: f["metadata"].get("created_at", ""), reverse=True)
+    return facts[:n_results]
+
+
 MAX_RELEVANT_DISTANCE = 1.5
 
 
