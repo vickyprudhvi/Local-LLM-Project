@@ -1,6 +1,7 @@
 venv/
 memory/
 snapshots/
+logs/
 .env
 __pycache__/
 *.pyc

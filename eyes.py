@@ -58,6 +58,7 @@ def _resize_and_encode(path, max_side, quality=85):
 
 
 def describe_local(path, prompt="Describe what you see."):
+    """Returns (text, metrics dict)."""
     b64 = _resize_and_encode(path, max_side=1280)
 
     try:
@@ -74,12 +75,18 @@ def describe_local(path, prompt="Describe what you see."):
         resp.raise_for_status()
     except requests.exceptions.RequestException as e:
         console.print(f"[red]Vision model call failed: {e}[/red]")
-        return "Sorry, I couldn't look at that just now."
+        return "Sorry, I couldn't look at that just now.", {}
 
-    return resp.json().get("response", "").strip()
+    data = resp.json()
+    metrics = {
+        "prompt_tokens": data.get("prompt_eval_count"),
+        "completion_tokens": data.get("eval_count"),
+    }
+    return data.get("response", "").strip(), metrics
 
 
 def describe_claude(path, prompt, history=None, system_prompt=""):
+    """Returns (text, metrics dict)."""
     # ask_claude reads and encodes the file itself; resize to Claude's larger limit first.
     resized_b64 = _resize_and_encode(path, max_side=1600)
     tmp_path = os.path.join(os.path.dirname(path) or ".", "_claude_resized.jpg")

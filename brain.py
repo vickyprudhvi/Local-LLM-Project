@@ -72,7 +72,7 @@ def ask_local(prompt, history, system_prompt):
 
 
 def ask_claude(prompt, history, system_prompt, image_path=None):
-    """Uses the Anthropic SDK. Returns text. Attaches an image before the text block if given."""
+    """Uses the Anthropic SDK. Returns (text, metrics dict). Attaches an image before the text block if given."""
     global _anthropic_client
     if _anthropic_client is None:
         _anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY, timeout=90.0)
@@ -104,7 +104,12 @@ def ask_claude(prompt, history, system_prompt, image_path=None):
         )
     except Exception as e:
         console.print(f"[red]Claude call failed: {e}[/red]")
-        return "Sorry, I couldn't reach Claude just now."
+        return "Sorry, I couldn't reach Claude just now.", {}
 
     parts = [block.text for block in resp.content if getattr(block, "type", None) == "text"]
-    return "\n".join(parts).strip()
+    metrics = {
+        "prompt_tokens": resp.usage.input_tokens,
+        "completion_tokens": resp.usage.output_tokens,
+    }
+    console.print(f"[dim]claude metrics: {metrics}[/dim]")
+    return "\n".join(parts).strip(), metrics

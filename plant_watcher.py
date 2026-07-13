@@ -69,8 +69,8 @@ def run_daily_compare(date_str=None):
     first_photo, last_photo = photos[0], photos[-1]
     console.print(f"[dim]comparing {first_photo} -> {last_photo}[/dim]")
 
-    early_desc = eyes.describe_local(first_photo, DESCRIBE_PROMPT)
-    late_desc = eyes.describe_local(last_photo, DESCRIBE_PROMPT)
+    early_desc, _ = eyes.describe_local(first_photo, DESCRIBE_PROMPT)
+    late_desc, _ = eyes.describe_local(last_photo, DESCRIBE_PROMPT)
 
     prompt = COMPARE_PROMPT.format(early=early_desc, late=late_desc)
     summary, _metrics = brain.ask_local(prompt, [], COMPARE_SYSTEM_PROMPT)

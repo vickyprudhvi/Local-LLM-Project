@@ -107,6 +107,8 @@ class RouteDecision:
     tool: Optional[str] = None
     payload: Optional[str] = None
     answer: Optional[str] = None  # pre-generated answer text, populated when mode == "local"
+    prompt_tokens: Optional[int] = None  # from the routing/answering call to ROUTER_MODEL
+    completion_tokens: Optional[int] = None
 
 
 def route_and_answer(text: str, history, system_prompt: str) -> RouteDecision:
@@ -124,7 +126,7 @@ def route_and_answer(text: str, history, system_prompt: str) -> RouteDecision:
                 "messages": messages,
                 "tools": TOOLS,
                 "stream": False,
-                "keep_alive": "10m",
+                "keep_alive": -1,
             },
             timeout=ROUTER_TIMEOUT,
         )
@@ -133,24 +135,39 @@ def route_and_answer(text: str, history, system_prompt: str) -> RouteDecision:
         console.print(f"[red]Local model call failed: {e}[/red]")
         return RouteDecision(mode="local", payload=stripped, answer="Sorry, I couldn't reach the local model just now.")
 
-    message = resp.json().get("message", {})
+    data = resp.json()
+    prompt_tokens = data.get("prompt_eval_count")
+    completion_tokens = data.get("eval_count")
+    message = data.get("message", {})
     tool_calls = message.get("tool_calls") or []
 
     if not tool_calls:
         answer = (message.get("content") or "").strip()
-        return RouteDecision(mode="local", payload=stripped, answer=answer)
+        return RouteDecision(
+            mode="local", payload=stripped, answer=answer,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+        )
 
     call = tool_calls[0].get("function", {})
     name = call.get("name")
     args = call.get("arguments") or {}
 
     if name == "escalate_to_claude":
-        return RouteDecision(mode="claude", payload=stripped)
+        return RouteDecision(
+            mode="claude", payload=stripped,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+        )
 
     tool = _TOOL_NAME_MAP.get(name)
     if tool is None:
         console.print(f"[red]Router returned unknown tool '{name}', falling back to local.[/red]")
-        return RouteDecision(mode="local", payload=stripped, answer="")
+        return RouteDecision(
+            mode="local", payload=stripped, answer="",
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+        )
 
     payload = args.get("fact", stripped) if tool == "remember" else stripped
-    return RouteDecision(mode="tool", tool=tool, payload=payload)
+    return RouteDecision(
+        mode="tool", tool=tool, payload=payload,
+        prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+    )
