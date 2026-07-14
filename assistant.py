@@ -8,7 +8,7 @@ from rich.console import Console
 
 import eyes
 import memory_store
-from brain import ask_claude, load_system_prompt
+from brain import ask_claude, ask_local, load_system_prompt
 from ears import listen_push_to_talk
 from interaction_log import log_turn
 from router import route_and_answer
@@ -66,8 +66,8 @@ def dispatch(decision, user_text, prompt, history, system_prompt):
     if decision.mode == "claude":
         return ask_claude(prompt, history, system_prompt)
 
-    # mode == "local" — the answer was already generated in the same call that routed it
-    return decision.answer or "Sorry, I didn't catch that.", {}
+    # mode == "local" — routing only decided; generate the answer separately
+    return ask_local(prompt, history, system_prompt)
 
 
 def get_user_text(mode):
@@ -98,7 +98,7 @@ def main():
         turn_start = time.perf_counter()
 
         prompt = _enrich_with_memory(user_text)
-        decision = route_and_answer(prompt, history, system_prompt)
+        decision = route_and_answer(prompt, history)
         console.print(f"[dim]routing: mode={decision.mode} tool={decision.tool}[/dim]")
 
         reply, extra_metrics = dispatch(decision, user_text, prompt, history, system_prompt)

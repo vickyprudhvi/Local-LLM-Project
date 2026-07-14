@@ -1,16 +1,24 @@
-"""LLM-based routing + answering, unified into one call to LOCAL_MODEL. route_and_answer(...) -> RouteDecision.
+"""LLM-based routing only. route_and_answer(...) -> RouteDecision; callers run
+ask_local() separately for mode == "local".
 
-Originally used a separate tiny model (qwen3:4b) just for routing, with a second
-call to the big model for the actual answer. On this machine's 4GB GPU, those two
-models can't both stay resident — every turn evicted one to load the other, which
-was slow enough to blow past ask_local's timeout. Consolidated to one model: the
-same tool-calling call that decides whether a tool applies also produces the final
-answer when no tool is needed, so only one model is ever loaded and local chat
-turns need no second round trip.
+Previously this call also generated the final answer itself when no tool applied,
+to avoid a second round trip — needed back when ROUTER_MODEL and LOCAL_MODEL were
+both local models competing for the same 4GB GPU. Now that LOCAL_MODEL is an
+Ollama Cloud model, that VRAM constraint no longer applies, so routing stays a
+pure classification step: the model must always call a tool, including
+answer_locally for an ordinary chat turn, so this call never spends tokens
+generating prose that would just be thrown away.
 
-Not pure — makes an Ollama tool-calling call. Falls back to mode="local" with a
-readable error message on any failure (timeout, malformed response, unknown tool),
-per the same rule as every other Ollama/Anthropic call.
+Deliberately uses its own ROUTER_SYSTEM_PROMPT, not system_prompt.txt (the
+persona prompt passed to ask_local/ask_claude) — classification shouldn't
+inherit persona instructions ("be concise", memory rules, etc.) that have
+nothing to do with picking a tool, and shouldn't change behavior just because
+the persona prompt gets tweaked.
+
+Not pure — makes an Ollama tool-calling call. Falls back to mode="local" on any
+failure (timeout, malformed response, unknown tool), per the same rule as every
+other Ollama/Anthropic call; the actual error message comes from ask_local's own
+failure path when the caller invokes it.
 """
 
 import os
@@ -30,14 +38,24 @@ OLLAMA_URL = "http://localhost:11434"
 ROUTER_MODEL = os.environ.get("LOCAL_MODEL", "qwen3:30b-a3b")
 ROUTER_TIMEOUT = 180
 
-ROUTER_INSTRUCTIONS = (
-    "\n\nYou also have tools available. For every message, call exactly one tool if it matches a "
-    "tool description below; otherwise just answer normally, in character. If the user explicitly "
-    "says to use Claude or use the local model, respect that override regardless of topic. Do not "
-    "explain your tool choice — either call the tool, or just answer."
+ROUTER_SYSTEM_PROMPT = (
+    "You are the routing layer for a personal assistant. Your only job is to pick the right tool "
+    "for the user's message — you do not answer questions, hold a persona, or explain your choice.\n\n"
+    "For every message, call exactly one tool: pick the one whose description matches, or call "
+    "answer_locally for an ordinary conversational turn that doesn't match any other tool. If the "
+    "user explicitly says to use Claude or use the local model, respect that override regardless of "
+    "topic. Always call a tool — never answer directly in this response."
 )
 
 TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "answer_locally",
+            "description": "Handle an ordinary conversational turn — call this when no other tool applies and escalation to Claude isn't needed.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -106,15 +124,14 @@ class RouteDecision:
     mode: str  # "tool" | "claude" | "local"
     tool: Optional[str] = None
     payload: Optional[str] = None
-    answer: Optional[str] = None  # pre-generated answer text, populated when mode == "local"
-    prompt_tokens: Optional[int] = None  # from the routing/answering call to ROUTER_MODEL
+    prompt_tokens: Optional[int] = None  # from the routing call to ROUTER_MODEL
     completion_tokens: Optional[int] = None
 
 
-def route_and_answer(text: str, history, system_prompt: str) -> RouteDecision:
+def route_and_answer(text: str, history) -> RouteDecision:
     stripped = text.strip()
     trimmed = trim_history(history, 12)
-    messages = [{"role": "system", "content": system_prompt + ROUTER_INSTRUCTIONS}]
+    messages = [{"role": "system", "content": ROUTER_SYSTEM_PROMPT}]
     messages.extend(trimmed)
     messages.append({"role": "user", "content": stripped})
 
@@ -133,7 +150,7 @@ def route_and_answer(text: str, history, system_prompt: str) -> RouteDecision:
         resp.raise_for_status()
     except requests.exceptions.RequestException as e:
         console.print(f"[red]Local model call failed: {e}[/red]")
-        return RouteDecision(mode="local", payload=stripped, answer="Sorry, I couldn't reach the local model just now.")
+        return RouteDecision(mode="local", payload=stripped)
 
     data = resp.json()
     prompt_tokens = data.get("prompt_eval_count")
@@ -142,15 +159,21 @@ def route_and_answer(text: str, history, system_prompt: str) -> RouteDecision:
     tool_calls = message.get("tool_calls") or []
 
     if not tool_calls:
-        answer = (message.get("content") or "").strip()
+        console.print("[red]Router didn't call a tool as instructed, falling back to local.[/red]")
         return RouteDecision(
-            mode="local", payload=stripped, answer=answer,
+            mode="local", payload=stripped,
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
         )
 
     call = tool_calls[0].get("function", {})
     name = call.get("name")
     args = call.get("arguments") or {}
+
+    if name == "answer_locally":
+        return RouteDecision(
+            mode="local", payload=stripped,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+        )
 
     if name == "escalate_to_claude":
         return RouteDecision(
@@ -162,7 +185,7 @@ def route_and_answer(text: str, history, system_prompt: str) -> RouteDecision:
     if tool is None:
         console.print(f"[red]Router returned unknown tool '{name}', falling back to local.[/red]")
         return RouteDecision(
-            mode="local", payload=stripped, answer="",
+            mode="local", payload=stripped,
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
         )
 
