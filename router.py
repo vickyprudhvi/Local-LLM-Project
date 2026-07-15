@@ -21,8 +21,10 @@ other Ollama/Anthropic call; the actual error message comes from ask_local's own
 failure path when the caller invokes it.
 """
 
+import json
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 import requests
@@ -38,14 +40,20 @@ OLLAMA_URL = "http://localhost:11434"
 ROUTER_MODEL = os.environ.get("LOCAL_MODEL", "qwen3:30b-a3b")
 ROUTER_TIMEOUT = 180
 
-ROUTER_SYSTEM_PROMPT = (
+ROUTER_SYSTEM_PROMPT_TEMPLATE = (
     "You are the routing layer for a personal assistant. Your only job is to pick the right tool "
     "for the user's message — you do not answer questions, hold a persona, or explain your choice.\n\n"
     "For every message, call exactly one tool: pick the one whose description matches, or call "
     "answer_locally for an ordinary conversational turn that doesn't match any other tool. If the "
     "user explicitly says to use Claude or use the local model, respect that override regardless of "
-    "topic. Always call a tool — never answer directly in this response."
+    "topic. Always call a tool — never answer directly in this response.\n\n"
+    "Today's date is {today} ({weekday}). Use it to resolve any relative dates a tool needs."
 )
+
+
+def _router_system_prompt():
+    now = datetime.now()
+    return ROUTER_SYSTEM_PROMPT_TEMPLATE.format(today=now.strftime("%Y-%m-%d"), weekday=now.strftime("%A"))
 
 TOOLS = [
     {
@@ -100,6 +108,36 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_calendar_events",
+            "description": (
+                "Look up events on the user's Google Calendar. Call this when the user asks what's on "
+                "their calendar, what they have coming up, or about a past appointment. Resolve any "
+                "relative date the user gives ('today', 'next Tuesday', 'June 15') into a concrete "
+                "YYYY-MM-DD date yourself, using the current date given in your instructions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {
+                        "type": "string",
+                        "description": (
+                            "Earliest date to include, YYYY-MM-DD. Omit for an open-ended future query "
+                            "('upcoming') — this is the default when the user gives no date. For a single "
+                            "day, set start_date and end_date to the same date. For 'everything, past and "
+                            "future', set start_date to several years ago and leave end_date empty."
+                        ),
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "Latest date to include, YYYY-MM-DD (inclusive). Omit for no upper bound.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "escalate_to_claude",
             "description": (
                 "Escalate to Claude. Always call this for money, investing, tax, mortgages, insurance, "
@@ -116,6 +154,7 @@ _TOOL_NAME_MAP = {
     "recall": "recall",
     "get_time": "time",
     "look": "look",
+    "get_calendar_events": "calendar",
 }
 
 
@@ -131,7 +170,7 @@ class RouteDecision:
 def route_and_answer(text: str, history) -> RouteDecision:
     stripped = text.strip()
     trimmed = trim_history(history, 12)
-    messages = [{"role": "system", "content": ROUTER_SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": _router_system_prompt()}]
     messages.extend(trimmed)
     messages.append({"role": "user", "content": stripped})
 
@@ -189,7 +228,13 @@ def route_and_answer(text: str, history) -> RouteDecision:
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
         )
 
-    payload = args.get("fact", stripped) if tool == "remember" else stripped
+    if tool == "remember":
+        payload = args.get("fact", stripped)
+    elif tool == "calendar":
+        # start_date/end_date (YYYY-MM-DD), resolved by the router LLM itself; both optional.
+        payload = json.dumps({"start_date": args.get("start_date"), "end_date": args.get("end_date")})
+    else:
+        payload = stripped
     return RouteDecision(
         mode="tool", tool=tool, payload=payload,
         prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,

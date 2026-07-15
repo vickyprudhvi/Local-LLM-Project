@@ -1,11 +1,13 @@
 """Main loop. v2: single-model unified routing + answering to avoid VRAM swap-thrashing."""
 
+import json
 import re
 import time
 from datetime import datetime
 
 from rich.console import Console
 
+import calendar_reader
 import eyes
 import memory_store
 from brain import ask_claude, ask_local, load_system_prompt
@@ -49,6 +51,25 @@ def dispatch(decision, user_text, prompt, history, system_prompt):
         if not facts:
             return "I don't have anything remembered yet.", {}
         return "Here's what I remember: " + "; ".join(f["text"] for f in facts), {}
+
+    if decision.mode == "tool" and decision.tool == "calendar":
+        date_args = json.loads(decision.payload) if decision.payload else {}
+        try:
+            events = calendar_reader.get_events(
+                start_date=date_args.get("start_date"), end_date=date_args.get("end_date"), n=10
+            )
+        except Exception as e:
+            return f"Sorry, I couldn't reach your calendar: {e}", {}
+        if not events:
+            return "Nothing found on your calendar for that range.", {}
+        calendar_prompt = "Here's what's on your calendar: " + "; ".join(f"{e['start']} - {e['summary']}" for e in events)
+        calendar_summary_prompt = (
+            "You're telling someone what's on their calendar, out loud. Summarize the events in a "
+            "natural, conversational sentence or two — no bullet points, no markdown, no raw "
+            "timestamps. Use plain phrasing for dates and times, like 'today at 2pm' or 'next "
+            "Wednesday'. Be concise."
+        )
+        return ask_local(calendar_prompt, history, system_prompt=calendar_summary_prompt)
 
     if decision.mode == "tool" and decision.tool == "look":
         try:

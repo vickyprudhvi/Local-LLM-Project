@@ -9,3 +9,5 @@ __pycache__/
 ptt_capture.wav
 vad_capture.wav
 .claude/
+credentials.json
+token.json

@@ -63,8 +63,8 @@ def ask_local(prompt, history, system_prompt):
     data = resp.json()
     text = data.get("message", {}).get("content", "").strip()
     metrics = {
-        "prompt_eval_count": data.get("prompt_eval_count"),
-        "eval_count": data.get("eval_count"),
+        "prompt_tokens": data.get("prompt_eval_count"),
+        "completion_tokens": data.get("eval_count"),
         "eval_duration": data.get("eval_duration"),
     }
     console.print(f"[dim]local metrics: {metrics}[/dim]")
