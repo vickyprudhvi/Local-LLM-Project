@@ -108,6 +108,21 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "look_carefully",
+            "description": (
+                "Take a photo and send it to Claude for careful, accurate reading. Use "
+                "whenever the user wants text read accurately, or asks you to answer a "
+                "question, multiple choice question, form, receipt, document, chart, or "
+                "diagram visible on screen or on paper — including follow-ups like 'what's "
+                "the correct answer' after a photo was just discussed. Always prefer this "
+                "over 'look' when accuracy matters or there is text to read."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_calendar_events",
             "description": (
                 "Look up events on the user's Google Calendar. Call this when the user asks what's on "
@@ -154,6 +169,7 @@ _TOOL_NAME_MAP = {
     "recall": "recall",
     "get_time": "time",
     "look": "look",
+    "look_carefully": "look_carefully",
     "get_calendar_events": "calendar",
 }
 

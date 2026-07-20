@@ -76,10 +76,14 @@ def dispatch(decision, user_text, prompt, history, system_prompt):
             path = eyes.snapshot()
         except RuntimeError as e:
             return f"Sorry, I couldn't use the camera: {e}", {}
+        return eyes.describe_local(path, user_text), {}
 
-        if _use_claude_vision(user_text):
-            return eyes.describe_claude(path, user_text, history, system_prompt)
-        return eyes.describe_local(path, user_text)
+    if decision.mode == "tool" and decision.tool == "look_carefully":
+        try:
+            path = eyes.snapshot()
+        except RuntimeError as e:
+            return f"Sorry, I couldn't use the camera: {e}", {}
+        return eyes.describe_claude(path, user_text, history, system_prompt)
 
     if decision.mode == "tool":
         return f"[{decision.tool} isn't wired up yet — coming in a later phase]", {}

@@ -15,7 +15,7 @@ OLLAMA_URL = "http://localhost:11434"
 VISION_MODEL = os.environ.get("VISION_MODEL", "moondream")
 
 
-def snapshot(path="snapshots/latest.jpg", camera_index=0):
+def snapshot(path="snapshots/latest.jpg", camera_index=1):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
     # CAP_DSHOW returns unusable near-black frames on this machine's webcam driver;
