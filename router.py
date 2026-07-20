@@ -85,8 +85,23 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "recall",
-            "description": "Look up what has been remembered about the user. Call this when the user asks what you remember or know about them.",
-            "parameters": {"type": "object", "properties": {}},
+            "description": (
+                "Look up what has been remembered about the user. Call this when the user asks what "
+                "you remember or know about them."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": (
+                            "The specific subject to recall, e.g. 'dentist appointment' for 'recall my "
+                            "dentist appointment'. Omit entirely for a generic request with no specific "
+                            "subject, like 'what do you remember about me' or 'what do you know about me'."
+                        ),
+                    }
+                },
+            },
         },
     },
     {
@@ -249,6 +264,9 @@ def route_and_answer(text: str, history) -> RouteDecision:
     elif tool == "calendar":
         # start_date/end_date (YYYY-MM-DD), resolved by the router LLM itself; both optional.
         payload = json.dumps({"start_date": args.get("start_date"), "end_date": args.get("end_date")})
+    elif tool == "recall":
+        # topic is optional: empty/omitted means a generic "what do you remember" style request.
+        payload = json.dumps({"topic": args.get("topic")})
     else:
         payload = stripped
     return RouteDecision(

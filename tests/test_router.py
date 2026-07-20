@@ -6,6 +6,7 @@ These tests mock the Ollama call and verify route_and_answer() maps responses to
 RouteDecision, and fails safe (mode="local") on any error.
 """
 
+import json
 from unittest.mock import MagicMock, patch
 
 import requests
@@ -49,12 +50,23 @@ def test_remember_tool_call_extracts_fact(mock_post):
 
 
 @patch("router.requests.post")
-def test_recall_tool_call(mock_post):
+def test_recall_tool_call_without_topic(mock_post):
     mock_post.return_value = _mock_response(tool_calls=[{"function": {"name": "recall", "arguments": {}}}])
     decision = route_and_answer("what do you remember about me", [])
     assert decision.mode == "tool"
     assert decision.tool == "recall"
-    assert decision.payload == "what do you remember about me"
+    assert json.loads(decision.payload) == {"topic": None}
+
+
+@patch("router.requests.post")
+def test_recall_tool_call_with_topic(mock_post):
+    mock_post.return_value = _mock_response(
+        tool_calls=[{"function": {"name": "recall", "arguments": {"topic": "dentist appointment"}}}]
+    )
+    decision = route_and_answer("recall my dentist appointment", [])
+    assert decision.mode == "tool"
+    assert decision.tool == "recall"
+    assert json.loads(decision.payload) == {"topic": "dentist appointment"}
 
 
 @patch("router.requests.post")
