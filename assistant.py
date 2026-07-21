@@ -52,11 +52,17 @@ def dispatch(decision, user_text, prompt, history, system_prompt):
             facts = memory_store.recall(topic, n_results=3)
             if not facts:
                 return "I don't have a relevant memory for that.", {}
-            return "Here's what I remember: " + "; ".join(f["text"] for f in facts), {}
-        facts = memory_store.list_all(n_results=10)
-        if not facts:
-            return "I don't have anything remembered yet.", {}
-        return "Here's what I remember: " + "; ".join(f["text"] for f in facts), {}
+        else:
+            facts = memory_store.list_all(n_results=10)
+            if not facts:
+                return "I don't have anything remembered yet.", {}
+        recall_prompt = "Here's what I remember: " + "; ".join(f["text"] for f in facts)
+        recall_summary_prompt = (
+            "You're telling someone what you remember about them, out loud. Summarize the "
+            "remembered facts in a natural, conversational sentence or two — no bullet points, "
+            "no markdown, no raw list formatting. Be concise."
+        )
+        return ask_local(recall_prompt, history, system_prompt=recall_summary_prompt)
 
     if decision.mode == "tool" and decision.tool == "calendar":
         date_args = json.loads(decision.payload) if decision.payload else {}
