@@ -138,6 +138,44 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "capture_camera",
+            "description": (
+                "Capture a still frame from a networked room camera (the Tapo IP camera, e.g. the "
+                "'office' camera) and describe it. Call this when the user refers to a named or fixed "
+                "room camera — 'look through the office camera', 'capture the office camera', 'check "
+                "the room', 'what is on my desk'. This is the fixed IP camera, distinct from 'look', "
+                "which uses the laptop's own webcam; prefer 'look' when the user just says 'take a "
+                "picture' with no room/camera name."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "camera_name": {
+                        "type": "string",
+                        "description": "Name of the camera to capture, e.g. 'office'. Omit for the default camera.",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_room",
+            "description": (
+                "Pan the room camera left/right and tilt it up/down to survey the whole room, "
+                "capturing and describing multiple views, then answer the user's question using "
+                "them. Call this for 'look at the complete room', 'scan the room', 'look around', "
+                "'show me the whole room' — anything asking for more than what a single fixed "
+                "camera view shows. This physically moves the camera; prefer 'capture_camera' for "
+                "a single still shot."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_calendar_events",
             "description": (
                 "Look up events on the user's Google Calendar. Call this when the user asks what's on "
@@ -185,6 +223,8 @@ _TOOL_NAME_MAP = {
     "get_time": "time",
     "look": "look",
     "look_carefully": "look_carefully",
+    "capture_camera": "capture_camera",
+    "scan_room": "scan_room",
     "get_calendar_events": "calendar",
 }
 
@@ -267,6 +307,9 @@ def route_and_answer(text: str, history) -> RouteDecision:
     elif tool == "recall":
         # topic is optional: empty/omitted means a generic "what do you remember" style request.
         payload = json.dumps({"topic": args.get("topic")})
+    elif tool == "capture_camera":
+        # camera_name is optional; None means the default configured camera.
+        payload = json.dumps({"camera_name": args.get("camera_name")})
     else:
         payload = stripped
     return RouteDecision(

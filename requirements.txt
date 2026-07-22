@@ -13,3 +13,4 @@ webrtcvad-wheels
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
+onvif-zeep  # optional: only needed for ONVIF PTZ (camera_ptz.py); not required for RTSP capture

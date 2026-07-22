@@ -57,9 +57,11 @@ def _resize_and_encode(path, max_side, quality=85):
     return base64.b64encode(buffer).decode("utf-8")
 
 
-def describe_local(path, prompt="Describe what you see."):
-    """Returns (text, metrics dict)."""
-    b64 = _resize_and_encode(path, max_side=1280)
+def describe_local(path, prompt="Describe what you see.", max_side=1280):
+    """Returns (text, metrics dict). max_side caps the longest edge sent to the
+    vision model — callers with finer-detail needs (e.g. a stitched panorama)
+    can raise it; the saved file on disk is unaffected either way."""
+    b64 = _resize_and_encode(path, max_side=max_side)
 
     try:
         resp = requests.post(

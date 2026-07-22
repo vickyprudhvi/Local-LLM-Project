@@ -8,6 +8,8 @@ from datetime import datetime
 from rich.console import Console
 
 import calendar_reader
+import camera
+import camera_ptz
 import eyes
 import memory_store
 from brain import ask_claude, ask_local, load_system_prompt
@@ -19,6 +21,11 @@ from voice import speak
 console = Console()
 
 CLAUDE_VISION_RE = re.compile(r"\b(read|text|question|document|screen)\b|ask claude", re.IGNORECASE)
+
+# Raised above eyes.describe_local's normal 1280px default: a stitched room panorama
+# benefits from finer detail, and since scan_room sends one merged image instead of
+# several, the extra resolution doesn't multiply per-frame vision-call cost.
+SCAN_ROOM_VISION_MAX_SIDE = 1920
 
 
 def _use_claude_vision(text):
@@ -96,6 +103,53 @@ def dispatch(decision, user_text, prompt, history, system_prompt):
         except RuntimeError as e:
             return f"Sorry, I couldn't use the camera: {e}", {}
         return eyes.describe_claude(path, user_text, history, system_prompt)
+
+    if decision.mode == "tool" and decision.tool == "capture_camera":
+        camera_name = json.loads(decision.payload).get("camera_name") if decision.payload else None
+        result = camera.capture_camera_frame(camera_name=camera_name or "office")
+        if not result["success"]:
+            return f"Sorry, I couldn't capture the {result['camera_name']} camera: {result['error']}", {}
+        # Vision integration point: the captured frame is handed to the existing
+        # local vision processor. Swap in describe_claude here for accurate reading.
+        return eyes.describe_local(result["image_path"], user_text)
+
+    if decision.mode == "tool" and decision.tool == "scan_room":
+        scan = camera_ptz.scan_room()
+        if not scan["success"]:
+            return f"Sorry, I couldn't scan the room: {scan['error']}", {}
+
+        if scan["panorama_path"]:
+            # Stitched into one image — a single vision call answers directly,
+            # same shape as capture_camera's describe_local call.
+            return eyes.describe_local(scan["panorama_path"], user_text, max_side=SCAN_ROOM_VISION_MAX_SIDE)
+
+        # Stitching failed (e.g. a plus-shaped grid's opposite arms don't overlap
+        # each other) — fall back to describing each frame separately and
+        # synthesizing one summary, the pattern plant_watcher.py already uses.
+        prompt_tokens = 0
+        completion_tokens = 0
+        descriptions = []
+        for image in scan["images"]:
+            desc, metrics = eyes.describe_local(image["image_path"], user_text)
+            descriptions.append(f"{image['position']}: {desc}")
+            prompt_tokens += metrics.get("prompt_tokens") or 0
+            completion_tokens += metrics.get("completion_tokens") or 0
+
+        synth_prompt = (
+            "Here's what was seen across five views of the same room (center, and panned up, "
+            "down, left, and right):\n\n" + "\n".join(descriptions)
+        )
+        synth_system_prompt = (
+            f"The user asked: \"{user_text}\". You're answering them out loud, based on five "
+            "partial camera views (center, up, down, left, right) of the same room. Answer their "
+            "actual question naturally and concisely using whichever view(s) are relevant — don't "
+            "mention the view labels or that there were multiple photos. If what they asked about "
+            "isn't visible in any view, say so plainly."
+        )
+        summary, synth_metrics = ask_local(synth_prompt, history, system_prompt=synth_system_prompt)
+        prompt_tokens += synth_metrics.get("prompt_tokens") or 0
+        completion_tokens += synth_metrics.get("completion_tokens") or 0
+        return summary, {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
 
     if decision.mode == "tool":
         return f"[{decision.tool} isn't wired up yet — coming in a later phase]", {}
