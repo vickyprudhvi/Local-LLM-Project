@@ -251,10 +251,13 @@ def test_echo_and_calculate_still_work(wire, monkeypatch):
 
 def test_internet_tools_disabled_excludes_from_schemas(monkeypatch):
     monkeypatch.setenv("INTERNET_TOOLS_ENABLED", "false")
+    # Pin Phase 2B flags too so the assertion is independent of the developer's .env.
+    monkeypatch.setenv("REPOSITORY_CLONE_ENABLED", "false")
+    monkeypatch.setenv("REPOSITORY_INSPECTION_ENABLED", "false")
     reg = default_registry()
     names = [d.name for d in reg.enabled_definitions()]
     assert names == ["math.calculate", "system.echo"]
-    assert not any(n.startswith(("browser.", "github.")) for n in names)
+    assert not any(n.startswith(("browser.", "github.", "repo.")) for n in names)
 
 
 def test_internet_read_disabled_blocks_execution(monkeypatch):

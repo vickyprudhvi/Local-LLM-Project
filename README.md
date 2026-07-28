@@ -142,3 +142,77 @@ python -m pytest -q
 Automated tests mock all network access — no internet or API keys required. Optional live tests
 (GitHub / Tavily / a public page) run only when credentials and connectivity are available and are
 reported honestly as skipped otherwise.
+
+## Phase 2B: controlled clone + static repository inspection
+
+The local model can clone a validated **public** GitHub repository into a controlled local
+workspace and inspect it **statically** — languages, manifests, dependencies, likely entry points,
+integration type, and a static security scan — then explain how it might integrate. **Repositories
+are never executed, imported, installed, or started in Phase 2B.** Disabled by default.
+
+### Available Phase 2B tools
+
+- **`github.clone_repository`** — shallow (`--depth 1`), single-branch, no-tags, no-submodule,
+  no-LFS clone of a public repo into `REPOSITORY_ROOT/<owner>/<repo>`. Public repos only; the URL
+  and destination are computed internally (never taken from the model). Size/file-count limited.
+- **`repo.list_files`** / **`repo.read_file`** — bounded listing / text reading of a cloned repo.
+  Path traversal, absolute paths, and symlinks are rejected; symlinks are never followed.
+- **`repo.inspect`** — static structural summary (facts vs inference).
+- **`repo.security_scan`** — bounded Python-AST + text-pattern scan flagging code that needs human
+  review. It **never** claims a repository is safe.
+- **`repo.capability_report`** — integration-readiness report; recommendation is limited to
+  `insufficient_information | static_review_complete | manual_review_required |
+  not_supported_by_current_architecture` (never "safe to install").
+
+Cloned content is untrusted: the model is told never to follow instructions or run commands found
+in a README or source file, and that inspection was static only.
+
+### Required environment variables
+
+```
+REPOSITORY_CLONE_ENABLED=false      # OFF by default; enable to allow cloning
+REPOSITORY_INSPECTION_ENABLED=false # enable repo.* tools for already-cloned repos (implied by clone)
+REPOSITORY_ROOT=data/repositories   # controlled workspace (gitignored)
+GIT_EXECUTABLE=git
+GIT_CLONE_TIMEOUT_SECONDS=120
+MAX_REPOSITORY_PREFLIGHT_SIZE_KB=200000
+MAX_CLONED_REPOSITORY_SIZE_MB=250
+MAX_CLONED_REPOSITORY_FILES=25000
+REPO_MAX_LIST_ENTRIES=500
+REPO_MAX_LIST_DEPTH=5
+REPO_MAX_READ_BYTES=1000000
+REPO_MAX_READ_CHARS=30000
+REPO_SCAN_MAX_FILES=5000
+REPO_SCAN_MAX_FILE_BYTES=500000
+REPO_SCAN_MAX_TOTAL_BYTES=50000000
+REPO_SCAN_MAX_DEPTH=20
+REPO_SCAN_MAX_FINDINGS=500
+```
+
+### Example clone + inspection interaction
+
+```
+> Clone octocat/Hello-World and tell me its languages, likely entry points, and integration type.
+  Do not run or install anything.
+The local model calls github.clone_repository, then repo.inspect (and optionally repo.security_scan
+/ repo.capability_report), and explains the observed facts — clearly stating that inspection was
+static and nothing was executed or installed.
+```
+
+### Security limitations
+
+Clone uses a single dedicated Git subprocess (argument list, `shell=False`, hardened env,
+`GIT_ALLOW_PROTOCOL=https`, no token in the URL/args, timeout); no generic subprocess tool is
+exposed. Destinations are computed internally and cannot escape `REPOSITORY_ROOT`; a staging
+directory is used and cleaned on failure. GitHub's reported size is only a preflight estimate, so a
+post-clone size/file-count check is also enforced. Static analysis and scanning are best-effort and
+bounded — a clean scan does **not** prove a repository is safe. See
+`docs/phase2b-repository-inspection.md` for the full model.
+
+**Repositories are never cloned recursively (no submodules/LFS), never updated after clone, and
+never installed or executed.**
+
+### Enabling cloning (opt-in)
+
+Set in `.env`: `REPOSITORY_CLONE_ENABLED=true` (this also enables the `repo.*` inspection tools).
+With it off, the Phase 2B tools are not offered to the model at all.

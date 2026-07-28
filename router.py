@@ -47,6 +47,9 @@ ROUTER_SYSTEM_PROMPT_TEMPLATE = (
     "answer_locally for an ordinary conversational turn that doesn't match any other tool. If the "
     "user explicitly says to use Claude or use the local model, respect that override regardless of "
     "topic. Always call a tool — never answer directly in this response.\n\n"
+    "The local model has its own tools for web search, fetching web pages, GitHub search/inspection, "
+    "cloning and statically inspecting public repositories, and calculation. Route those requests to "
+    "answer_locally — do not escalate them to Claude, which cannot reach those tools.\n\n"
     "Today's date is {today} ({weekday}). Use it to resolve any relative dates a tool needs."
 )
 
@@ -60,7 +63,15 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "answer_locally",
-            "description": "Handle an ordinary conversational turn — call this when no other tool applies and escalation to Claude isn't needed.",
+            "description": (
+                "Handle an ordinary conversational turn, AND any request the local model's own tools can "
+                "serve: searching the web, fetching/reading a web page, searching or inspecting public "
+                "GitHub repositories, reading GitHub files, cloning a public GitHub repository into the "
+                "local workspace, statically inspecting or security-scanning a cloned repository, and "
+                "arithmetic/calculation. Call this whenever the user asks to search online, look something "
+                "up on the web, find/inspect/clone a GitHub repo, or run a calculation — the local model "
+                "runs those tools itself. Use this when no other specific tool applies and Claude isn't needed."
+            ),
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -216,7 +227,10 @@ TOOLS = [
             "description": (
                 "Escalate to Claude. Always call this for money, investing, tax, mortgages, insurance, "
                 "medical/health, legal, resume/salary/career questions, or anything requiring careful/deep "
-                "reasoning or high accuracy — even if you think you know the answer, do not answer these yourself."
+                "reasoning or high accuracy — even if you think you know the answer, do not answer these yourself. "
+                "Do NOT escalate requests the local tools already handle — web search, fetching web pages, "
+                "GitHub search/inspection, cloning or statically inspecting repositories, and calculations "
+                "route to answer_locally even though they are technical (Claude cannot reach those tools)."
             ),
             "parameters": {"type": "object", "properties": {}},
         },

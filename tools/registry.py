@@ -62,14 +62,14 @@ class ToolRegistry:
         return [d.to_ollama_schema() for d in self.enabled_definitions()]
 
 
-def default_registry(include_internet=None) -> ToolRegistry:
+def default_registry(include_internet=None, include_clone=None, include_repo=None) -> ToolRegistry:
     """A fresh registry with the built-in tools registered.
 
-    Phase 1 tools are always registered. The 7 Phase 2A internet/GitHub tools are
-    registered when internet tools are enabled (override with include_internet for
-    tests). All GitHub tools share one GitHubClient; browser.search shares one
-    search provider — sessions are created here and owned by the registry, not as
-    module-level globals.
+    Phase 1 tools are always registered. Phase 2A internet/GitHub tools when internet
+    tools are enabled. Phase 2B: github.clone_repository when internet + cloning are
+    enabled; the 5 repo.* inspection tools when inspection (or cloning) is enabled.
+    Overrides (include_*) are for tests. Shared GitHubClient / GitRunner are created
+    here and owned by the registry — not module-level globals.
     """
     reg = ToolRegistry()
     reg.register(EchoTool())
@@ -77,6 +77,12 @@ def default_registry(include_internet=None) -> ToolRegistry:
 
     if include_internet is None:
         include_internet = config.internet_tools_enabled()
+    if include_clone is None:
+        include_clone = config.repository_clone_enabled()
+    if include_repo is None:
+        include_repo = config.repository_inspection_enabled()
+
+    github_client = None
     if include_internet:
         # Imported lazily so Phase 1-only environments never import bs4/network code.
         from tools.browser import FetchPageTool, SearchTool
@@ -88,4 +94,19 @@ def default_registry(include_internet=None) -> ToolRegistry:
         github_client = GitHubClient()
         for tool_cls in ALL_GITHUB_TOOL_CLASSES:
             reg.register(tool_cls(client=github_client))
+
+    # Phase 2B: cloning needs internet (metadata preflight) + the clone capability.
+    if include_internet and include_clone:
+        from tools.git_runner import GitRunner
+        from tools.repo_clone import CloneRepositoryTool
+        if github_client is None:
+            from tools.github_client import GitHubClient
+            github_client = GitHubClient()
+        reg.register(CloneRepositoryTool(client=github_client, runner=GitRunner()))
+
+    # Phase 2B: static inspection of already-cloned repositories.
+    if include_repo:
+        from tools.repo_tools import ALL_REPO_TOOL_CLASSES
+        for tool_cls in ALL_REPO_TOOL_CLASSES:
+            reg.register(tool_cls())
     return reg
