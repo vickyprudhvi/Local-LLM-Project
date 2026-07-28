@@ -140,12 +140,15 @@ TOOLS = [
         "function": {
             "name": "capture_camera",
             "description": (
-                "Capture a still frame from a networked room camera (the Tapo IP camera, e.g. the "
-                "'office' camera) and describe it. Call this when the user refers to a named or fixed "
-                "room camera — 'look through the office camera', 'capture the office camera', 'check "
-                "the room', 'what is on my desk'. This is the fixed IP camera, distinct from 'look', "
-                "which uses the laptop's own webcam; prefer 'look' when the user just says 'take a "
-                "picture' with no room/camera name."
+                "Capture a SINGLE still frame from the networked room camera (the Tapo IP camera, e.g. "
+                "the 'office' camera) at its CURRENT aim, without moving it, and describe what is already "
+                "in view. Use only when the answer is about the scene the camera is already pointed at — "
+                "'look through the office camera', 'capture the office camera', 'what is on my desk right "
+                "now', 'what does the room camera see'. Do NOT use this to find or verify a specific "
+                "object or feature that may be outside the current frame (e.g. whether a door or window "
+                "is open, whether someone is in the room, where an item is) — use 'scan_room' for that. "
+                "This is the fixed IP camera, distinct from 'look', which uses the laptop's own webcam; "
+                "prefer 'look' when the user just says 'take a picture' with no room/camera name."
             ),
             "parameters": {
                 "type": "object",
@@ -163,12 +166,15 @@ TOOLS = [
         "function": {
             "name": "scan_room",
             "description": (
-                "Pan the room camera left/right and tilt it up/down to survey the whole room, "
-                "capturing and describing multiple views, then answer the user's question using "
-                "them. Call this for 'look at the complete room', 'scan the room', 'look around', "
-                "'show me the whole room' — anything asking for more than what a single fixed "
-                "camera view shows. This physically moves the camera; prefer 'capture_camera' for "
-                "a single still shot."
+                "Pan the room camera left/right and tilt it up/down to survey the room across multiple "
+                "views, then answer the user's question using them. Call this WHENEVER the answer depends "
+                "on finding or verifying a specific object or feature that may not be in the camera's "
+                "current frame — 'is the door open or closed', 'is the window shut', 'is anyone in the "
+                "room', 'where is my bag', 'is the light on' — as well as explicit survey requests like "
+                "'look at the complete room', 'scan the room', 'look around', 'show me the whole room'. "
+                "In short: if the target might be off-frame, scan instead of a single capture. This "
+                "physically moves the camera and is slower, so prefer 'capture_camera' only when the user "
+                "clearly wants just the current fixed view."
             ),
             "parameters": {"type": "object", "properties": {}},
         },

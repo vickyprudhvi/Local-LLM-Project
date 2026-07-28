@@ -1,4 +1,5 @@
 requests
+beautifulsoup4  # Phase 2A: HTML text extraction for browser.fetch_page (uses stdlib parser)
 anthropic
 chromadb
 faster-whisper
