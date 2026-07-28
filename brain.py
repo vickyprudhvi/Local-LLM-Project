@@ -11,7 +11,7 @@ from rich.console import Console
 load_dotenv()
 console = Console()
 
-OLLAMA_URL = "http://localhost:11434"
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 LOCAL_MODEL = os.environ["LOCAL_MODEL"]
 CLAUDE_MODEL = os.environ["CLAUDE_MODEL"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
@@ -30,45 +30,111 @@ def load_system_prompt(path="system_prompt.txt"):
 
 
 def trim_history(history, turns):
-    """Keep the last `turns` user/assistant exchanges (2 messages each)."""
+    """Keep the last `turns` user/assistant exchanges (2 messages each).
+
+    Assumes plain alternating user/assistant history (no tool messages). Used by
+    the router and Claude paths, which never carry tool-call/tool-result messages.
+    """
     max_messages = turns * 2
     if len(history) <= max_messages:
         return history
     return history[-max_messages:]
 
 
-def ask_local(prompt, history, system_prompt):
-    """POST to Ollama /api/chat. Returns (text, metrics dict)."""
-    trimmed = trim_history(history, 12)
-    messages = [{"role": "system", "content": system_prompt}]
-    messages.extend(trimmed)
-    messages.append({"role": "user", "content": prompt})
+def trim_history_tool_aware(history, turns):
+    """Trim history to the last `turns` logical turns without orphaning tool messages.
+
+    A logical turn begins at a `role == "user"` message and spans every following
+    message (assistant tool-call messages, `role == "tool"` results, and the final
+    assistant answer) up to — but not including — the next user message. Whole
+    turns are dropped from the front, so a retained `tool` result is never split
+    from the assistant `tool_calls` message that produced it, and message ordering
+    is preserved. Degrades to the same behavior as `trim_history` for plain
+    user/assistant history.
+    """
+    if not history:
+        return history
+
+    # Group messages into logical turns by user-message boundaries. Any leading
+    # non-user messages (unusual) form their own initial group so nothing is lost.
+    turns_list = []
+    current = []
+    for msg in history:
+        if msg.get("role") == "user" and current:
+            turns_list.append(current)
+            current = [msg]
+        else:
+            current.append(msg)
+    if current:
+        turns_list.append(current)
+
+    if len(turns_list) <= turns:
+        return history
+
+    kept = turns_list[-turns:]
+    flattened = []
+    for group in kept:
+        flattened.extend(group)
+    return flattened
+
+
+def ask_local_raw(messages, tools=None, timeout=120):
+    """The single Ollama /api/chat request builder.
+
+    `messages` is the fully-assembled message list (system + history + user, and,
+    inside the tool loop, assistant tool-call and tool-result messages). `tools`,
+    when truthy, is a list of Ollama tool schemas; it is omitted entirely otherwise.
+
+    Returns the COMPLETE assistant message (including any tool_calls) plus metrics:
+        {"message": {...}, "metrics": {...}, "ok": bool}
+    On a network error, returns ok=False with the same fallback content string the
+    original ask_local used, so callers degrade gracefully.
+    """
+    payload = {
+        "model": LOCAL_MODEL,
+        "messages": messages,
+        "stream": False,
+        "keep_alive": "10m",
+    }
+    if tools:
+        payload["tools"] = tools
 
     try:
-        resp = requests.post(
-            f"{OLLAMA_URL}/api/chat",
-            json={
-                "model": LOCAL_MODEL,
-                "messages": messages,
-                "stream": False,
-                "keep_alive": "10m",
-            },
-            timeout=120,
-        )
+        resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=timeout)
         resp.raise_for_status()
     except requests.exceptions.RequestException as e:
         console.print(f"[red]Local model call failed: {e}[/red]")
-        return "Sorry, I couldn't reach the local model just now.", {}
+        return {
+            "message": {"role": "assistant", "content": "Sorry, I couldn't reach the local model just now."},
+            "metrics": {},
+            "ok": False,
+        }
 
     data = resp.json()
-    text = data.get("message", {}).get("content", "").strip()
+    message = data.get("message", {}) or {}
     metrics = {
         "prompt_tokens": data.get("prompt_eval_count"),
         "completion_tokens": data.get("eval_count"),
         "eval_duration": data.get("eval_duration"),
     }
     console.print(f"[dim]local metrics: {metrics}[/dim]")
-    return text, metrics
+    return {"message": message, "metrics": metrics, "ok": True}
+
+
+def ask_local(prompt, history, system_prompt):
+    """POST to Ollama /api/chat. Returns (text, metrics dict).
+
+    Thin, backward-compatible wrapper over ask_local_raw() — assembles the standard
+    system + trimmed-history + user message list and unpacks the assistant text.
+    """
+    trimmed = trim_history(history, 12)
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(trimmed)
+    messages.append({"role": "user", "content": prompt})
+
+    raw = ask_local_raw(messages)
+    text = (raw["message"].get("content") or "").strip()
+    return text, raw["metrics"]
 
 
 def ask_claude(prompt, history, system_prompt, image_path=None):

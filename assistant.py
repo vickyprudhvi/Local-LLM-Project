@@ -12,6 +12,7 @@ import camera
 import camera_ptz
 import eyes
 import memory_store
+import tool_loop
 from brain import ask_claude, ask_local, load_system_prompt
 from ears import listen_push_to_talk
 from interaction_log import log_turn
@@ -157,8 +158,11 @@ def dispatch(decision, user_text, prompt, history, system_prompt):
     if decision.mode == "claude":
         return ask_claude(prompt, history, system_prompt)
 
-    # mode == "local" — routing only decided; generate the answer separately
-    return ask_local(prompt, history, system_prompt)
+    # mode == "local" — routing only decided; generate the answer separately.
+    # The local tool loop lets the model call safe Phase 1 tools (echo, calculate)
+    # and then writes the final answer itself. With TOOL_CALLING_ENABLED=false it
+    # falls back to the original single-shot ask_local behavior.
+    return tool_loop.run_local_tool_loop(prompt, history, system_prompt)
 
 
 def get_user_text(mode):
