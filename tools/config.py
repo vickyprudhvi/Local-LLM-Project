@@ -110,3 +110,73 @@ def github_max_directory_entries():
 
 def github_max_releases():
     return _int("GITHUB_MAX_RELEASES", 10)
+
+
+# ---- Phase 2B: clone + static repository inspection ----
+def repository_clone_enabled():
+    return _bool("REPOSITORY_CLONE_ENABLED", False)
+
+
+def repository_inspection_enabled():
+    # Enabled implicitly whenever cloning is on, or explicitly via its own flag.
+    return _bool("REPOSITORY_INSPECTION_ENABLED", False) or repository_clone_enabled()
+
+
+def repository_root():
+    return _str("REPOSITORY_ROOT", "data/repositories")
+
+
+def git_executable():
+    return _str("GIT_EXECUTABLE", "git")
+
+
+def git_clone_timeout():
+    return _int("GIT_CLONE_TIMEOUT_SECONDS", 120)
+
+
+def max_repository_preflight_size_kb():
+    return _int("MAX_REPOSITORY_PREFLIGHT_SIZE_KB", 200_000)
+
+
+def max_cloned_repository_size_mb():
+    return _int("MAX_CLONED_REPOSITORY_SIZE_MB", 250)
+
+
+def max_cloned_repository_files():
+    return _int("MAX_CLONED_REPOSITORY_FILES", 25_000)
+
+
+def repo_max_list_entries():
+    return _int("REPO_MAX_LIST_ENTRIES", 500)
+
+
+def repo_max_list_depth():
+    return _int("REPO_MAX_LIST_DEPTH", 5)
+
+
+def repo_max_read_bytes():
+    return _int("REPO_MAX_READ_BYTES", 1_000_000)
+
+
+def repo_max_read_chars():
+    return _int("REPO_MAX_READ_CHARS", 30_000)
+
+
+def repo_scan_max_files():
+    return _int("REPO_SCAN_MAX_FILES", 5_000)
+
+
+def repo_scan_max_file_bytes():
+    return _int("REPO_SCAN_MAX_FILE_BYTES", 500_000)
+
+
+def repo_scan_max_total_bytes():
+    return _int("REPO_SCAN_MAX_TOTAL_BYTES", 50_000_000)
+
+
+def repo_scan_max_depth():
+    return _int("REPO_SCAN_MAX_DEPTH", 20)
+
+
+def repo_scan_max_findings():
+    return _int("REPO_SCAN_MAX_FINDINGS", 500)

@@ -21,6 +21,8 @@ from tools.models import (
     INTERNET_DISABLED,
     INVALID_ARGUMENTS,
     INVALID_TOOL_OUTPUT,
+    REPOSITORY_CLONE_DISABLED,
+    REPOSITORY_INSPECTION_DISABLED,
     TOOL_DISABLED,
     TOOL_EXECUTION_ERROR,
     TOOL_TIMEOUT,
@@ -28,6 +30,15 @@ from tools.models import (
     ToolCall,
     ToolResult,
 )
+
+# Named capability -> (config check, controlled error code, message shown to the LLM).
+# Kept tiny and explicit; not a general permission platform.
+_CAPABILITY_GATES = {
+    "repository.clone": (config.repository_clone_enabled, REPOSITORY_CLONE_DISABLED,
+                         "Repository cloning is disabled."),
+    "repository.read": (config.repository_inspection_enabled, REPOSITORY_INSPECTION_DISABLED,
+                        "Repository inspection is disabled."),
+}
 
 
 class ToolExecutor:
@@ -58,6 +69,13 @@ class ToolExecutor:
             log_tool_event(name, call.call_id, step, "rejected", elapsed_ms(), INTERNET_DISABLED)
             return ToolResult.fail(name, call.call_id, INTERNET_DISABLED,
                                    "Read-only internet access is disabled.", elapsed_ms())
+
+        # 2c. Named capability gates (Phase 2B: repository.clone / repository.read).
+        for capability in getattr(tool, "required_capabilities", ()):
+            gate = _CAPABILITY_GATES.get(capability)
+            if gate is not None and not gate[0]():
+                log_tool_event(name, call.call_id, step, "rejected", elapsed_ms(), gate[1])
+                return ToolResult.fail(name, call.call_id, gate[1], gate[2], elapsed_ms())
 
         # 3. Validate arguments (controlled).
         try:

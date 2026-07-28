@@ -3,6 +3,7 @@ memory/
 snapshots/
 artifacts/
 logs/
+data/
 .env
 __pycache__/
 *.pyc

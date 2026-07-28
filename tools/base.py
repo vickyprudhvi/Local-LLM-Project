@@ -46,6 +46,10 @@ class BaseTool(ABC):
     # them with INTERNET_DISABLED when INTERNET_READ_ENABLED is off. Phase 1 tools
     # keep the default (False) and are unaffected.
     requires_internet: bool = False
+    # Phase 2B: named capabilities gated at execution time (e.g. "repository.clone",
+    # "repository.read"). The executor blocks the tool with the mapped controlled
+    # error when the capability's config flag is off. Empty for Phase 1/2A tools.
+    required_capabilities: tuple = ()
 
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
