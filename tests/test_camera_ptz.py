@@ -267,10 +267,11 @@ def test_router_selects_scan_room(mock_post):
 
 # --- dispatch wiring: panorama path (single vision call) ---
 
-@patch("assistant.eyes.describe_local")
-@patch("assistant.camera_ptz.scan_room")
+@patch("tool_dispatch.eyes.describe_local")
+@patch("camera_ptz.scan_room")
 def test_dispatch_scan_room_uses_panorama_when_available(mock_scan, mock_describe):
     import assistant
+    from tools import camera_tools
     from router import RouteDecision
 
     mock_scan.return_value = {
@@ -286,7 +287,7 @@ def test_dispatch_scan_room_uses_panorama_when_available(mock_scan, mock_describ
 
     mock_describe.assert_called_once_with(
         "artifacts/camera/office_panorama_x.jpg", "what's on the bookshelf",
-        max_side=assistant.SCAN_ROOM_VISION_MAX_SIDE,
+        max_side=camera_tools.SCAN_ROOM_VISION_MAX_SIDE,
     )
     assert reply == "There's a desk with a laptop and a bookshelf behind it."
     assert metrics == {"prompt_tokens": 20, "completion_tokens": 15}
@@ -294,9 +295,9 @@ def test_dispatch_scan_room_uses_panorama_when_available(mock_scan, mock_describ
 
 # --- dispatch wiring: fallback path (stitching failed -> per-image + synthesize) ---
 
-@patch("assistant.ask_local")
-@patch("assistant.eyes.describe_local")
-@patch("assistant.camera_ptz.scan_room")
+@patch("tool_dispatch.ask_local")
+@patch("tool_dispatch.eyes.describe_local")
+@patch("camera_ptz.scan_room")
 def test_dispatch_scan_room_falls_back_when_panorama_missing(mock_scan, mock_describe, mock_ask_local):
     import assistant
     from router import RouteDecision
@@ -338,7 +339,7 @@ def test_dispatch_scan_room_falls_back_when_panorama_missing(mock_scan, mock_des
     assert metrics == {"prompt_tokens": 7, "completion_tokens": 8}
 
 
-@patch("assistant.camera_ptz.scan_room")
+@patch("camera_ptz.scan_room")
 def test_dispatch_scan_room_failure_is_safe(mock_scan):
     import assistant
     from router import RouteDecision
