@@ -267,9 +267,10 @@ def test_router_selects_scan_room(mock_post):
 
 # --- dispatch wiring: panorama path (single vision call) ---
 
+@patch("confirmation.confirm_action", return_value=True)
 @patch("tool_dispatch.eyes.describe_local")
 @patch("camera_ptz.scan_room")
-def test_dispatch_scan_room_uses_panorama_when_available(mock_scan, mock_describe):
+def test_dispatch_scan_room_uses_panorama_when_available(mock_scan, mock_describe, _approve):
     import assistant
     from tools import camera_tools
     from router import RouteDecision
@@ -295,10 +296,11 @@ def test_dispatch_scan_room_uses_panorama_when_available(mock_scan, mock_describ
 
 # --- dispatch wiring: fallback path (stitching failed -> per-image + synthesize) ---
 
+@patch("confirmation.confirm_action", return_value=True)
 @patch("tool_dispatch.ask_local")
 @patch("tool_dispatch.eyes.describe_local")
 @patch("camera_ptz.scan_room")
-def test_dispatch_scan_room_falls_back_when_panorama_missing(mock_scan, mock_describe, mock_ask_local):
+def test_dispatch_scan_room_falls_back_when_panorama_missing(mock_scan, mock_describe, mock_ask_local, _approve):
     import assistant
     from router import RouteDecision
 
@@ -339,8 +341,9 @@ def test_dispatch_scan_room_falls_back_when_panorama_missing(mock_scan, mock_des
     assert metrics == {"prompt_tokens": 7, "completion_tokens": 8}
 
 
+@patch("confirmation.confirm_action", return_value=True)
 @patch("camera_ptz.scan_room")
-def test_dispatch_scan_room_failure_is_safe(mock_scan):
+def test_dispatch_scan_room_failure_is_safe(mock_scan, _approve):
     import assistant
     from router import RouteDecision
 

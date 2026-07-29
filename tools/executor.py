@@ -23,12 +23,20 @@ from tools.models import (
     INVALID_TOOL_OUTPUT,
     REPOSITORY_CLONE_DISABLED,
     REPOSITORY_INSPECTION_DISABLED,
+    TOOL_CONFIRMATION_DECLINED,
+    TOOL_CONFIRMATION_MISMATCH,
+    TOOL_CONFIRMATION_REQUIRED,
     TOOL_DISABLED,
     TOOL_EXECUTION_ERROR,
+    TOOL_PERMISSION_DENIED,
+    TOOL_PERMISSION_INVALID,
     TOOL_TIMEOUT,
     UNKNOWN_TOOL,
     ToolCall,
+    ToolConfirmation,
+    ToolPermission,
     ToolResult,
+    hash_arguments,
 )
 
 # Named capability -> (config check, controlled error code, message shown to the LLM).
@@ -45,7 +53,7 @@ class ToolExecutor:
     def __init__(self, registry):
         self.registry = registry
 
-    def execute(self, call: ToolCall, step: int = 0) -> ToolResult:
+    def execute(self, call: ToolCall, step: int = 0, confirmation: ToolConfirmation = None) -> ToolResult:
         name = call.tool_name
         started = time.perf_counter()
 
@@ -77,6 +85,21 @@ class ToolExecutor:
                 log_tool_event(name, call.call_id, step, "rejected", elapsed_ms(), gate[1])
                 return ToolResult.fail(name, call.call_id, gate[1], gate[2], elapsed_ms())
 
+        # 2d. Permission classification (Phase C) — centralized, fail closed. A tool
+        # cannot bypass this: enforcement lives here, not in the tool implementation.
+        raw_permission = getattr(tool, "permission", None)
+        permission = ToolPermission.coerce(raw_permission)
+        if permission is ToolPermission.DENIED:
+            explicit = isinstance(raw_permission, ToolPermission) or (
+                isinstance(raw_permission, str) and raw_permission.strip().lower() == "denied"
+            )
+            code = TOOL_PERMISSION_DENIED if explicit else TOOL_PERMISSION_INVALID
+            message = ("This tool is not permitted to run." if explicit
+                       else "This tool has an invalid or missing permission and cannot run.")
+            log_tool_event(name, call.call_id, step, "rejected", elapsed_ms(), code,
+                           extra={"permission": permission.value, "execution_allowed": False})
+            return ToolResult.fail(name, call.call_id, code, message, elapsed_ms())
+
         # 3. Validate arguments (controlled).
         try:
             arguments = tool.validate_arguments(call.arguments)
@@ -89,8 +112,47 @@ class ToolExecutor:
             log_tool_event(name, call.call_id, step, "rejected", elapsed_ms(), e.code)
             return ToolResult.fail(name, call.call_id, e.code, e.message, elapsed_ms())
 
+        # 3b. Write confirmation gate (Phase C). The executor only DECIDES and
+        # VALIDATES confirmation; collecting the user's yes/no is the orchestration
+        # layer's job (confirmation.py), so direct callers cannot accidentally run a
+        # write tool and tests never block on input().
+        if permission is ToolPermission.WRITE:
+            try:
+                summary = tool.confirmation_summary(call.arguments)
+            except Exception:  # noqa: BLE001 — a summary must never crash enforcement
+                summary = f"Run '{name}' with the provided arguments."
+            args_hash = hash_arguments(call.arguments)
+            if confirmation is None:
+                log_tool_event(name, call.call_id, step, "rejected", elapsed_ms(),
+                               TOOL_CONFIRMATION_REQUIRED,
+                               extra={"permission": "write", "confirmation_required": True,
+                                      "execution_allowed": False})
+                return ToolResult.fail(
+                    name, call.call_id, TOOL_CONFIRMATION_REQUIRED,
+                    "This tool requires user confirmation.", elapsed_ms(),
+                    details={"action_summary": summary},
+                )
+            if not confirmation.approved:
+                log_tool_event(name, call.call_id, step, "rejected", elapsed_ms(),
+                               TOOL_CONFIRMATION_DECLINED,
+                               extra={"permission": "write", "confirmation_required": True,
+                                      "confirmation_result": "declined", "execution_allowed": False})
+                return ToolResult.fail(name, call.call_id, TOOL_CONFIRMATION_DECLINED,
+                                       "The user declined the tool action.", elapsed_ms())
+            if confirmation.tool_name != name or confirmation.arguments_hash != args_hash:
+                log_tool_event(name, call.call_id, step, "rejected", elapsed_ms(),
+                               TOOL_CONFIRMATION_MISMATCH,
+                               extra={"permission": "write", "confirmation_required": True,
+                                      "confirmation_result": "mismatch", "execution_allowed": False})
+                return ToolResult.fail(name, call.call_id, TOOL_CONFIRMATION_MISMATCH,
+                                       "The confirmation did not match this pending action.", elapsed_ms())
+
         # 4-6. Execute with a hard timeout in a worker thread.
-        log_tool_event(name, call.call_id, step, "start")
+        log_tool_event(name, call.call_id, step, "start",
+                       extra={"permission": permission.value,
+                              "confirmation_required": permission is ToolPermission.WRITE,
+                              "confirmation_result": ("approved" if permission is ToolPermission.WRITE else None),
+                              "execution_allowed": True})
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(tool.execute, arguments)
             try:

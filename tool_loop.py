@@ -18,6 +18,7 @@ import uuid
 
 from rich.console import Console
 
+import confirmation
 import tools.config as config
 from brain import ask_local_raw, trim_history_tool_aware
 from interaction_log import log_tool_selection
@@ -239,7 +240,10 @@ def run_local_tool_loop(prompt, history, system_prompt):
                     "The tool call was malformed and could not be executed.")))
                 continue
 
-            result = EXECUTOR.execute(call, step=steps_used)
+            # Write-class tools (e.g. github.clone_repository) are gated: the
+            # executor requires confirmation, collected here before execution. Read
+            # tools run in a single pass. Enforcement stays centralized in the executor.
+            result = confirmation.resolve_with_confirmation(EXECUTOR, call, step=steps_used)
             messages.append(_tool_result_message(result))
             status = "ok" if result.success else f"failed ({result.error.code})"
             console.print(f"[dim]local llm tool result: {name} -> {status}[/dim]")

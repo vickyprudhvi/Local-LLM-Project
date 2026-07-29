@@ -10,6 +10,7 @@ selected by the router, never offered to the local tool-calling loop.
 
 import memory_store
 from tools.base import BaseTool, ToolValidationError
+from tools.models import ToolPermission
 
 # Moved verbatim from the former assistant.dispatch recall branch.
 RECALL_SUMMARY_PROMPT = (
@@ -29,6 +30,11 @@ class RememberTool(BaseTool):
     }
     timeout_seconds = 30.0
     llm_callable = False
+    permission = ToolPermission.WRITE  # persists a new fact to memory (ChromaDB)
+
+    def confirmation_summary(self, arguments: dict) -> str:
+        fact = arguments.get("fact", "")
+        return f'Store the following memory:\n\n"{fact}"'
 
     def validate_arguments(self, arguments: dict) -> dict:
         arguments = super().validate_arguments(arguments)
@@ -53,6 +59,7 @@ class RecallTool(BaseTool):
     }
     timeout_seconds = 30.0
     llm_callable = False
+    permission = ToolPermission.READ  # reads stored memory; no modification
 
     def execute(self, arguments: dict) -> dict:
         topic = arguments.get("topic")

@@ -53,8 +53,9 @@ def test_time_routes_through_executor_to_a_spoken_reply():
     assert metrics == {}
 
 
+@patch("confirmation.confirm_action", return_value=True)
 @patch("memory_store.remember")
-def test_remember_routes_through_executor_and_confirms(mock_remember):
+def test_remember_routes_through_executor_and_confirms(mock_remember, _approve):
     mock_remember.return_value = "fact-id-123"
     decision = RouteDecision(mode="tool", tool="remember", payload="the wifi code is swordfish")
     reply, metrics = dispatch(decision, "remember the wifi code is swordfish",
@@ -64,8 +65,9 @@ def test_remember_routes_through_executor_and_confirms(mock_remember):
     assert metrics == {}
 
 
+@patch("confirmation.confirm_action", return_value=True)
 @patch("memory_store.remember")
-def test_remember_save_failure_is_reported(mock_remember):
+def test_remember_save_failure_is_reported(mock_remember, _approve):
     mock_remember.return_value = None
     decision = RouteDecision(mode="tool", tool="remember", payload="something")
     reply, _ = dispatch(decision, "remember something", "remember something", [], "sys")
@@ -77,3 +79,38 @@ def test_unknown_routed_tool_falls_back_to_placeholder():
     reply, metrics = dispatch(decision, "teleport me", "teleport me", [], "sys")
     assert "isn't wired up yet" in reply
     assert metrics == {}
+
+
+# ---- Phase C: assistant-level confirmation integration (write route) ----
+
+def test_assistant_write_shows_deterministic_summary_and_executes_on_approval(monkeypatch):
+    import confirmation
+    seen = []
+    monkeypatch.setattr(confirmation, "confirm_action", lambda s: (seen.append(s), True)[1])
+    decision = RouteDecision(mode="tool", tool="remember", payload="PostgreSQL is my database")
+    with patch("memory_store.remember", return_value="id") as mock_remember:
+        reply, _ = dispatch(decision, "remember that", "remember that", [], "sys")
+    # The confirmation summary is deterministic app text built from the fact.
+    assert seen and "PostgreSQL is my database" in seen[0]
+    mock_remember.assert_called_once_with("PostgreSQL is my database")
+    assert reply == "Got it, I'll remember: PostgreSQL is my database"
+
+
+def test_assistant_write_declined_does_not_execute_and_reports_cancellation(monkeypatch):
+    import confirmation
+    monkeypatch.setattr(confirmation, "confirm_action", lambda s: False)
+    decision = RouteDecision(mode="tool", tool="remember", payload="secret plan")
+    with patch("memory_store.remember") as mock_remember:
+        reply, _ = dispatch(decision, "remember that", "remember that", [], "sys")
+    mock_remember.assert_not_called()
+    assert "cancel" in reply.lower()
+
+
+def test_assistant_read_tool_executes_without_confirmation(monkeypatch):
+    import confirmation
+    # If the confirmer were ever consulted for a read tool, fail loudly.
+    monkeypatch.setattr(confirmation, "confirm_action",
+                        lambda s: (_ for _ in ()).throw(AssertionError("read tool asked for confirmation")))
+    decision = RouteDecision(mode="tool", tool="time", payload="what time is it")
+    reply, _ = dispatch(decision, "what time is it", "what time is it", [], "sys")
+    assert "," in reply and any(ch.isdigit() for ch in reply)

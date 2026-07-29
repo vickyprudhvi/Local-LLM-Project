@@ -19,6 +19,7 @@ import camera
 import camera_ptz
 import eyes
 from tools.base import BaseTool
+from tools.models import ToolPermission
 
 # Raised above eyes.describe_local's normal 1280px default: a stitched room
 # panorama benefits from finer detail, and since scan sends one merged image
@@ -32,6 +33,10 @@ class LookTool(BaseTool):
     input_schema = {"type": "object", "properties": {}}
     timeout_seconds = 60.0
     llm_callable = False
+    # READ: overwrites a single fixed transient buffer (snapshots/latest.jpg); it
+    # does not move hardware or accumulate persistent files. (Ambiguous — if this
+    # were changed to save timestamped/persistent captures, reclassify as WRITE.)
+    permission = ToolPermission.READ
 
     def execute(self, arguments: dict) -> dict:
         try:
@@ -47,6 +52,9 @@ class LookCarefullyTool(BaseTool):
     input_schema = {"type": "object", "properties": {}}
     timeout_seconds = 60.0
     llm_callable = False
+    # READ: same transient fixed-path snapshot as camera.look (no movement, no
+    # persistent files). The image is sent to Claude for description only.
+    permission = ToolPermission.READ
 
     def execute(self, arguments: dict) -> dict:
         try:
@@ -65,6 +73,13 @@ class CaptureCameraTool(BaseTool):
     }
     timeout_seconds = 60.0
     llm_callable = False
+    # WRITE: persists a timestamped JPEG to the capture folder (accumulating files
+    # on disk = recorded media), so it requires confirmation.
+    permission = ToolPermission.WRITE
+
+    def confirmation_summary(self, arguments: dict) -> str:
+        name = arguments.get("camera_name") or "office"
+        return f"Capture a still frame from the {name} camera and save it to the capture folder."
 
     def execute(self, arguments: dict) -> dict:
         camera_name = arguments.get("camera_name")
@@ -86,6 +101,12 @@ class ScanRoomTool(BaseTool):
     # Physically sweeps the camera with settle delays and stitching — generous cap.
     timeout_seconds = 180.0
     llm_callable = False
+    # WRITE: physically moves the PTZ camera (and saves captured frames), so it
+    # requires confirmation.
+    permission = ToolPermission.WRITE
+
+    def confirmation_summary(self, arguments: dict) -> str:
+        return "Physically pan and tilt the room camera to sweep the room, then describe what it sees."
 
     def execute(self, arguments: dict) -> dict:
         scan = camera_ptz.scan_room()

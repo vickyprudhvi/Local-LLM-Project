@@ -16,6 +16,7 @@ import ast
 import operator
 
 from tools.base import BaseTool, ToolValidationError
+from tools.models import ToolPermission
 
 MAX_EXPR_LEN = 200
 MAX_AST_DEPTH = 20
@@ -105,6 +106,7 @@ def calculate(expression: str):
 
 class CalculatorTool(BaseTool):
     name = "math.calculate"
+    permission = ToolPermission.READ  # pure computation, no side effects
     description = (
         "Evaluate a basic arithmetic expression. Supports + - * / ** , parentheses, "
         "decimals, and unary minus. Example: (17 * 23) + 5"

@@ -20,6 +20,7 @@ from tools.models import (
     REPOSITORY_ALREADY_CLONED,
     REPOSITORY_FILE_LIMIT_EXCEEDED,
     REPOSITORY_TOO_LARGE,
+    ToolPermission,
 )
 from tools import repo_store
 
@@ -42,6 +43,16 @@ class CloneRepositoryTool(BaseTool):
     timeout_seconds = 180.0
     requires_internet = True
     required_capabilities = ("repository.clone",)
+    # WRITE: creates files in the controlled workspace (downloads a repository to
+    # disk), so it requires explicit user confirmation.
+    permission = ToolPermission.WRITE
+
+    def confirmation_summary(self, arguments: dict) -> str:
+        # Deterministic: built only from the validated repository argument, never
+        # from repository content. `repository` is 'owner/repo'.
+        repository = arguments.get("repository")
+        repo_label = repository if isinstance(repository, str) and repository.strip() else "the requested repository"
+        return f"Clone {repo_label} into the controlled repository workspace."
 
     def __init__(self, client=None, runner=None):
         self._client = client

@@ -115,8 +115,10 @@ class ToolRegistry:
             tool = self._tools[name]
             if self._enabled.get(name) and getattr(tool, "llm_callable", True):
                 d = tool.definition()
-                # Reflect the registry's live enabled state on the definition.
-                defs.append(ToolDefinition(d.name, d.description, d.input_schema, d.timeout_seconds, True))
+                # Reflect the registry's live enabled state on the definition, and
+                # carry the tool's permission through (Phase C).
+                defs.append(ToolDefinition(d.name, d.description, d.input_schema,
+                                           d.timeout_seconds, True, d.permission))
         return defs
 
     def enabled_ollama_schemas(self) -> List[dict]:

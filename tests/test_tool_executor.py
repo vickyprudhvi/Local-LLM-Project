@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from tools.base import BaseTool, ToolValidationError
-from tools.models import ToolCall
+from tools.models import ToolCall, ToolPermission
 from tools.registry import ToolRegistry, default_registry
 from tools.executor import ToolExecutor
 
@@ -17,6 +17,7 @@ class _SlowTool(BaseTool):
     description = "sleeps past its timeout"
     input_schema = {"type": "object", "properties": {}}
     timeout_seconds = 0.2
+    permission = ToolPermission.READ
 
     def execute(self, arguments):
         time.sleep(1.0)
@@ -27,6 +28,7 @@ class _ExplodingTool(BaseTool):
     name = "test.boom"
     description = "raises an unexpected error"
     input_schema = {"type": "object", "properties": {}}
+    permission = ToolPermission.READ
 
     def execute(self, arguments):
         raise RuntimeError("secret internal detail")
@@ -36,6 +38,7 @@ class _BadOutputTool(BaseTool):
     name = "test.badoutput"
     description = "returns a non-dict"
     input_schema = {"type": "object", "properties": {}}
+    permission = ToolPermission.READ
 
     def execute(self, arguments):
         return [1, 2, 3]
@@ -109,6 +112,7 @@ def test_controlled_validation_error_during_execute():
         name = "test.validate"
         description = "raises validation error in execute"
         input_schema = {"type": "object", "properties": {}}
+        permission = ToolPermission.READ
 
         def execute(self, arguments):
             raise ToolValidationError("bad input at runtime")

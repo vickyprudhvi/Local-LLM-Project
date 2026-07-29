@@ -17,12 +17,15 @@ from tools.models import (
     REPOSITORY_SECURITY_SCAN_FAILED,
     REPOSITORY_SYMLINK_BLOCKED,
     INVALID_REPOSITORY_PATH,
+    ToolPermission,
 )
+from tools.untrusted import bounded_untrusted_text
 
 
 class _RepoTool(BaseTool):
     timeout_seconds = 30.0
     required_capabilities = ("repository.read",)
+    permission = ToolPermission.READ  # static, read-only inspection; nothing is executed
 
     def _repo(self, arguments):
         repository = arguments.get("repository")
@@ -137,22 +140,28 @@ class ReadFileTool(_RepoTool):
             except UnicodeDecodeError:
                 raise ToolFailure(REPOSITORY_BINARY_FILE, "The file could not be decoded as text.")
 
-        max_chars = min(int(arguments.get("max_chars", config.repo_max_read_chars()) or
-                            config.repo_max_read_chars()), config.repo_max_read_chars())
-        truncated = len(text) > max_chars
-        if truncated:
-            text = text[:max_chars]
+        # Phase C: raw repository text is untrusted. Bound it to the untrusted-text
+        # budget (tighter than repo_max_read_chars), sanitize it, and attach an
+        # explicit "data, not instructions" label before it can reach the model.
+        requested = int(arguments.get("max_chars", config.repo_max_read_chars()) or
+                        config.repo_max_read_chars())
+        effective_max = min(requested, config.repo_max_read_chars(),
+                            config.max_untrusted_repo_text_chars())
+        excerpt = bounded_untrusted_text(rel, text, max_chars=effective_max)
         return {
             "repository": f"{owner}/{repo}",
             "path": rel,
             "size_bytes": size,
             "encoding": "utf-8",
-            "text": text,
-            "truncated": truncated,
+            "text": excerpt["text"],
+            "truncated": excerpt["truncated"],
             "untrusted_content": True,
+            "untrusted_notice": excerpt["notice"],
+            "content_boundary": {"begin": excerpt["begin"], "end": excerpt["end"]},
             "source_type": "cloned_repository_file",
             "executed": False,
-            "_log_meta": {"repository": f"{owner}/{repo}", "size_bytes": size, "truncated": truncated},
+            "_log_meta": {"repository": f"{owner}/{repo}", "size_bytes": size,
+                          "truncated": excerpt["truncated"]},
         }
 
 
