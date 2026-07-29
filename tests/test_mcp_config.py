@@ -45,9 +45,14 @@ def test_valid_configuration_loads():
     assert cfg.tool_policy.tools["write_test_file"].permission is WRITE
 
 
-def test_repository_default_config_is_disabled():
+def test_repository_config_loads_and_is_valid():
+    # The committed config is a live, per-environment file (it may be enabled to
+    # point at a real MCP server). It must always parse to a valid, fail-closed
+    # config: stdio transport and a denied-by-default tool policy.
     cfg = load_config("config/mcp_server.json")
-    assert cfg is not None and cfg.enabled is False
+    assert cfg is not None
+    assert cfg.transport == "stdio"
+    assert cfg.tool_policy.default_permission is DENIED
 
 
 def test_missing_config_file_returns_none():
@@ -127,6 +132,10 @@ def _spec(name, schema=None, description="d"):
             "inputSchema": schema or {"type": "object", "properties": {}}}
 
 
+def _by_name(diagnostics):
+    return {name: (reason, category) for name, reason, category in diagnostics}
+
+
 def test_plan_registers_only_enabled_in_policy_tools():
     cfg = _cfg_with_tools({
         "echo_text": {"enabled": True, "permission": "read"},
@@ -135,11 +144,19 @@ def test_plan_registers_only_enabled_in_policy_tools():
     })
     raw = [_spec("echo_text"), _spec("write_test_file"), _spec("slow_tool"),
            _spec("unknown_tool")]
-    regs, denied = plan_registration(raw, cfg)
+    regs, diags = plan_registration(raw, cfg)
     names = {r["remote_name"]: r["permission"] for r in regs}
-    assert names == {"echo_text": READ, "write_test_file": WRITE}  # slow disabled, unknown denied
-    assert "unknown_tool" in denied
-    assert "slow_tool" not in denied  # disabled != denied
+    assert names == {"echo_text": READ, "write_test_file": WRITE}
+    d = _by_name(diags)
+    assert d["unknown_tool"] == ("not_in_local_policy", "denied")
+    assert d["slow_tool"] == ("locally_disabled", "disabled")  # disabled != denied
+
+
+def test_plan_denies_policy_entry_with_denied_permission():
+    cfg = _cfg_with_tools({"echo_text": {"enabled": True, "permission": "denied"}})
+    regs, diags = plan_registration([_spec("echo_text")], cfg)
+    assert regs == []
+    assert _by_name(diags)["echo_text"] == ("permission_denied", "denied")
 
 
 def test_plan_ignores_server_advertised_permission():
@@ -151,18 +168,19 @@ def test_plan_ignores_server_advertised_permission():
     assert regs[0]["permission"] is WRITE
 
 
-def test_plan_rejects_invalid_tool_names():
+def test_plan_rejects_invalid_tool_names_as_skipped():
     cfg = _cfg_with_tools({"echo_text": {"enabled": True, "permission": "read"}})
-    regs, denied = plan_registration([_spec("bad name!"), _spec("echo_text")], cfg)
+    regs, diags = plan_registration([_spec("bad name!"), _spec("echo_text")], cfg)
     assert [r["remote_name"] for r in regs] == ["echo_text"]
-    assert "bad name!" in denied
+    assert _by_name(diags)["bad name!"] == ("invalid_name", "skipped")
 
 
 def test_plan_skips_oversized_schema():
     cfg = _cfg_with_tools({"echo_text": {"enabled": True, "permission": "read"}})
     huge = {"type": "object", "properties": {"x": {"type": "string", "description": "z" * (MAX_SCHEMA_BYTES + 100)}}}
-    regs, denied = plan_registration([_spec("echo_text", schema=huge)], cfg)
-    assert regs == [] and "echo_text" in denied
+    regs, diags = plan_registration([_spec("echo_text", schema=huge)], cfg)
+    assert regs == []
+    assert _by_name(diags)["echo_text"] == ("oversized_schema", "skipped")
 
 
 def test_schema_validation_rejects_non_object_and_deep():

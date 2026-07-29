@@ -77,21 +77,38 @@ def validate_working_directory(working_directory, approved_root_abs, base_dir=No
     return wd_abs
 
 
+def internal_test_server_script(base_dir=None):
+    """Absolute path to the bundled test server's executable script."""
+    base_dir = base_dir or _REPO_ROOT
+    return os.path.join(base_dir, "test_mcp_server", "server.py")
+
+
+def build_launch_argv(config: McpServerConfig, executable, base_dir=None):
+    """The argv list for Popen. For the internal test server, launch its absolute
+    script path directly (no `-m`, so no repository PYTHONPATH is ever needed).
+    Ordinary external servers get their configured args verbatim."""
+    if config.internal_test_server:
+        script = internal_test_server_script(base_dir)
+        if not os.path.isfile(script):
+            raise McpError(MCP_CONFIGURATION_INVALID, "The internal test server script was not found.")
+        return [executable, script]
+    return [executable, *config.args]
+
+
 def start_server(config: McpServerConfig, approved_root=None, base_dir=None, allow_create=True):
     """Validate, isolate, and launch the configured server; run the initialize handshake."""
     base_dir = base_dir or _REPO_ROOT
     executable = validate_executable(config.command)
     approved_root_abs = resolve_workspaces_root(approved_root, base_dir)
     workdir = validate_working_directory(config.working_directory, approved_root_abs, base_dir, allow_create)
+    argv = build_launch_argv(config, executable, base_dir)
 
-    # Launcher-controlled extras: PYTHONPATH so `python -m <pkg>` resolves the repo
-    # package even though cwd is the isolated workspace. Not a secret.
-    pythonpath = base_dir
-    if os.environ.get("PYTHONPATH"):
-        pythonpath = base_dir + os.pathsep + os.environ["PYTHONPATH"]
-    env = build_child_environment(config.environment_allowlist, extra={"PYTHONPATH": pythonpath})
+    # Minimal child environment: platform vars + explicitly allowlisted names only.
+    # No repository root is injected into PYTHONPATH; the parent PYTHONPATH is
+    # inherited only if the operator allowlists it.
+    env = build_child_environment(config.environment_allowlist)
 
-    client = McpClient([executable, *config.args], cwd=workdir, env=env,
+    client = McpClient(argv, cwd=workdir, env=env,
                        default_call_timeout=config.call_timeout_seconds,
                        shutdown_timeout=config.shutdown_timeout_seconds)
     try:
@@ -125,18 +142,33 @@ def bootstrap_from_config(registry, config=None, config_path=None, approved_root
         except McpError as e:
             raise McpError(MCP_DISCOVERY_FAILED, "MCP tool discovery failed.", retryable=e.retryable) from e
 
-        registrations, denied = plan_registration(raw_tools, config)
-        tools = build_tools(registrations, config, client)
-        for tool in tools:
+        registrations, diagnostics = plan_registration(raw_tools, config)
+        diagnostics = list(diagnostics)
+        planned = build_tools(registrations, config, client)
+
+        registered = []
+        for tool in planned:
+            if registry.has(tool.name):
+                # Never silently overwrite an existing tool (built-in or another MCP tool).
+                diagnostics.append((tool.name, "registration_collision", "skipped"))
+                continue
             registry.register(tool)
+            registered.append(tool)
+
+        denied_count = sum(1 for _, _, cat in diagnostics if cat == "denied")
+        skipped_count = sum(1 for _, _, cat in diagnostics if cat == "skipped")
+        disabled_count = sum(1 for _, _, cat in diagnostics if cat == "disabled")
         health = McpHealth(
             state=McpHealthState.HEALTHY,
             server_id=config.server_id,
-            discovered_tool_count=len(registrations) + len(denied),
-            registered_tool_count=len(tools),
-            denied_tool_count=len(denied),
+            discovered_tool_count=len(registered) + len(diagnostics),
+            registered_tool_count=len(registered),
+            denied_tool_count=denied_count,
+            skipped_tool_count=skipped_count,
+            disabled_tool_count=disabled_count,
+            diagnostics=tuple(diagnostics),
         )
-        return McpSession(client, tools, namespace=config.namespace, health=health)
+        return McpSession(client, registered, namespace=config.namespace, health=health)
     except McpError as e:
         if client is not None:
             try:

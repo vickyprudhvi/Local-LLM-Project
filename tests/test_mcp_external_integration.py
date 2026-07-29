@@ -45,10 +45,10 @@ def configured(tmp_path):
     def _start(tools=None, call_timeout=5, slow_seconds=3, default_permission="denied"):
         raw = {
             "enabled": True, "required": False, "server_id": "test", "transport": "stdio",
-            "command": sys.executable, "args": ["-m", "test_mcp_server"],
+            "command": sys.executable, "args": [], "internal_test_server": True,
             "working_directory": str(workdir),
             "startup_timeout_seconds": 10, "call_timeout_seconds": call_timeout,
-            "shutdown_timeout_seconds": 5, "environment_allowlist": [],
+            "shutdown_timeout_seconds": 5, "environment_allowlist": ["TEST_MCP_SLOW_SECONDS"],
             "tool_policy": {"default_permission": default_permission,
                             "tools": tools if tools is not None else DEFAULT_TOOLS},
         }
@@ -80,6 +80,103 @@ def test_startup_discovers_and_registers_with_health(configured):
     assert c.session.health.server_id == "test"
     assert set(c.session.tool_names()) == {f"mcp.test.{n}" for n in DEFAULT_TOOLS}
     assert c.session.health.registered_tool_count == 6
+
+
+# ---- tool-count reconciliation (Phase E closeout Task 2) ----
+
+def test_full_six_tool_policy_registers_all_six(configured):
+    """FULL configuration: 6 discovered, 6 registered, 0 denied/skipped/disabled."""
+    h = configured().session.health
+    assert h.discovered_tool_count == 6
+    assert h.registered_tool_count == 6
+    assert h.denied_tool_count == 0
+    assert h.skipped_tool_count == 0
+    assert h.disabled_tool_count == 0
+
+
+def test_reduced_three_tool_policy_registers_only_three(configured):
+    """REDUCED policy (explicitly not the full config): 3 registered, 3 denied."""
+    reduced = {
+        "echo_text": {"enabled": True, "permission": "read"},
+        "read_test_file": {"enabled": True, "permission": "read"},
+        "write_test_file": {"enabled": True, "permission": "write"},
+    }
+    h = configured(tools=reduced).session.health
+    assert h.discovered_tool_count == 6      # server still advertises all six
+    assert h.registered_tool_count == 3
+    assert h.denied_tool_count == 3          # add_numbers, fail_tool, slow_tool: not_in_local_policy
+    reasons = {name: reason for name, reason, cat in h.diagnostics}
+    assert reasons["add_numbers"] == "not_in_local_policy"
+
+
+def test_locally_disabled_tool_is_disabled_not_denied(configured):
+    tools = dict(DEFAULT_TOOLS)
+    tools["slow_tool"] = {"enabled": False, "permission": "read"}
+    h = configured(tools=tools).session.health
+    assert h.registered_tool_count == 5
+    assert h.disabled_tool_count == 1
+    assert h.denied_tool_count == 0
+    reasons = {name: (reason, cat) for name, reason, cat in h.diagnostics}
+    assert reasons["slow_tool"] == ("locally_disabled", "disabled")
+
+
+def test_health_counters_are_internally_consistent(configured):
+    tools = dict(DEFAULT_TOOLS)
+    tools["slow_tool"] = {"enabled": False, "permission": "read"}  # disabled
+    del tools["fail_tool"]                                         # denied (not in policy)
+    h = configured(tools=tools).session.health
+    total = (h.registered_tool_count + h.denied_tool_count
+             + h.skipped_tool_count + h.disabled_tool_count)
+    assert total == h.discovered_tool_count
+    assert h.registered_tool_count + h.denied_tool_count <= h.discovered_tool_count
+
+
+def test_duplicate_local_name_does_not_overwrite_existing_tool(tmp_path):
+    from tools.base import BaseTool
+    from tools.models import ToolPermission
+
+    class _Pre(BaseTool):
+        name = "mcp.test.echo_text"
+        description = "pre-existing"
+        input_schema = {"type": "object", "properties": {}}
+        permission = ToolPermission.READ
+
+        def execute(self, arguments):
+            return {"pre": True}
+
+    approved = tmp_path / "mcp_workspaces"
+    workdir = approved / "test"
+    workdir.mkdir(parents=True)
+    reg = ToolRegistry()
+    pre = _Pre()
+    reg.register(pre)  # occupy the name before MCP discovery
+    raw = {
+        "enabled": True, "required": False, "server_id": "test", "transport": "stdio",
+        "command": sys.executable, "args": [], "internal_test_server": True,
+        "working_directory": str(workdir),
+        "startup_timeout_seconds": 10, "call_timeout_seconds": 5, "shutdown_timeout_seconds": 5,
+        "environment_allowlist": [],
+        "tool_policy": {"default_permission": "denied",
+                        "tools": {"echo_text": {"enabled": True, "permission": "read"}}},
+    }
+    session = bootstrap_from_config(reg, config=build_config(raw), approved_root=str(approved))
+    try:
+        assert reg.get("mcp.test.echo_text") is pre  # original not overwritten
+        reasons = {name: (reason, cat) for name, reason, cat in session.health.diagnostics}
+        assert reasons["mcp.test.echo_text"] == ("registration_collision", "skipped")
+    finally:
+        session.shutdown()
+
+
+# ---- executable server round-trip (Phase E closeout Task 3) ----
+
+def test_executable_server_full_roundtrip(configured):
+    c = configured()  # start -> initialize -> tools/list already done
+    assert c.executor.execute(ToolCall("1", "mcp.test.echo_text", {"text": "hi"})).data == {"text": "hi"}
+    assert c.executor.execute(ToolCall("2", "mcp.test.add_numbers", {"a": 17, "b": 25})).data == {"sum": 42}
+    assert c.executor.execute(ToolCall("3", "mcp.test.read_test_file", {"path": "hello.txt"})).data == {"content": "Hello from MCP!"}
+    c.session.shutdown()
+    assert c.session.client._proc is None  # clean shutdown
 
 
 def test_namespaced_names_use_server_id(configured):

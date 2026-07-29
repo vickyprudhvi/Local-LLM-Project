@@ -41,8 +41,13 @@ def _start_mcp():
 
     health = session.health
     if health is not None and health.state.value == "healthy":
-        console.print(f"[dim]MCP '{health.server_id}': {health.registered_tool_count} tool(s) "
-                      f"registered, {health.denied_tool_count} denied — {', '.join(session.tool_names())}[/dim]")
+        console.print(f"[dim]MCP '{health.server_id}': discovered={health.discovered_tool_count} "
+                      f"registered={health.registered_tool_count} denied={health.denied_tool_count} "
+                      f"skipped={health.skipped_tool_count} disabled={health.disabled_tool_count} — "
+                      f"{', '.join(session.tool_names())}[/dim]")
+        # Sanitized diagnostics: tool names + skip reasons only (never secrets/args).
+        for name, reason, category in health.diagnostics:
+            console.print(f"[dim]  MCP tool '{name}' {category}: {reason}[/dim]")
     elif health is not None and health.state.value == "failed":
         console.print(f"[yellow]MCP server unavailable ({health.last_error_code}); "
                       f"continuing without MCP tools.[/yellow]")

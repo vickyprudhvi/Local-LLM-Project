@@ -41,70 +41,103 @@ def _schema_depth(node, depth=0):
     return depth
 
 
-def is_valid_input_schema(schema) -> bool:
+def schema_rejection_reason(schema):
+    """Return a skip reason for an invalid input schema, or None if it is valid."""
     if not isinstance(schema, dict):
-        return False
-    stype = schema.get("type", "object")
-    if stype != "object":
-        return False  # MCP tool input schemas are objects
-    if "properties" in schema and not isinstance(schema["properties"], dict):
-        return False
-    declared = schema.get("type")
+        return "invalid_schema"
+    declared = schema.get("type", "object")
+    if declared != "object":
+        return "invalid_schema"  # MCP tool input schemas are objects
     if declared is not None and declared not in _VALID_SCHEMA_TYPES:
-        return False
+        return "invalid_schema"
+    if "properties" in schema and not isinstance(schema["properties"], dict):
+        return "invalid_schema"
     try:
         serialized = json.dumps(schema)
     except (TypeError, ValueError):
-        return False
+        return "invalid_schema"
     if len(serialized) > MAX_SCHEMA_BYTES:
-        return False
+        return "oversized_schema"
     if _schema_depth(schema) > MAX_SCHEMA_NESTING:
-        return False
-    return True
+        return "excessive_schema_depth"
+    return None
+
+
+def is_valid_input_schema(schema) -> bool:
+    return schema_rejection_reason(schema) is None
+
+
+# Diagnostic categories: denied (policy rejection), skipped (metadata invalid), or
+# disabled (present in policy but turned off). Registered tools are none of these.
+_DENY_REASONS = {"not_in_local_policy", "permission_denied"}
+_SKIP_REASONS = {"invalid_name", "invalid_schema", "oversized_schema",
+                 "excessive_schema_depth", "tool_limit_exceeded", "registration_collision"}
+_DISABLED_REASONS = {"locally_disabled"}
+
+
+def _category(reason):
+    if reason in _DENY_REASONS:
+        return "denied"
+    if reason in _DISABLED_REASONS:
+        return "disabled"
+    return "skipped"
 
 
 def plan_registration(raw_tools, config):
-    """Return (registrations, denied_names).
+    """Return (registrations, diagnostics).
 
-    registrations: list of dicts {remote_name, description, input_schema, permission}
-    denied_names:  discovered tools rejected by local policy or validation (diagnostics).
+    registrations: list of dicts {remote_name, description, input_schema, permission}.
+    diagnostics:   list of (name, reason, category) for every discovered tool NOT
+                   registered — so discovered = registered + len(diagnostics), and
+                   the counts stay internally consistent.
 
     A tool registers only when it is valid AND present in the local policy AND
-    locally enabled; its permission is the LOCAL one. Anything else is denied
-    (missing from policy / invalid name / bad schema) or silently skipped (locally
-    disabled) — never registered, so it can never be shortlisted or reach the server.
+    locally enabled AND its LOCAL permission is not denied. Everything else is
+    denied / skipped / disabled and never registered — so it can never be
+    shortlisted or reach the server. Server-advertised permissions are ignored.
     """
     registrations = []
-    denied = []
+    diagnostics = []
     if not isinstance(raw_tools, list):
-        return registrations, denied
+        return registrations, diagnostics
 
-    for spec in raw_tools[:MAX_TOOLS]:
+    def note(name, reason):
+        diagnostics.append((str(name)[:64], reason, _category(reason)))
+
+    for index, spec in enumerate(raw_tools):
+        if index >= MAX_TOOLS:
+            note(spec.get("name") if isinstance(spec, dict) else spec, "tool_limit_exceeded")
+            continue
         if not isinstance(spec, dict):
+            note(spec, "invalid_name")
             continue
         remote_name = spec.get("name")
         if not isinstance(remote_name, str) or not NAME_RE.match(remote_name):
-            denied.append(str(remote_name))
+            note(remote_name, "invalid_name")
             continue
-        schema = spec.get("inputSchema")
-        if not is_valid_input_schema(schema):
-            denied.append(remote_name)  # oversized/invalid schema: skip safely
+        reason = schema_rejection_reason(spec.get("inputSchema"))
+        if reason:
+            note(remote_name, reason)
             continue
-
         entry = config.tool_policy.tools.get(remote_name)
         if entry is None:
-            denied.append(remote_name)  # missing from local policy -> DENIED
+            note(remote_name, "not_in_local_policy")
             continue
         if not entry.enabled:
-            continue  # locally disabled -> not registered (and not counted as denied)
+            note(remote_name, "locally_disabled")
+            continue
+        permission = ToolPermission.coerce(entry.permission)  # LOCAL authority
+        if permission is ToolPermission.DENIED:
+            note(remote_name, "permission_denied")
+            continue
 
         registrations.append({
             "remote_name": remote_name,
             "description": sanitize_description(spec.get("description", "")),
-            "input_schema": schema,
-            "permission": ToolPermission.coerce(entry.permission),  # LOCAL authority
+            "input_schema": spec.get("inputSchema"),
+            "permission": permission,
         })
-    return registrations, denied
+    return registrations, diagnostics
 
 
 def build_tools(registrations, config, client):

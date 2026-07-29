@@ -1,25 +1,38 @@
 {
-  "enabled": false,
+  "enabled": true,
   "required": false,
-  "server_id": "test",
-  "display_name": "Configured Test MCP Server",
+  "server_id": "filesystem",
+  "display_name": "Official Filesystem MCP",
   "transport": "stdio",
-  "command": "python",
-  "args": ["-m", "test_mcp_server"],
-  "working_directory": "./mcp_workspaces/test",
-  "startup_timeout_seconds": 10,
-  "call_timeout_seconds": 5,
+  "command": "C:/Program Files/nodejs/node.exe",
+  "args": [
+    "C:/Users/Prudhvi/OneDrive/Project/Local LLM Project/external_mcp_servers/filesystem/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+    "C:/Users/Prudhvi/OneDrive/Project/Local LLM Project/mcp_workspaces/filesystem"
+  ],
+  "working_directory": "./mcp_workspaces/filesystem",
+  "startup_timeout_seconds": 15,
+  "call_timeout_seconds": 10,
   "shutdown_timeout_seconds": 5,
   "environment_allowlist": [],
   "tool_policy": {
     "default_permission": "denied",
     "tools": {
-      "echo_text": { "enabled": true, "permission": "read" },
-      "add_numbers": { "enabled": true, "permission": "read" },
-      "read_test_file": { "enabled": true, "permission": "read" },
-      "write_test_file": { "enabled": true, "permission": "write" },
-      "fail_tool": { "enabled": true, "permission": "read" },
-      "slow_tool": { "enabled": true, "permission": "read" }
+      "list_allowed_directories": {
+        "enabled": true,
+        "permission": "read"
+      },
+      "list_directory": {
+        "enabled": true,
+        "permission": "read"
+      },
+      "read_text_file": {
+        "enabled": true,
+        "permission": "read"
+      },
+      "write_file": {
+        "enabled": true,
+        "permission": "write"
+      }
     }
   }
 }

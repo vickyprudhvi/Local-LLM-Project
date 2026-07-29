@@ -29,10 +29,11 @@ def _raw(tmp_path, **over):
     (workdir / "hello.txt").write_text("Hello from MCP!", encoding="utf-8")
     raw = {
         "enabled": True, "required": False, "server_id": "test", "transport": "stdio",
-        "command": sys.executable, "args": ["-m", "test_mcp_server"],
+        "command": sys.executable, "args": [], "internal_test_server": True,
         "working_directory": str(workdir),
         "startup_timeout_seconds": 10, "call_timeout_seconds": 5, "shutdown_timeout_seconds": 5,
-        "environment_allowlist": [], "tool_policy": {"default_permission": "denied", "tools": DEFAULT_TOOLS},
+        "environment_allowlist": ["TEST_MCP_SLOW_SECONDS"],
+        "tool_policy": {"default_permission": "denied", "tools": DEFAULT_TOOLS},
     }
     raw.update(over)
     return raw, str(approved), str(workdir)

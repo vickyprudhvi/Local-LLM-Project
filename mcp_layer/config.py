@@ -48,6 +48,11 @@ class McpServerConfig:
     shutdown_timeout_seconds: float
     environment_allowlist: Tuple[str, ...]
     tool_policy: McpToolPolicy
+    # Internal-development-only: launch the repository's bundled test server by its
+    # absolute script path (resolved deterministically from the repo), so it needs
+    # no PYTHONPATH injection. Defaults to false; ordinary external servers never
+    # get the repo root on their path. Set only via the trusted config file.
+    internal_test_server: bool = False
 
     @property
     def namespace(self) -> str:
@@ -160,6 +165,7 @@ def build_config(raw: dict) -> McpServerConfig:
         shutdown_timeout_seconds=shutdown,
         environment_allowlist=tuple(allowlist),
         tool_policy=_tool_policy(raw.get("tool_policy")),
+        internal_test_server=bool(raw.get("internal_test_server", False)),
     )
 
 

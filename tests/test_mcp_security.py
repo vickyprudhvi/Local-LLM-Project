@@ -129,6 +129,54 @@ def test_known_secret_names_are_flagged_when_allowlisted():
     assert flagged == ["ANTHROPIC_API_KEY"]
 
 
+# ---- PYTHONPATH is never injected (Phase E closeout Task 1) ----
+
+def test_repo_root_not_in_child_pythonpath_by_default(monkeypatch):
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    env = build_child_environment([])
+    assert "PYTHONPATH" not in env
+
+
+def test_parent_pythonpath_not_inherited_by_default(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", "/some/parent/path")
+    env = build_child_environment([])
+    assert "PYTHONPATH" not in env
+
+
+def test_pythonpath_passed_only_when_explicitly_allowlisted(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", "/some/parent/path")
+    env = build_child_environment(["PYTHONPATH"])
+    assert env.get("PYTHONPATH") == "/some/parent/path"
+
+
+def test_internal_server_launches_by_absolute_script_not_dash_m():
+    from mcp_layer.external import build_launch_argv, internal_test_server_script
+    cfg = build_config({
+        "enabled": True, "required": False, "server_id": "test", "transport": "stdio",
+        "command": "python", "args": ["-m", "test_mcp_server"], "internal_test_server": True,
+        "working_directory": "./mcp_workspaces/test",
+        "startup_timeout_seconds": 5, "call_timeout_seconds": 5, "shutdown_timeout_seconds": 5,
+        "environment_allowlist": [], "tool_policy": {"default_permission": "denied", "tools": {}},
+    })
+    argv = build_launch_argv(cfg, sys.executable)
+    assert argv[0] == sys.executable
+    assert "-m" not in argv                       # never uses `-m` (which would need PYTHONPATH)
+    assert os.path.isabs(argv[1]) and argv[1].endswith(os.path.join("test_mcp_server", "server.py"))
+    assert argv[1] == internal_test_server_script()
+
+
+def test_external_server_uses_configured_args_verbatim():
+    from mcp_layer.external import build_launch_argv
+    cfg = build_config({
+        "enabled": True, "required": False, "server_id": "ext", "transport": "stdio",
+        "command": "myserver", "args": ["--stdio", "--flag"], "internal_test_server": False,
+        "working_directory": "./mcp_workspaces/test",
+        "startup_timeout_seconds": 5, "call_timeout_seconds": 5, "shutdown_timeout_seconds": 5,
+        "environment_allowlist": [], "tool_policy": {"default_permission": "denied", "tools": {}},
+    })
+    assert build_launch_argv(cfg, "/usr/bin/myserver") == ["/usr/bin/myserver", "--stdio", "--flag"]
+
+
 def test_config_stores_names_only_never_values(monkeypatch):
     monkeypatch.setenv("MY_MCP_API_KEY", "super-secret-value")
     raw = {

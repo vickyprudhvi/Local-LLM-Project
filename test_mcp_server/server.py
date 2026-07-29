@@ -165,3 +165,9 @@ def main():
         if response is not None:
             sys.stdout.write(json.dumps(response) + "\n")
             sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    # Allows launching by absolute script path (Phase E internal_test_server) with
+    # no package on sys.path, so no repository PYTHONPATH injection is needed.
+    main()

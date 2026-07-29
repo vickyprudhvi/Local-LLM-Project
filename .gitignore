@@ -19,3 +19,7 @@ test_workspace/*
 # MCP configured-server workspace: keep the seed file, ignore runtime-written files
 mcp_workspaces/test/*
 !mcp_workspaces/test/hello.txt
+mcp_workspaces/filesystem/*
+!mcp_workspaces/filesystem/hello.txt
+# Locally-installed external MCP servers (node_modules etc.) — never commit these
+external_mcp_servers/
