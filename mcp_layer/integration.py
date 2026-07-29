@@ -23,18 +23,24 @@ DEFAULT_NAMESPACE = "mcp.test"
 
 
 class McpSession:
-    """A running MCP server + the tools discovered from it. Shut it down when done."""
+    """A running MCP server + the tools discovered from it. Shut it down when done.
 
-    def __init__(self, client, tools, namespace=DEFAULT_NAMESPACE):
+    `client` may be None (e.g. a disabled or failed Phase E server), in which case
+    there is nothing to shut down. `health` carries Phase E diagnostics or None.
+    """
+
+    def __init__(self, client, tools, namespace=DEFAULT_NAMESPACE, health=None):
         self.client = client
         self.tools = tools
         self.namespace = namespace
+        self.health = health
 
     def tool_names(self):
         return [t.name for t in self.tools]
 
     def shutdown(self):
-        self.client.shutdown()
+        if self.client is not None:
+            self.client.shutdown()
 
 
 def start_test_server(workspace, call_timeout=20.0, startup_timeout=15.0, slow_seconds=None):

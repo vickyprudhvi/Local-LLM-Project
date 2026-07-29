@@ -12,7 +12,16 @@ test server needs (initialize, tools/list, tools/call) is implemented.
 """
 
 from mcp_layer.client import McpClient
+from mcp_layer.config import (
+    McpServerConfig,
+    McpToolPolicy,
+    McpToolPolicyEntry,
+    build_config,
+    load_config,
+)
 from mcp_layer.errors import McpError
+from mcp_layer.external import bootstrap_from_config, start_server, validate_executable
+from mcp_layer.health import McpHealth, McpHealthState
 from mcp_layer.integration import (
     McpSession,
     bootstrap_test_server,
@@ -24,9 +33,19 @@ from mcp_layer.tool import McpTool
 __all__ = [
     "McpClient",
     "McpError",
+    "McpHealth",
+    "McpHealthState",
+    "McpServerConfig",
     "McpSession",
     "McpTool",
+    "McpToolPolicy",
+    "McpToolPolicyEntry",
+    "bootstrap_from_config",
     "bootstrap_test_server",
+    "build_config",
     "discover_and_register",
+    "load_config",
+    "start_server",
     "start_test_server",
+    "validate_executable",
 ]

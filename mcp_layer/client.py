@@ -7,8 +7,10 @@ MCP_STARTUP_FAILED, MCP_TIMEOUT, MCP_SERVER_EXITED, MCP_TOOL_NOT_FOUND,
 MCP_CALL_FAILED, MCP_INVALID_RESPONSE.
 """
 
+import collections
 import json
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -25,28 +27,35 @@ from tools.models import (
 
 PROTOCOL_VERSION = "2024-11-05"
 _EOF = object()  # sentinel: the server's stdout closed (server exited)
+MAX_OUTPUT_BYTES = 100 * 1024   # cap on a normalized tool result
+_STDERR_MAX_LINES = 200         # bounded stderr retention for diagnostics
+_STDERR_MAX_CHARS = 8 * 1024
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
 class McpClient:
-    def __init__(self, command, cwd=None, env=None, default_call_timeout=20.0):
+    def __init__(self, command, cwd=None, env=None, default_call_timeout=20.0, shutdown_timeout=5.0):
         self._command = list(command)
-        self._cwd = cwd
+        self._cwd = str(cwd) if cwd is not None else None
         self._env = env
         self.default_call_timeout = default_call_timeout
+        self.shutdown_timeout = shutdown_timeout
         self._proc = None
         self._queue = queue.Queue()
         self._reader = None
+        self._stderr_reader = None
+        self._stderr_buf = collections.deque(maxlen=_STDERR_MAX_LINES)
         self._id = 0
         self._write_lock = threading.Lock()
 
     # ---- lifecycle ----
 
     def start(self, timeout=15.0):
-        """Launch the server subprocess and run the MCP initialize handshake."""
+        """Launch the server subprocess (shell=False) and run the initialize handshake."""
         try:
             self._proc = subprocess.Popen(
-                self._command, cwd=self._cwd, env=self._env,
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                self._command, cwd=self._cwd, env=self._env, shell=False,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, bufsize=1,
             )
         except (OSError, ValueError) as e:
@@ -54,6 +63,10 @@ class McpClient:
 
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
+        # Drain stderr onto a bounded buffer so it never fills the OS pipe (which
+        # would block the child) and is never mistaken for a protocol message.
+        self._stderr_reader = threading.Thread(target=self._stderr_loop, daemon=True)
+        self._stderr_reader.start()
         try:
             self._request("initialize", {
                 "protocolVersion": PROTOCOL_VERSION,
@@ -69,7 +82,7 @@ class McpClient:
         self._notify("notifications/initialized", {})
 
     def shutdown(self):
-        """Close stdin (signaling the server to exit) and reap the process."""
+        """Terminate the child and join reader threads. Idempotent and never raises."""
         proc, self._proc = self._proc, None
         if proc is None:
             return
@@ -79,13 +92,35 @@ class McpClient:
         except OSError:
             pass
         try:
-            proc.wait(timeout=5)
+            proc.wait(timeout=self.shutdown_timeout)
         except subprocess.TimeoutExpired:
             proc.terminate()
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=self.shutdown_timeout)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                try:
+                    proc.wait(timeout=self.shutdown_timeout)
+                except subprocess.TimeoutExpired:
+                    pass
+        for thread in (self._reader, self._stderr_reader):
+            if thread is not None:
+                thread.join(timeout=self.shutdown_timeout)
+        # Drop any late/queued messages so a stale response can't satisfy a future call.
+        self._drain_queue()
+
+    def recent_stderr(self):
+        """Bounded, sanitized recent stderr for diagnostics only — never sent to the LLM."""
+        joined = "".join(self._stderr_buf)
+        joined = _CONTROL_RE.sub("", joined)
+        return joined[-_STDERR_MAX_CHARS:]
+
+    def _drain_queue(self):
+        try:
+            while True:
+                self._queue.get_nowait()
+        except queue.Empty:
+            pass
 
     # ---- MCP methods ----
 
@@ -102,9 +137,25 @@ class McpClient:
         result = self._request("tools/call", {"name": name, "arguments": arguments or {}}, timeout)
         if result.get("isError"):
             raise McpError(MCP_CALL_FAILED, _extract_text(result) or "The MCP tool reported an error.")
-        return _normalize_result(result)
+        data = _normalize_result(result)
+        try:
+            if len(json.dumps(data)) > MAX_OUTPUT_BYTES:
+                raise McpError(MCP_INVALID_RESPONSE, "The MCP tool returned an oversized result.")
+        except (TypeError, ValueError):
+            raise McpError(MCP_INVALID_RESPONSE, "The MCP tool returned a non-serializable result.")
+        return data
 
     # ---- transport internals ----
+
+    def _stderr_loop(self):
+        proc = self._proc
+        if proc is None or proc.stderr is None:
+            return
+        try:
+            for line in proc.stderr:
+                self._stderr_buf.append(line)
+        except (OSError, ValueError):
+            pass
 
     def _read_loop(self):
         try:

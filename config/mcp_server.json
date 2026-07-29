@@ -1,0 +1,38 @@
+{
+  "enabled": true,
+  "required": false,
+  "server_id": "filesystem",
+  "display_name": "Official Filesystem MCP",
+  "transport": "stdio",
+  "command": "C:/Program Files/nodejs/node.exe",
+  "args": [
+    "C:/Users/Prudhvi/OneDrive/Project/Local LLM Project/external_mcp_servers/filesystem/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+    "C:/Users/Prudhvi/OneDrive/Project/Local LLM Project/mcp_workspaces/filesystem"
+  ],
+  "working_directory": "./mcp_workspaces/filesystem",
+  "startup_timeout_seconds": 15,
+  "call_timeout_seconds": 10,
+  "shutdown_timeout_seconds": 5,
+  "environment_allowlist": [],
+  "tool_policy": {
+    "default_permission": "denied",
+    "tools": {
+      "list_allowed_directories": {
+        "enabled": true,
+        "permission": "read"
+      },
+      "list_directory": {
+        "enabled": true,
+        "permission": "read"
+      },
+      "read_text_file": {
+        "enabled": true,
+        "permission": "read"
+      },
+      "write_file": {
+        "enabled": true,
+        "permission": "write"
+      }
+    }
+  }
+}

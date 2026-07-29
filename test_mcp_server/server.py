@@ -14,8 +14,9 @@ PROTOCOL_VERSION = "2024-11-05"
 
 
 def _workspace():
-    return os.path.realpath(os.environ.get("TEST_MCP_WORKSPACE") or
-                            os.path.join(os.getcwd(), "test_workspace"))
+    # Phase E launches with cwd = the isolated workspace (no env var). Phase D sets
+    # TEST_MCP_WORKSPACE explicitly. Fall back to cwd, never a hardcoded subdir.
+    return os.path.realpath(os.environ.get("TEST_MCP_WORKSPACE") or os.getcwd())
 
 
 # name, description, permission (advertised via annotations), inputSchema
@@ -164,3 +165,9 @@ def main():
         if response is not None:
             sys.stdout.write(json.dumps(response) + "\n")
             sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    # Allows launching by absolute script path (Phase E internal_test_server) with
+    # no package on sys.path, so no repository PYTHONPATH injection is needed.
+    main()

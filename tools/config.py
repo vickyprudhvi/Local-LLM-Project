@@ -219,3 +219,12 @@ def mcp_startup_timeout():
 
 def mcp_call_timeout():
     return _int("MCP_CALL_TIMEOUT_SECONDS", 20)
+
+
+# ---- Phase E: external single-server MCP configuration ----
+def mcp_config_path():
+    return _str("MCP_CONFIG_PATH", "config/mcp_server.json")
+
+
+def mcp_workspaces_root():
+    return _str("MCP_WORKSPACES_ROOT", "mcp_workspaces")

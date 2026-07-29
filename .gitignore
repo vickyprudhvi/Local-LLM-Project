@@ -16,3 +16,10 @@ token.json
 # MCP test workspace: keep the seed file, ignore anything written during runs/tests
 test_workspace/*
 !test_workspace/hello.txt
+# MCP configured-server workspace: keep the seed file, ignore runtime-written files
+mcp_workspaces/test/*
+!mcp_workspaces/test/hello.txt
+mcp_workspaces/filesystem/*
+!mcp_workspaces/filesystem/hello.txt
+# Locally-installed external MCP servers (node_modules etc.) — never commit these
+external_mcp_servers/

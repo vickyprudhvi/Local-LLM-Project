@@ -15,7 +15,6 @@ import mcp_layer
 import memory_store
 import tool_dispatch
 import tool_loop
-import tools.config as config
 from brain import ask_claude, load_system_prompt
 from ears import listen_push_to_talk
 from interaction_log import log_turn
@@ -27,20 +26,33 @@ console = Console()
 
 
 def _start_mcp():
-    """Start the internal MCP server and register its tools into the shared registry.
+    """Start the configured external MCP server and register its tools (Phase E).
 
-    Generic subsystem bootstrap — not a per-tool branch. Failure is non-fatal: the
-    assistant logs it and runs without MCP tools. Returns an McpSession or None.
+    Generic subsystem bootstrap — not a per-tool branch. Reads config/mcp_server.json
+    (MCP disabled by default). An optional server (`required: false`) that fails to
+    start is logged and skipped so built-in tools keep working. Returns an McpSession.
     """
-    if not config.mcp_test_server_enabled():
-        return None
     try:
-        session = mcp_layer.bootstrap_test_server(tool_loop.REGISTRY)
+        session = mcp_layer.bootstrap_from_config(tool_loop.REGISTRY)
     except McpError as e:
-        console.print(f"[yellow]MCP unavailable ({e.code}); continuing without MCP tools.[/yellow]")
+        # Only a `required` server reaches here; keep startup clean and continue.
+        console.print(f"[yellow]Required MCP server failed to start ({e.code}).[/yellow]")
         return None
-    console.print(f"[dim]MCP: registered {len(session.tools)} tool(s): "
-                  f"{', '.join(session.tool_names())}[/dim]")
+
+    health = session.health
+    if health is not None and health.state.value == "healthy":
+        console.print(f"[dim]MCP '{health.server_id}': discovered={health.discovered_tool_count} "
+                      f"registered={health.registered_tool_count} denied={health.denied_tool_count} "
+                      f"skipped={health.skipped_tool_count} disabled={health.disabled_tool_count} — "
+                      f"{', '.join(session.tool_names())}[/dim]")
+        # Sanitized diagnostics: tool names + skip reasons only (never secrets/args).
+        for name, reason, category in health.diagnostics:
+            console.print(f"[dim]  MCP tool '{name}' {category}: {reason}[/dim]")
+    elif health is not None and health.state.value == "failed":
+        console.print(f"[yellow]MCP server unavailable ({health.last_error_code}); "
+                      f"continuing without MCP tools.[/yellow]")
+    else:
+        console.print("[dim]MCP: disabled.[/dim]")
     return session
 
 
