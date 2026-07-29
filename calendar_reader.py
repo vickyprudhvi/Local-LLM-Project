@@ -14,6 +14,7 @@ Both files hold secrets and are gitignored — never commit them.
 import datetime
 import os
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -25,6 +26,12 @@ TOKEN_PATH = "token.json"
 PAST_WINDOW_DAYS = 30  # default lookback when only end_date is given, so the query stays bounded
 
 
+def _run_consent_flow():
+    """Interactive OAuth consent (opens a browser). Returns fresh Credentials."""
+    flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
+    return flow.run_local_server(port=0)
+
+
 def _get_credentials():
     creds = None
     if os.path.exists(TOKEN_PATH):
@@ -32,10 +39,16 @@ def _get_credentials():
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except RefreshError:
+                # The refresh token is dead (revoked, or expired because the OAuth
+                # app is in "Testing" status, where Google expires them after 7
+                # days). Discard it and fall back to a fresh consent flow rather
+                # than surfacing an invalid_grant error on every calendar request.
+                creds = _run_consent_flow()
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
-            creds = flow.run_local_server(port=0)
+            creds = _run_consent_flow()
         with open(TOKEN_PATH, "w") as f:
             f.write(creds.to_json())
 

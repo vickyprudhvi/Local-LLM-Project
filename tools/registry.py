@@ -49,11 +49,19 @@ class ToolRegistry:
         self._enabled[name] = False
 
     def enabled_definitions(self) -> List[ToolDefinition]:
-        """Enabled tool definitions in deterministic (name-sorted) order."""
+        """Definitions offered to the local LLM: enabled AND llm_callable, in
+        deterministic (name-sorted) order.
+
+        Router-dispatched built-ins (llm_callable=False) are registered and
+        executable through the same registry/executor, but are deliberately
+        excluded here so the local tool-calling loop never offers them — that
+        keeps the local LLM's callable tool set unchanged.
+        """
         defs = []
         for name in sorted(self._tools):
-            if self._enabled.get(name):
-                d = self._tools[name].definition()
+            tool = self._tools[name]
+            if self._enabled.get(name) and getattr(tool, "llm_callable", True):
+                d = tool.definition()
                 # Reflect the registry's live enabled state on the definition.
                 defs.append(ToolDefinition(d.name, d.description, d.input_schema, d.timeout_seconds, True))
         return defs
@@ -74,6 +82,7 @@ def default_registry(include_internet=None, include_clone=None, include_repo=Non
     reg = ToolRegistry()
     reg.register(EchoTool())
     reg.register(CalculatorTool())
+    _register_builtins(reg)
 
     if include_internet is None:
         include_internet = config.internet_tools_enabled()
@@ -110,3 +119,30 @@ def default_registry(include_internet=None, include_clone=None, include_repo=Non
         for tool_cls in ALL_REPO_TOOL_CLASSES:
             reg.register(tool_cls())
     return reg
+
+
+def _register_builtins(reg: ToolRegistry) -> None:
+    """Register the router-dispatched built-in capabilities.
+
+    These are the former hardcoded branches of assistant.dispatch (memory, time,
+    camera, calendar). They are always registered and always executed through the
+    shared ToolExecutor, but marked llm_callable=False so the local tool-calling
+    loop never offers them. Imported lazily here so a Phase-1-only import of
+    tools.registry stays light. See tool_dispatch.py for how the router selects them.
+    """
+    from tools.calendar_tools import CalendarReadTool
+    from tools.camera_tools import CaptureCameraTool, LookCarefullyTool, LookTool, ScanRoomTool
+    from tools.memory_tools import RecallTool, RememberTool
+    from tools.system_tools import TimeTool
+
+    for tool_cls in (
+        TimeTool,
+        RememberTool,
+        RecallTool,
+        CalendarReadTool,
+        LookTool,
+        LookCarefullyTool,
+        CaptureCameraTool,
+        ScanRoomTool,
+    ):
+        reg.register(tool_cls())

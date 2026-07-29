@@ -50,6 +50,13 @@ class BaseTool(ABC):
     # "repository.read"). The executor blocks the tool with the mapped controlled
     # error when the capability's config flag is off. Empty for Phase 1/2A tools.
     required_capabilities: tuple = ()
+    # Phase A: whether this tool is offered to the local tool-calling loop (the
+    # LLM chooses it itself). True for LLM-selectable tools (echo, calculate,
+    # web/GitHub/repo). False for router-dispatched built-ins (memory/time/camera/
+    # calendar): they are registered and executed through the same registry and
+    # executor, but selected by the router, never offered to the local LLM — so
+    # registering them here does NOT change what the local loop can call.
+    llm_callable: bool = True
 
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
