@@ -202,3 +202,20 @@ def repo_scan_max_findings():
 # content is untrusted; keep excerpts small, bounded, and clearly labeled.
 def max_untrusted_repo_text_chars():
     return _int("MAX_UNTRUSTED_REPO_TEXT_CHARS", 4000)
+
+
+# ---- Phase D: MCP layer (internal test server only) ----
+def mcp_test_server_enabled():
+    return _bool("MCP_TEST_SERVER_ENABLED", True)
+
+
+def mcp_test_workspace():
+    return _str("MCP_TEST_WORKSPACE", "test_workspace")
+
+
+def mcp_startup_timeout():
+    return _int("MCP_STARTUP_TIMEOUT_SECONDS", 15)
+
+
+def mcp_call_timeout():
+    return _int("MCP_CALL_TIMEOUT_SECONDS", 20)

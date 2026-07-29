@@ -13,3 +13,6 @@ vad_capture.wav
 .claude/
 credentials.json
 token.json
+# MCP test workspace: keep the seed file, ignore anything written during runs/tests
+test_workspace/*
+!test_workspace/hello.txt

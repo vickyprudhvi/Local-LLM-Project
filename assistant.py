@@ -11,16 +11,37 @@ import time
 
 from rich.console import Console
 
+import mcp_layer
 import memory_store
 import tool_dispatch
 import tool_loop
+import tools.config as config
 from brain import ask_claude, load_system_prompt
 from ears import listen_push_to_talk
 from interaction_log import log_turn
+from mcp_layer import McpError
 from router import route_and_answer
 from voice import speak
 
 console = Console()
+
+
+def _start_mcp():
+    """Start the internal MCP server and register its tools into the shared registry.
+
+    Generic subsystem bootstrap — not a per-tool branch. Failure is non-fatal: the
+    assistant logs it and runs without MCP tools. Returns an McpSession or None.
+    """
+    if not config.mcp_test_server_enabled():
+        return None
+    try:
+        session = mcp_layer.bootstrap_test_server(tool_loop.REGISTRY)
+    except McpError as e:
+        console.print(f"[yellow]MCP unavailable ({e.code}); continuing without MCP tools.[/yellow]")
+        return None
+    console.print(f"[dim]MCP: registered {len(session.tools)} tool(s): "
+                  f"{', '.join(session.tool_names())}[/dim]")
+    return session
 
 
 def _enrich_with_memory(user_text):
@@ -69,42 +90,47 @@ def main():
     history = []
 
     console.print("[bold]home-ai (LLM router v2 — consolidated)[/bold]")
+    mcp_session = _start_mcp()
 
-    while True:
-        mode = input("mode [t=text, p=push-to-talk, q=quit]: ").strip().lower()
-        if mode == "q":
-            break
-        if mode not in ("t", "p"):
-            continue
+    try:
+        while True:
+            mode = input("mode [t=text, p=push-to-talk, q=quit]: ").strip().lower()
+            if mode == "q":
+                break
+            if mode not in ("t", "p"):
+                continue
 
-        user_text = get_user_text(mode)
-        if not user_text:
-            continue
+            user_text = get_user_text(mode)
+            if not user_text:
+                continue
 
-        turn_start = time.perf_counter()
+            turn_start = time.perf_counter()
 
-        prompt = _enrich_with_memory(user_text)
-        decision = route_and_answer(prompt, history)
-        console.print(f"[dim]routing: mode={decision.mode} tool={decision.tool}[/dim]")
+            prompt = _enrich_with_memory(user_text)
+            decision = route_and_answer(prompt, history)
+            console.print(f"[dim]routing: mode={decision.mode} tool={decision.tool}[/dim]")
 
-        reply, extra_metrics = dispatch(decision, user_text, prompt, history, system_prompt)
-        console.print(f"[cyan]{reply}[/cyan]")
-        speak(reply)
+            reply, extra_metrics = dispatch(decision, user_text, prompt, history, system_prompt)
+            console.print(f"[cyan]{reply}[/cyan]")
+            speak(reply)
 
-        total_time_sec = time.perf_counter() - turn_start
-        prompt_tokens = (decision.prompt_tokens or 0) + (extra_metrics.get("prompt_tokens") or 0)
-        completion_tokens = (decision.completion_tokens or 0) + (extra_metrics.get("completion_tokens") or 0)
-        log_turn(
-            question=user_text,
-            mode=decision.mode,
-            tool=decision.tool,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_time_sec=total_time_sec,
-        )
+            total_time_sec = time.perf_counter() - turn_start
+            prompt_tokens = (decision.prompt_tokens or 0) + (extra_metrics.get("prompt_tokens") or 0)
+            completion_tokens = (decision.completion_tokens or 0) + (extra_metrics.get("completion_tokens") or 0)
+            log_turn(
+                question=user_text,
+                mode=decision.mode,
+                tool=decision.tool,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_time_sec=total_time_sec,
+            )
 
-        history.append({"role": "user", "content": user_text})
-        history.append({"role": "assistant", "content": reply})
+            history.append({"role": "user", "content": user_text})
+            history.append({"role": "assistant", "content": reply})
+    finally:
+        if mcp_session is not None:
+            mcp_session.shutdown()
 
 
 if __name__ == "__main__":
