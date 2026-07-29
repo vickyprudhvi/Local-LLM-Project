@@ -33,6 +33,30 @@ def log_turn(question, mode, tool, prompt_tokens, completion_tokens, total_time_
     return record
 
 
+def log_tool_selection(registered_tools, shortlisted_tools, selection_prompt_size,
+                       prompt_eval_count, completion_tokens):
+    """Append one JSON line describing the Phase B tool-selection step of a local turn.
+
+    Records only safe telemetry: the count of registered (candidate) tools, the
+    shortlisted tool NAMES (not sensitive), the selection prompt size in chars, and
+    the selection call's token counts. Lets prompt growth be tracked as the registry
+    grows — the whole point of the selection budget.
+    """
+    os.makedirs(os.path.dirname(LOG_PATH) or ".", exist_ok=True)
+    record = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "event": "tool_selection",
+        "registered_tools": registered_tools,
+        "shortlisted_tools": shortlisted_tools,
+        "selection_prompt_size": selection_prompt_size,
+        "prompt_eval_count": prompt_eval_count,
+        "completion_tokens": completion_tokens,
+    }
+    with open(LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+    return record
+
+
 def log_tool_event(tool_name, call_id, step, status, duration_ms=None, error_code=None, extra=None):
     """Append one JSON line describing a single tool-execution event.
 

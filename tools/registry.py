@@ -5,6 +5,7 @@ the Phase 1 tools always, and the Phase 2A read-only internet/GitHub tools when
 INTERNET_TOOLS_ENABLED is on.
 """
 
+import re
 from typing import List
 
 import tools.config as config
@@ -12,6 +13,58 @@ from tools.base import BaseTool
 from tools.calculator import CalculatorTool
 from tools.echo import EchoTool
 from tools.models import ToolDefinition
+
+# ---- Phase B: lexical relevance shortlisting (no embeddings/RAG) ----
+# A deterministic, dependency-free scorer: overlap between the user message's
+# tokens and each tool's name + description tokens, with name matches weighted
+# higher. This is intentionally simple — it only has to surface the handful of
+# plausibly-relevant tools so the local LLM chooses among a bounded candidate set.
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "is", "are",
+    "do", "does", "did", "you", "me", "my", "your", "it", "that", "this", "what",
+    "whats", "how", "can", "could", "would", "please", "with", "at", "be", "have",
+    "has", "get", "got", "if", "about", "as", "from", "by", "was", "were", "will",
+    "just", "tell", "show", "give", "want", "need", "use",
+})
+
+
+def _tokenize(text: str) -> set:
+    if not text:
+        return set()
+    return {t for t in _TOKEN_RE.findall(text.lower()) if len(t) > 1 and t not in _STOPWORDS}
+
+
+def _definition_tokens(definition: ToolDefinition):
+    name_tokens = set(_TOKEN_RE.findall(definition.name.lower()))
+    all_tokens = name_tokens | _tokenize(definition.description or "")
+    return all_tokens, name_tokens
+
+
+def _relevance(query_tokens: set, definition: ToolDefinition) -> int:
+    all_tokens, name_tokens = _definition_tokens(definition)
+    return len(query_tokens & all_tokens) + len(query_tokens & name_tokens)
+
+
+def bounded_ollama_schema(definition: ToolDefinition, max_description_chars=None) -> dict:
+    """An Ollama tool schema whose description is truncated to the char budget.
+
+    Applied before prompt construction so no single tool definition can bloat the
+    selection prompt regardless of how verbose its registered description is.
+    """
+    if max_description_chars is None:
+        max_description_chars = config.max_tool_description_chars()
+    description = definition.description or ""
+    if len(description) > max_description_chars:
+        description = description[:max_description_chars].rstrip()
+    return {
+        "type": "function",
+        "function": {
+            "name": definition.name,
+            "description": description,
+            "parameters": definition.input_schema,
+        },
+    }
 
 
 class ToolRegistry:
@@ -68,6 +121,24 @@ class ToolRegistry:
 
     def enabled_ollama_schemas(self) -> List[dict]:
         return [d.to_ollama_schema() for d in self.enabled_definitions()]
+
+    def shortlist_tools(self, user_message: str, limit=None) -> List[ToolDefinition]:
+        """Return at most `limit` candidate ToolDefinitions, most relevant first.
+
+        Phase B: the local LLM never receives the full registry. This bounds the
+        candidate set so the selection prompt stays ~constant in size as the
+        registry grows. It only limits candidates — it does NOT force tool use;
+        the local LLM may still choose no tool. Selection is deterministic
+        (relevance desc, then name asc) so tests and logs are reproducible.
+        """
+        if limit is None:
+            limit = config.max_shortlist_tools()
+        candidates = self.enabled_definitions()  # llm_callable + enabled, name-sorted
+        if len(candidates) <= limit:
+            return candidates
+        query_tokens = _tokenize(user_message)
+        ranked = sorted(candidates, key=lambda d: (-_relevance(query_tokens, d), d.name))
+        return ranked[:limit]
 
 
 def default_registry(include_internet=None, include_clone=None, include_repo=None) -> ToolRegistry:
