@@ -25,10 +25,11 @@ tool that speaks directly contributes no metrics.
 import json
 import uuid
 
+import confirmation
 import eyes
 import tool_loop
 from brain import ask_local
-from tools.models import ToolCall
+from tools.models import TOOL_CONFIRMATION_DECLINED, ToolCall
 
 # Router short-name -> (registered tool name, payload -> arguments dict).
 # The payload encodings mirror what router.py produces today; this is the one
@@ -76,13 +77,20 @@ def execute_and_render(decision, user_text, history, system_prompt):
         arguments = {}
 
     call = ToolCall(call_id=f"call_{uuid.uuid4().hex[:16]}", tool_name=tool_name, arguments=arguments)
-    result = tool_loop.EXECUTOR.execute(call)
+    # Write-class built-ins (memory.remember, camera.capture, camera.scan) are gated
+    # here: the executor requires confirmation, which is collected before execution.
+    # Read-class built-ins run in a single pass with no prompt.
+    result = confirmation.resolve_with_confirmation(tool_loop.EXECUTOR, call)
     return _render(result, user_text, history, system_prompt)
 
 
 def _render(result, user_text, history, system_prompt):
     """Turn a ToolResult into (reply, metrics) via the generic render protocol."""
     if not result.success:
+        # A declined write confirmation is a normal outcome, not a fault — report
+        # the cancellation plainly. (Generic: any declined write, not tool-specific.)
+        if result.error and result.error.code == TOOL_CONFIRMATION_DECLINED:
+            return "Okay, I've cancelled that.", {}
         # Domain errors are already returned by tools as a "speak" directive on a
         # successful result; reaching here means an unexpected fault (timeout/bug).
         return "Sorry, I couldn't do that just now.", {}

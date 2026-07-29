@@ -8,6 +8,7 @@ step stays in the orchestrator. llm_callable=False: router-selected only.
 
 import calendar_reader
 from tools.base import BaseTool
+from tools.models import ToolPermission
 
 # Moved verbatim from the former assistant.dispatch calendar branch.
 CALENDAR_SUMMARY_PROMPT = (
@@ -30,6 +31,7 @@ class CalendarReadTool(BaseTool):
     }
     timeout_seconds = 30.0
     llm_callable = False
+    permission = ToolPermission.READ  # read-only calendar access (no event writes)
 
     def execute(self, arguments: dict) -> dict:
         try:

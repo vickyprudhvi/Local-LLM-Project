@@ -21,6 +21,7 @@ from tools.models import (
     GITHUB_REPOSITORY_NOT_FOUND,
     INVALID_REPOSITORY,
     INVALID_REPOSITORY_PATH,
+    ToolPermission,
 )
 
 _OWNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$")
@@ -85,6 +86,7 @@ def validate_path(path, *, allow_empty):
 class _GitHubTool(BaseTool):
     timeout_seconds = 25.0
     requires_internet = True
+    permission = ToolPermission.READ  # read-only public GitHub REST API (no writes/downloads)
 
     def __init__(self, client=None):
         self._client = client

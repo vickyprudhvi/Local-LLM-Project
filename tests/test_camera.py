@@ -196,9 +196,10 @@ def test_capture_camera_tool_is_registered():
     assert _TOOL_NAME_MAP["capture_camera"] == "capture_camera"
 
 
+@patch("confirmation.confirm_action", return_value=True)
 @patch("tool_dispatch.eyes.describe_local")
 @patch("camera.capture_camera_frame")
-def test_dispatch_capture_camera_feeds_vision_processor(mock_capture, mock_describe):
+def test_dispatch_capture_camera_feeds_vision_processor(mock_capture, mock_describe, _approve):
     import assistant
     from router import RouteDecision
 
@@ -215,8 +216,9 @@ def test_dispatch_capture_camera_feeds_vision_processor(mock_capture, mock_descr
     assert reply == "A desk with a laptop."
 
 
+@patch("confirmation.confirm_action", return_value=True)
 @patch("camera.capture_camera_frame")
-def test_dispatch_capture_camera_failure_is_safe(mock_capture):
+def test_dispatch_capture_camera_failure_is_safe(mock_capture, _approve):
     import assistant
     from router import RouteDecision
 

@@ -5,8 +5,39 @@ Everything a tool returns must be JSON-serializable: never exceptions, stack
 traces, tokens, headers, or other non-serializable Python values.
 """
 
+import hashlib
+import json as _json
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Optional
+
+
+# ---- Phase C: tool permission model ----
+class ToolPermission(str, Enum):
+    """Every tool's effective permission. Fail closed: anything unrecognized -> DENIED."""
+
+    READ = "read"      # auto-execute
+    WRITE = "write"    # require explicit one-turn user confirmation
+    DENIED = "denied"  # never execute
+
+    @classmethod
+    def coerce(cls, value) -> "ToolPermission":
+        """Map any value to a permission, defaulting unknown/missing to DENIED."""
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(value)
+        except (ValueError, TypeError):
+            return cls.DENIED
+
+
+def hash_arguments(arguments) -> str:
+    """Stable hash of tool arguments, so a confirmation binds to the exact call.
+
+    Deterministic (sorted keys); non-JSON values fall back to their string form.
+    """
+    serialized = _json.dumps(arguments, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 # ---- Controlled error codes (the only ones the executor/loop may emit) ----
@@ -19,6 +50,13 @@ TOOL_EXECUTION_ERROR = "TOOL_EXECUTION_ERROR"
 INVALID_TOOL_OUTPUT = "INVALID_TOOL_OUTPUT"
 MALFORMED_TOOL_CALL = "MALFORMED_TOOL_CALL"
 TOOL_STEP_LIMIT_REACHED = "TOOL_STEP_LIMIT_REACHED"
+
+# Phase C — permission / confirmation
+TOOL_PERMISSION_DENIED = "TOOL_PERMISSION_DENIED"
+TOOL_PERMISSION_INVALID = "TOOL_PERMISSION_INVALID"
+TOOL_CONFIRMATION_REQUIRED = "TOOL_CONFIRMATION_REQUIRED"
+TOOL_CONFIRMATION_DECLINED = "TOOL_CONFIRMATION_DECLINED"
+TOOL_CONFIRMATION_MISMATCH = "TOOL_CONFIRMATION_MISMATCH"
 
 # Phase 2A — permission / internet
 INTERNET_DISABLED = "INTERNET_DISABLED"
@@ -84,6 +122,9 @@ class ToolDefinition:
     input_schema: dict
     timeout_seconds: float = 10.0
     enabled: bool = True
+    # Phase C: effective permission. Default DENIED so a tool without an explicit
+    # classification can never run (fail closed). Enforcement lives in ToolExecutor.
+    permission: "ToolPermission" = ToolPermission.DENIED
 
     def to_ollama_schema(self) -> dict:
         """Ollama /api/chat `tools` entry — same shape router.py already uses."""
@@ -107,13 +148,34 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class ToolConfirmation:
+    """A user's decision on a single pending write-tool call.
+
+    Single-use and call-bound: it approves only the exact tool + arguments it was
+    issued for. A previous 'yes' can never approve a different or later action.
+    """
+
+    approved: bool
+    tool_name: str
+    arguments_hash: str
+    request_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class ToolError:
     code: str
     message: str
     retryable: bool = False
+    # Safe, structured, non-sensitive extras for the model/orchestrator (e.g. a
+    # deterministic action_summary for a confirmation request). Never secrets,
+    # tokens, raw repository content, or absolute paths.
+    details: Optional[dict] = None
 
     def to_dict(self) -> dict:
-        return {"code": self.code, "message": self.message}
+        out = {"code": self.code, "message": self.message}
+        if self.details:
+            out["details"] = self.details
+        return out
 
 
 @dataclass
@@ -165,13 +227,14 @@ class ToolResult:
         execution_time_ms: Optional[float] = None,
         retryable: bool = False,
         log_meta: Optional[dict] = None,
+        details: Optional[dict] = None,
     ) -> "ToolResult":
         return cls(
             False,
             tool_name,
             call_id,
             data={},
-            error=ToolError(code, message, retryable),
+            error=ToolError(code, message, retryable, details=details),
             execution_time_ms=execution_time_ms,
             log_meta=log_meta,
         )

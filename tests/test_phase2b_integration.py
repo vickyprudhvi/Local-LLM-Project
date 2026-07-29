@@ -73,6 +73,15 @@ def _tool_msgs(call):
     return [m for m in call["messages"] if m.get("role") == "tool"]
 
 
+@pytest.fixture(autouse=True)
+def _auto_approve_writes(monkeypatch):
+    """These tests exercise the clone→inspect flow, not the confirmation UX. Auto-
+    approve write confirmations (github.clone_repository) so the loop never blocks
+    on input(); Phase C confirmation behavior is covered by dedicated tests."""
+    import confirmation
+    monkeypatch.setattr(confirmation, "confirm_action", lambda summary: True)
+
+
 @pytest.fixture
 def wired(tmp_path, monkeypatch):
     monkeypatch.setenv("REPOSITORY_ROOT", str(tmp_path / "repos"))

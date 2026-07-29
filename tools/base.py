@@ -7,7 +7,7 @@ Ollama messages, routing, system prompts, or the final response wording.
 
 from abc import ABC, abstractmethod
 
-from tools.models import ToolDefinition
+from tools.models import ToolDefinition, ToolPermission
 
 
 class ToolValidationError(Exception):
@@ -57,6 +57,10 @@ class BaseTool(ABC):
     # executor, but selected by the router, never offered to the local LLM — so
     # registering them here does NOT change what the local loop can call.
     llm_callable: bool = True
+    # Phase C: effective permission, enforced centrally by ToolExecutor. Default
+    # DENIED so any tool that forgets to declare one fails closed and never runs.
+    # Every real tool sets this explicitly. read -> auto; write -> confirmation.
+    permission: ToolPermission = ToolPermission.DENIED
 
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
@@ -65,7 +69,17 @@ class BaseTool(ABC):
             input_schema=self.input_schema,
             timeout_seconds=self.timeout_seconds,
             enabled=self.enabled,
+            permission=ToolPermission.coerce(self.permission),
         )
+
+    def confirmation_summary(self, arguments: dict) -> str:
+        """Deterministic, human-readable description of what a WRITE call will do.
+
+        Shown to the user before asking for confirmation. Built ONLY from the tool
+        and its arguments — never from model output, fetched web pages, or cloned
+        repository content. Write tools override this with a specific sentence.
+        """
+        return f"Run '{self.name}' with the provided arguments."
 
     def validate_arguments(self, arguments: dict) -> dict:
         """Validate/normalize arguments. Raise ToolValidationError if invalid.

@@ -10,6 +10,7 @@ any knowledge of how the reply is spoken.
 from datetime import datetime
 
 from tools.base import BaseTool
+from tools.models import ToolPermission
 
 
 class TimeTool(BaseTool):
@@ -18,6 +19,7 @@ class TimeTool(BaseTool):
     input_schema = {"type": "object", "properties": {}}
     timeout_seconds = 5.0
     llm_callable = False
+    permission = ToolPermission.READ  # reads the system clock only
 
     def execute(self, arguments: dict) -> dict:
         # Same format string the former assistant.dispatch time branch used.

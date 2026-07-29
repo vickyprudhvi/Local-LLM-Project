@@ -5,6 +5,7 @@ the result returns to the local LLM. It does NOT generate a conversational answe
 """
 
 from tools.base import BaseTool, ToolValidationError
+from tools.models import ToolPermission
 
 MAX_ECHO_LEN = 2000
 
@@ -12,6 +13,7 @@ MAX_ECHO_LEN = 2000
 class EchoTool(BaseTool):
     name = "system.echo"
     description = "Echo back the provided text unchanged. Useful only for diagnostics."
+    permission = ToolPermission.READ  # pure, side-effect-free diagnostic
     input_schema = {
         "type": "object",
         "properties": {

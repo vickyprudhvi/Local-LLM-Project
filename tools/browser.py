@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 import tools.config as config
 from tools.base import BaseTool, ToolFailure, ToolValidationError
 from tools.http_safety import read_limited, safe_get
-from tools.models import UNSUPPORTED_CONTENT_TYPE
+from tools.models import UNSUPPORTED_CONTENT_TYPE, ToolPermission
 from tools.search_provider import get_provider
 
 _TEXTUAL_CONTENT_TYPES = {
@@ -34,6 +34,7 @@ class SearchTool(BaseTool):
     }
     timeout_seconds = 25.0
     requires_internet = True
+    permission = ToolPermission.READ  # read-only web search
 
     def __init__(self, provider=None):
         self._provider = provider
@@ -92,6 +93,7 @@ class FetchPageTool(BaseTool):
     }
     timeout_seconds = 30.0
     requires_internet = True
+    permission = ToolPermission.READ  # fetch-and-read only; no writes
 
     def __init__(self, session=None):
         self._session = session

@@ -195,3 +195,10 @@ def repo_scan_max_depth():
 
 def repo_scan_max_findings():
     return _int("REPO_SCAN_MAX_FINDINGS", 500)
+
+
+# ---- Phase C: untrusted repository text ----
+# Hard cap on any raw repository text placed in the model prompt. Repository
+# content is untrusted; keep excerpts small, bounded, and clearly labeled.
+def max_untrusted_repo_text_chars():
+    return _int("MAX_UNTRUSTED_REPO_TEXT_CHARS", 4000)
