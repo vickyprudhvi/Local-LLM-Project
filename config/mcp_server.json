@@ -1,0 +1,25 @@
+{
+  "enabled": false,
+  "required": false,
+  "server_id": "test",
+  "display_name": "Configured Test MCP Server",
+  "transport": "stdio",
+  "command": "python",
+  "args": ["-m", "test_mcp_server"],
+  "working_directory": "./mcp_workspaces/test",
+  "startup_timeout_seconds": 10,
+  "call_timeout_seconds": 5,
+  "shutdown_timeout_seconds": 5,
+  "environment_allowlist": [],
+  "tool_policy": {
+    "default_permission": "denied",
+    "tools": {
+      "echo_text": { "enabled": true, "permission": "read" },
+      "add_numbers": { "enabled": true, "permission": "read" },
+      "read_test_file": { "enabled": true, "permission": "read" },
+      "write_test_file": { "enabled": true, "permission": "write" },
+      "fail_tool": { "enabled": true, "permission": "read" },
+      "slow_tool": { "enabled": true, "permission": "read" }
+    }
+  }
+}
