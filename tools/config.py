@@ -32,6 +32,21 @@ def _str(name, default):
     return val if val not in (None, "") else default
 
 
+# ---- Phase B: tool selection budget ----
+# Bound the candidate tool set (and each description) placed in the local model's
+# selection prompt, so prompt size stays ~constant as the registry grows.
+def max_shortlist_tools():
+    return _int("MAX_SHORTLIST_TOOLS", 5)
+
+
+def max_tool_description_chars():
+    return _int("MAX_TOOL_DESCRIPTION_CHARS", 300)
+
+
+def max_selection_prompt_chars():
+    return _int("MAX_SELECTION_PROMPT_CHARS", 8000)
+
+
 # ---- Capability toggles ----
 def internet_tools_enabled():
     return _bool("INTERNET_TOOLS_ENABLED", True)

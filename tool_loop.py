@@ -12,15 +12,18 @@ Verified Ollama message shapes (see docs/phase1-tool-call-test.md):
       "tool_name": "<name>"}   (tool_name supported/optional; no OpenAI tool_call_id)
 """
 
+import json
 import os
 import uuid
 
 from rich.console import Console
 
+import tools.config as config
 from brain import ask_local_raw, trim_history_tool_aware
+from interaction_log import log_tool_selection
 from tools.executor import ToolExecutor
 from tools.models import TOOL_STEP_LIMIT_REACHED, ToolCall, ToolResult
-from tools.registry import default_registry
+from tools.registry import bounded_ollama_schema, default_registry
 
 console = Console()
 
@@ -119,6 +122,12 @@ def _accumulate(metrics, raw):
     metrics["completion_tokens"] += m.get("completion_tokens") or 0
 
 
+def _selection_prompt_size(messages, tool_schemas):
+    """Character size of the selection payload actually sent to Ollama (messages +
+    offered tool schemas). Used for telemetry and to keep the budget observable."""
+    return len(json.dumps(messages)) + len(json.dumps(tool_schemas))
+
+
 def run_local_tool_loop(prompt, history, system_prompt):
     """Run the local answering path with tool support. Returns (text, metrics).
 
@@ -128,7 +137,22 @@ def run_local_tool_loop(prompt, history, system_prompt):
     which is what keeps them out of ChromaDB.
     """
     metrics = {"prompt_tokens": 0, "completion_tokens": 0}
-    tool_schemas = REGISTRY.enabled_ollama_schemas() if TOOL_CALLING_ENABLED else []
+
+    # Phase B — bounded tool selection: the local LLM never receives the whole
+    # registry. Shortlist the most relevant candidates and truncate each
+    # description, so the selection prompt stays ~constant as the registry grows.
+    # This only limits the candidate set; the model still decides whether to use a
+    # tool at all. The executor resolves any chosen tool from the FULL registry, so
+    # shortlisting affects only what is offered, never what can be executed.
+    registered_tools = len(REGISTRY.enabled_definitions()) if TOOL_CALLING_ENABLED else 0
+    if TOOL_CALLING_ENABLED:
+        shortlisted = REGISTRY.shortlist_tools(prompt, config.max_shortlist_tools())
+        tool_schemas = [
+            bounded_ollama_schema(d, config.max_tool_description_chars()) for d in shortlisted
+        ]
+    else:
+        shortlisted = []
+        tool_schemas = []
 
     # Append the static tool-safety/untrusted-content guidance only when tools are
     # actually offered. Remote content is never placed in the system prompt.
@@ -147,12 +171,30 @@ def run_local_tool_loop(prompt, history, system_prompt):
         _accumulate(metrics, raw)
         return (raw["message"].get("content") or "").strip(), metrics
 
+    selection_prompt_size = _selection_prompt_size(messages, tool_schemas)
+    console.print(
+        f"[dim]tool selection: {registered_tools} registered -> {len(shortlisted)} shortlisted "
+        f"({', '.join(d.name for d in shortlisted)}); selection prompt {selection_prompt_size} chars[/dim]"
+    )
+    selection_logged = False
+
     steps_used = 0
     last_tool_name = None
     # Hard outer cap guarantees termination even if the model keeps requesting tools.
     for _ in range(MAX_TOOL_STEPS + 2):
         raw = ask_local_raw(messages, tools=tool_schemas)
         _accumulate(metrics, raw)
+        if not selection_logged:
+            # Log once, for the selection step (the first tool-enabled call).
+            call_metrics = raw.get("metrics") or {}
+            log_tool_selection(
+                registered_tools=registered_tools,
+                shortlisted_tools=[d.name for d in shortlisted],
+                selection_prompt_size=selection_prompt_size,
+                prompt_eval_count=call_metrics.get("prompt_tokens"),
+                completion_tokens=call_metrics.get("completion_tokens"),
+            )
+            selection_logged = True
         message = raw["message"]
         tool_calls = message.get("tool_calls") or []
 
