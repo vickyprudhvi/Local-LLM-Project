@@ -228,3 +228,21 @@ def mcp_config_path():
 
 def mcp_workspaces_root():
     return _str("MCP_WORKSPACES_ROOT", "mcp_workspaces")
+
+
+# ---- Phase F: automatic MCP provisioning ----
+def mcp_catalog_path():
+    return _str("MCP_CATALOG_PATH", "config/mcp_catalog.json")
+
+
+def mcp_managed_root():
+    """Root of the managed installation area. Never the repo root or a venv."""
+    return _str("MCP_MANAGED_ROOT", "app_data/mcp_servers")
+
+
+def mcp_install_timeout():
+    return _int("MCP_INSTALL_TIMEOUT_SECONDS", 300)
+
+
+def mcp_provisioning_enabled():
+    return _bool("MCP_PROVISIONING_ENABLED", True)

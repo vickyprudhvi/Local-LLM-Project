@@ -26,12 +26,22 @@ unchanged.
 
 ## Enabling / disabling MCP
 
-MCP is **disabled by default**. Edit `config/mcp_server.json`:
+MCP is **disabled by default**.
 
-- `"enabled": false` — no subprocess starts, no MCP tools register, built-ins work.
-- `"enabled": true` — the configured server is started at assistant startup.
+> **Updated in Phase F.** `config/mcp_server.json` is now a portable, committed,
+> disabled-by-default **template**, and the effective configuration is resolved at
+> startup: `MCP_CONFIG_PATH` override → enabled managed (Phase F) server →
+> this template. See [PHASE_F.md](PHASE_F.md#which-configuration-is-in-effect).
 
-Set `MCP_CONFIG_PATH` to use a different config file.
+Your options:
+
+- **Let Phase F manage it** — provision a server through the trusted catalog; its
+  generated configuration lives under `app_data/mcp_servers/` and is selected
+  automatically while enabled. The committed template is never modified.
+- **Point at your own file** — set `MCP_CONFIG_PATH` to a JSON file you maintain
+  (machine-specific paths stay out of source control).
+- **Edit the template** — fine for a portable setup, but avoid committing absolute
+  paths.
 
 ## Configuration fields
 

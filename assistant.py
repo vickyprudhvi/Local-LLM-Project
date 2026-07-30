@@ -15,14 +15,38 @@ import mcp_layer
 import memory_store
 import tool_dispatch
 import tool_loop
+import tools.config as app_config
 from brain import ask_claude, load_system_prompt
 from ears import listen_push_to_talk
 from interaction_log import log_turn
 from mcp_layer import McpError
+from mcp_layer.config_resolver import resolve_config
 from router import route_and_answer
 from voice import speak
 
 console = Console()
+
+
+def _start_provisioning():
+    """Register the Phase F provisioning tools so MCP servers can be set up in-chat.
+
+    Generic subsystem bootstrap — the tools are ordinary BaseTools, so they run
+    through the existing executor with the existing permission/confirmation logic.
+    A catalog problem is non-fatal: the assistant simply cannot provision.
+    """
+    if not app_config.mcp_provisioning_enabled():
+        return None
+    try:
+        from mcp_management import McpProvisioningManager, register_provisioning_tools
+
+        manager = McpProvisioningManager()
+        tools = register_provisioning_tools(tool_loop.REGISTRY, manager)
+    except McpError as e:
+        console.print(f"[yellow]MCP provisioning unavailable ({e.code}).[/yellow]")
+        return None
+    console.print(f"[dim]MCP provisioning: {len(tools)} tool(s) available; "
+                  f"catalog has {len(manager.catalog.entries)} approved server(s).[/dim]")
+    return manager
 
 
 def _start_mcp():
@@ -33,10 +57,14 @@ def _start_mcp():
     start is logged and skipped so built-in tools keep working. Returns an McpSession.
     """
     try:
+        # Which configuration is in effect: env override -> managed (Phase F) -> template.
+        # Only the source + basename are logged, never the path with its contents.
+        resolved = resolve_config()
+        console.print(f"[dim]MCP config: {resolved.describe()}[/dim]")
         session = mcp_layer.bootstrap_from_config(tool_loop.REGISTRY)
     except McpError as e:
-        # Only a `required` server reaches here; keep startup clean and continue.
-        console.print(f"[yellow]Required MCP server failed to start ({e.code}).[/yellow]")
+        # Only a `required` server (or a bad MCP_CONFIG_PATH) reaches here.
+        console.print(f"[yellow]MCP startup problem ({e.code}); continuing without MCP tools.[/yellow]")
         return None
 
     health = session.health
@@ -103,6 +131,7 @@ def main():
 
     console.print("[bold]home-ai (LLM router v2 — consolidated)[/bold]")
     mcp_session = _start_mcp()
+    _start_provisioning()
 
     try:
         while True:

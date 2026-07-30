@@ -15,6 +15,7 @@ import shutil
 import tools.config as app_config
 from mcp_layer.client import McpClient
 from mcp_layer.config import McpServerConfig, load_config
+from mcp_layer.config_resolver import resolve_config
 from mcp_layer.discovery import build_tools, plan_registration
 from mcp_layer.environment import build_child_environment
 from mcp_layer.errors import McpError
@@ -31,7 +32,15 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def default_config_path(base_dir=None):
+    """The effective configuration path, by the documented precedence.
+
+    MCP_CONFIG_PATH override -> enabled managed (Phase F) server -> committed
+    portable template. Phase F never writes the committed template.
+    """
     base_dir = base_dir or _REPO_ROOT
+    resolved = resolve_config(base_dir=base_dir)
+    if resolved.path is not None:
+        return str(resolved.path)
     return os.path.join(base_dir, app_config.mcp_config_path())
 
 
