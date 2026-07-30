@@ -12,18 +12,38 @@ detect -> install -> detect loop impossible.
 
 import os
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from interaction_log import log_mcp_event
 from mcp_layer.errors import McpError
 from mcp_management import lifecycle
-from mcp_management.approval import collect_approval, require_approval
+from mcp_management.approval import (
+    collect_approval,
+    require_approval,
+    require_filesystem_access_approval,
+)
 from mcp_management.capability_detector import detect_capability
 from mcp_management.catalog import load_catalog
+from mcp_management.filesystem_access import (
+    DEFAULT_PLAN_TTL_SECONDS,
+    FilesystemAccessApproval,
+    FilesystemAccessOperation,
+    FilesystemAccessPlan,
+    PendingFilesystemAccessRequest,
+    PendingFilesystemAccessState,
+)
+from mcp_management.filesystem_access_update import update_filesystem_access
 from mcp_management.installer import install
 from mcp_management.models import PendingCapabilityRequest, PendingRequestState
-from mcp_management.planner import build_plan
+from mcp_management.planner import build_plan, validate_approved_directory
 from mcp_management.registry import get_installed, load_registry
 from tools.models import (
+    MCP_FILESYSTEM_ACCESS_ALREADY_GRANTED,
+    MCP_FILESYSTEM_ACCESS_LOOP_PREVENTED,
+    MCP_FILESYSTEM_ACCESS_NOT_INSTALLED,
+    MCP_FILESYSTEM_ACCESS_PLAN_INVALID,
+    MCP_FILESYSTEM_LAST_ROOT_REQUIRED,
+    MCP_FILESYSTEM_ROOT_NOT_FOUND,
     MCP_NOT_INSTALLED,
     MCP_PROVISIONING_LOOP_PREVENTED,
     MCP_SERVER_NOT_APPROVED,
@@ -46,6 +66,8 @@ class McpProvisioningManager:
             catalog_path, self.base_dir)
         self._pending = {}
         self._plans = {}
+        self._filesystem_pending = {}
+        self._filesystem_plans = {}
 
     # ---- state ----
 
@@ -243,3 +265,185 @@ class McpProvisioningManager:
         if entry is None:
             raise McpError(MCP_NOT_INSTALLED, f"Server {server_id!r} is not installed.")
         return entry
+
+    # ---- Phase F.1: filesystem access-root expansion on an already-installed server ----
+
+    def _require_installed_for_access(self, server_id):
+        installed = get_installed(server_id, self.registry_path, self.base_dir, self.managed_root)
+        if installed is None:
+            raise McpError(MCP_FILESYSTEM_ACCESS_NOT_INSTALLED,
+                           f"Server {server_id!r} is not installed.")
+        return installed
+
+    def list_filesystem_access(self, server_id):
+        installed = self._require_installed_for_access(server_id)
+        return tuple(sorted({os.path.realpath(d) for d in installed.approved_directories}))
+
+    def begin_filesystem_access_request(self, original_user_text, requested_path,
+                                        proposed_root, server_id):
+        """Open a pending filesystem-access request for an outside-root failure
+        already classified by the caller. Mirrors begin_request()'s shape."""
+        request = PendingFilesystemAccessRequest(
+            request_id=f"fsreq_{uuid.uuid4().hex[:12]}",
+            original_user_text=original_user_text,
+            requested_path=requested_path,
+            proposed_root=proposed_root,
+            server_id=server_id,
+        )
+        self._filesystem_pending[request.request_id] = request
+        log_mcp_event("filesystem_access_detected", server_id=server_id,
+                      state=request.state.value)
+        return request
+
+    def prepare_filesystem_access_plan(self, server_id, directory,
+                                       operation=FilesystemAccessOperation.ADD_ROOT,
+                                       request_id=None, requested_path=None,
+                                       original_user_text="",
+                                       ttl_seconds=DEFAULT_PLAN_TTL_SECONDS):
+        """Build (and remember) a filesystem-access plan for an installed server.
+
+        ADD_ROOT screens `directory` through the same forbidden/broad-location
+        rules Phase F install-time uses. REMOVE_ROOT requires `directory` to be
+        an existing approved root and refuses to remove the last one.
+        """
+        installed = self._require_installed_for_access(server_id)
+        current = tuple(sorted({os.path.realpath(d) for d in installed.approved_directories}))
+
+        if operation == FilesystemAccessOperation.ADD_ROOT:
+            validated_dir = validate_approved_directory(directory, base_dir=self.base_dir,
+                                                         allow_broad=False, allow_create=False)
+            if validated_dir in current:
+                raise McpError(MCP_FILESYSTEM_ACCESS_ALREADY_GRANTED,
+                               "That directory is already approved.")
+            proposed = tuple(sorted(set(current) | {validated_dir}))
+        elif operation == FilesystemAccessOperation.REMOVE_ROOT:
+            validated_dir = os.path.realpath(str(directory))
+            if validated_dir not in current:
+                raise McpError(MCP_FILESYSTEM_ROOT_NOT_FOUND,
+                               "That directory is not currently approved.")
+            proposed = tuple(d for d in current if d != validated_dir)
+            if not proposed:
+                raise McpError(MCP_FILESYSTEM_LAST_ROOT_REQUIRED,
+                               "At least one approved directory must remain.")
+        else:
+            raise McpError(MCP_FILESYSTEM_ACCESS_PLAN_INVALID,
+                           f"Unsupported filesystem access operation {operation!r}.")
+
+        now = datetime.now(timezone.utc)
+        plan = FilesystemAccessPlan(
+            plan_id=f"fsplan_{uuid.uuid4().hex[:16]}",
+            server_id=server_id,
+            catalog_id=installed.catalog_id,
+            operation=operation,
+            requested_directory=validated_dir,
+            current_allowed_directories=current,
+            proposed_allowed_directories=proposed,
+            requested_path=requested_path,
+            original_user_text=original_user_text,
+            created_at=now.isoformat(timespec="seconds"),
+            expires_at=(now + timedelta(seconds=ttl_seconds)).isoformat(timespec="seconds"),
+        ).with_hash()
+        self._filesystem_plans[plan.plan_id] = plan
+        if request_id and request_id in self._filesystem_pending:
+            self._filesystem_pending[request_id] = self._filesystem_pending[request_id].advanced(
+                PendingFilesystemAccessState.AWAITING_APPROVAL, plan_id=plan.plan_id)
+        log_mcp_event("filesystem_access_plan_prepared", server_id=server_id, plan_id=plan.plan_id,
+                      plan_hash=plan.plan_hash, operation=operation.value,
+                      added_directory_count=max(0, len(proposed) - len(current)),
+                      removed_directory_count=max(0, len(current) - len(proposed)),
+                      resulting_directory_count=len(proposed))
+        return plan
+
+    def get_filesystem_access_plan(self, plan_id):
+        return self._filesystem_plans.get(plan_id)
+
+    def apply_filesystem_access(self, plan, approval=None, request_id=None, confirmer=None,
+                                start_server_fn=None, validate_fn=None):
+        """Apply an approved filesystem-access plan. Never calls npm.
+
+        `approval` must authorize this exact plan (hash-bound, not expired). The
+        server's CURRENT approved directories are re-read and must still match
+        `plan.current_allowed_directories` — if they drifted since the plan was
+        prepared (including from a prior application of this same plan), the plan
+        is stale and must be re-prepared. This also makes every plan single-use.
+        """
+        request = self._filesystem_pending.get(request_id) if request_id else None
+        if request is not None:
+            if request.provisioning_attempts >= MAX_PROVISIONING_ATTEMPTS:
+                log_mcp_event("filesystem_access_blocked",
+                              error_code=MCP_FILESYSTEM_ACCESS_LOOP_PREVENTED,
+                              server_id=plan.server_id, plan_id=plan.plan_id)
+                raise McpError(MCP_FILESYSTEM_ACCESS_LOOP_PREVENTED,
+                               "This request already attempted a filesystem access change once.")
+            request = request.advanced(PendingFilesystemAccessState.APPLYING,
+                                       attempts=request.provisioning_attempts + 1)
+            self._filesystem_pending[request_id] = request
+
+        if approval is None and confirmer is not None:
+            approved = bool(confirmer(plan))
+            approval = FilesystemAccessApproval(approved=approved, plan_id=plan.plan_id,
+                                                plan_hash=plan.compute_hash())
+        try:
+            require_filesystem_access_approval(plan, approval)
+
+            installed = self._require_installed_for_access(plan.server_id)
+            current_now = tuple(sorted({os.path.realpath(d) for d in installed.approved_directories}))
+            if current_now != plan.current_allowed_directories:
+                raise McpError(MCP_FILESYSTEM_ACCESS_PLAN_INVALID,
+                               "The server's approved directories changed since this plan was "
+                               "prepared; prepare a new plan.")
+        except McpError as e:
+            if request is not None:
+                self._filesystem_pending[request_id] = request.advanced(
+                    PendingFilesystemAccessState.DECLINED if e.code.endswith("_DECLINED")
+                    else PendingFilesystemAccessState.FAILED)
+            log_mcp_event("filesystem_access_approval", error_code=e.code,
+                          server_id=plan.server_id, plan_id=plan.plan_id)
+            raise
+
+        log_mcp_event("filesystem_access_approval", server_id=plan.server_id, plan_id=plan.plan_id,
+                      approval_result="approved")
+        try:
+            result = update_filesystem_access(
+                plan, base_dir=self.base_dir, managed_root=self.managed_root,
+                registry_path=self.registry_path, start_server_fn=start_server_fn,
+                validate_fn=validate_fn,
+            )
+        except McpError as e:
+            if request is not None:
+                self._filesystem_pending[request_id] = request.advanced(PendingFilesystemAccessState.FAILED)
+            log_mcp_event("filesystem_access_update", error_code=e.code,
+                          server_id=plan.server_id, plan_id=plan.plan_id)
+            raise
+
+        log_mcp_event("filesystem_access_update", server_id=plan.server_id, plan_id=plan.plan_id,
+                      operation=(plan.operation.value if isinstance(plan.operation, FilesystemAccessOperation)
+                                else str(plan.operation)),
+                      resulting_directory_count=len(plan.proposed_allowed_directories))
+        if request is not None:
+            self._filesystem_pending[request_id] = request.advanced(PendingFilesystemAccessState.READY)
+        return result
+
+    def resume_filesystem_access(self, request_id):
+        """Return the original request text so the NORMAL pipeline can re-run it.
+
+        The manager never calls the newly-accessible file/tool itself.
+        """
+        request = self._filesystem_pending.get(request_id)
+        if request is None or request.state is not PendingFilesystemAccessState.READY:
+            return None
+        self._filesystem_pending[request_id] = request.advanced(PendingFilesystemAccessState.RESUMED)
+        log_mcp_event("filesystem_access_resumed", server_id=request.server_id,
+                      original_request_id=request_id)
+        return request.original_user_text
+
+    def decline_filesystem_access(self, request_id):
+        request = self._filesystem_pending.get(request_id)
+        if request is None:
+            return None
+        self._filesystem_pending[request_id] = request.advanced(PendingFilesystemAccessState.DECLINED)
+        log_mcp_event("filesystem_access_declined", server_id=request.server_id)
+        return request
+
+    def pending_filesystem_access(self, request_id):
+        return self._filesystem_pending.get(request_id)

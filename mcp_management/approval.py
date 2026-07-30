@@ -14,8 +14,13 @@ the installer can never block on input() and tests never need a terminal.
 from rich.console import Console
 
 from mcp_layer.errors import McpError
+from mcp_management.filesystem_access import FilesystemAccessApproval, FilesystemAccessPlan
 from mcp_management.models import McpProvisioningPlan, ProvisioningApproval
 from tools.models import (
+    MCP_FILESYSTEM_ACCESS_CONFIRMATION_MISMATCH,
+    MCP_FILESYSTEM_ACCESS_CONFIRMATION_REQUIRED,
+    MCP_FILESYSTEM_ACCESS_DECLINED,
+    MCP_FILESYSTEM_ACCESS_EXPIRED,
     MCP_PROVISIONING_CONFIRMATION_MISMATCH,
     MCP_PROVISIONING_CONFIRMATION_REQUIRED,
     MCP_PROVISIONING_DECLINED,
@@ -44,6 +49,37 @@ def require_approval(plan: McpProvisioningPlan, approval: ProvisioningApproval):
         raise McpError(
             MCP_PROVISIONING_CONFIRMATION_MISMATCH,
             "The approval does not match this provisioning plan; review the plan again.",
+        )
+    return None
+
+
+def require_filesystem_access_approval(plan: FilesystemAccessPlan, approval: FilesystemAccessApproval):
+    """Raise unless `approval` authorizes exactly `plan`, and it hasn't expired.
+
+    Same shape as `require_approval`, deliberately kept a DISTINCT type: a Phase F
+    ProvisioningApproval (or a Phase C ToolConfirmation) can never be mistaken for a
+    filesystem-access approval, so a bare 'yes' can never be replayed to authorize
+    a different kind of change than the one it was collected for.
+    """
+    if approval is None:
+        raise McpError(
+            MCP_FILESYSTEM_ACCESS_CONFIRMATION_REQUIRED,
+            "Changing filesystem access requires explicit approval.",
+        )
+    if not isinstance(approval, FilesystemAccessApproval):
+        raise McpError(MCP_FILESYSTEM_ACCESS_CONFIRMATION_MISMATCH,
+                       "That confirmation does not authorize a filesystem access change.")
+    if not approval.approved:
+        raise McpError(MCP_FILESYSTEM_ACCESS_DECLINED,
+                       "The user declined the filesystem access change.")
+    if plan.is_expired():
+        raise McpError(MCP_FILESYSTEM_ACCESS_EXPIRED,
+                       "This filesystem access plan has expired; prepare a new one.")
+    expected = plan.compute_hash()
+    if approval.plan_id != plan.plan_id or approval.plan_hash != expected:
+        raise McpError(
+            MCP_FILESYSTEM_ACCESS_CONFIRMATION_MISMATCH,
+            "The approval does not match this filesystem access plan; review the plan again.",
         )
     return None
 

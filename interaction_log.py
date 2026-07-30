@@ -62,6 +62,10 @@ _MCP_LOG_ALLOWED_KEYS = (
     "approval_result", "state", "installation_result", "validation_result",
     "discovered_tool_count", "registered_tool_count", "denied_tool_count",
     "previous_version", "approved_directory_count", "environment_variable_names",
+    # Phase F.1 — filesystem access-root changes on an already-installed server.
+    "operation", "added_directory_count", "removed_directory_count",
+    "resulting_directory_count", "restart_result", "rollback_result",
+    "original_request_id",
 )
 
 

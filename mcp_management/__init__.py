@@ -10,11 +10,17 @@ Phase E configuration is activated, and the ordinary bootstrap registers the rem
 tools as McpTool(BaseTool) for the existing ToolExecutor.
 """
 
+from mcp_management.access_classifier import (
+    FilesystemAccessFailure,
+    FilesystemAccessFailureClassifier,
+    classify_outside_root_failure,
+)
 from mcp_management.approval import (
     collect_approval,
     confirm_provisioning,
     render_plan,
     require_approval,
+    require_filesystem_access_approval,
 )
 from mcp_management.capability_detector import detect_capability, validate_detection
 from mcp_management.catalog import (
@@ -22,6 +28,17 @@ from mcp_management.catalog import (
     McpCatalogEntry,
     build_catalog,
     load_catalog,
+)
+from mcp_management.filesystem_access import (
+    FilesystemAccessApproval,
+    FilesystemAccessOperation,
+    FilesystemAccessPlan,
+    PendingFilesystemAccessRequest,
+    PendingFilesystemAccessState,
+)
+from mcp_management.filesystem_access_tools import (
+    ALL_FILESYSTEM_ACCESS_TOOL_CLASSES,
+    register_filesystem_access_tools,
 )
 from mcp_management.installer import install
 from mcp_management.manager import MAX_PROVISIONING_ATTEMPTS, McpProvisioningManager
@@ -39,26 +56,37 @@ from mcp_management.provisioning_tools import (
 )
 
 __all__ = [
+    "ALL_FILESYSTEM_ACCESS_TOOL_CLASSES",
     "ALL_PROVISIONING_TOOL_CLASSES",
     "CapabilityDetection",
+    "FilesystemAccessApproval",
+    "FilesystemAccessFailure",
+    "FilesystemAccessFailureClassifier",
+    "FilesystemAccessOperation",
+    "FilesystemAccessPlan",
     "MAX_PROVISIONING_ATTEMPTS",
     "McpCatalog",
     "McpCatalogEntry",
     "McpProvisioningManager",
     "McpProvisioningPlan",
     "PendingCapabilityRequest",
+    "PendingFilesystemAccessRequest",
+    "PendingFilesystemAccessState",
     "PendingRequestState",
     "ProvisioningApproval",
     "build_catalog",
     "build_plan",
+    "classify_outside_root_failure",
     "collect_approval",
     "confirm_provisioning",
     "detect_capability",
     "install",
     "load_catalog",
+    "register_filesystem_access_tools",
     "register_provisioning_tools",
     "render_plan",
     "require_approval",
+    "require_filesystem_access_approval",
     "validate_approved_directory",
     "validate_detection",
 ]

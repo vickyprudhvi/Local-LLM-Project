@@ -11,6 +11,7 @@ Nothing here touches the executor or the router.
 
 import os
 import sys
+import uuid
 
 import tools.config as config
 from mcp_layer.client import McpClient
@@ -27,13 +28,22 @@ class McpSession:
 
     `client` may be None (e.g. a disabled or failed Phase E server), in which case
     there is nothing to shut down. `health` carries Phase E diagnostics or None.
+
+    `session_id` is an opaque identifier stamped onto every McpTool this session
+    registers (`McpTool.session_owner`); `registered_remote_tool_names` is exactly
+    those tools' registry names. Together they let a runtime replacement
+    (mcp_layer.runtime_manager) remove precisely this session's remote tools —
+    never a built-in management tool, and never a replacement tool a NEWER session
+    already re-registered under the same name.
     """
 
-    def __init__(self, client, tools, namespace=DEFAULT_NAMESPACE, health=None):
+    def __init__(self, client, tools, namespace=DEFAULT_NAMESPACE, health=None, session_id=None):
         self.client = client
         self.tools = tools
         self.namespace = namespace
         self.health = health
+        self.session_id = session_id or uuid.uuid4().hex
+        self.registered_remote_tool_names = tuple(t.name for t in tools)
 
     def tool_names(self):
         return [t.name for t in self.tools]
@@ -59,7 +69,7 @@ def start_test_server(workspace, call_timeout=20.0, startup_timeout=15.0, slow_s
 
 
 def discover_and_register(registry, client, namespace=DEFAULT_NAMESPACE,
-                          call_timeout=20.0, list_timeout=15.0):
+                          call_timeout=20.0, list_timeout=15.0, session_owner=None):
     """tools/list -> McpTool per tool -> register into `registry`. Returns the McpTools."""
     server_label = namespace.split(".")[-1]
     registered = []
@@ -77,6 +87,7 @@ def discover_and_register(registry, client, namespace=DEFAULT_NAMESPACE,
             client=client,
             server_label=server_label,
             call_timeout=call_timeout,
+            session_owner=session_owner,
         )
         registry.register(tool)
         registered.append(tool)
@@ -99,5 +110,7 @@ def bootstrap_test_server(registry, workspace=None, namespace=DEFAULT_NAMESPACE)
         raise
     except Exception as e:  # noqa: BLE001 — normalize any unexpected startup fault
         raise McpError(MCP_STARTUP_FAILED, "Failed to start the MCP server.") from e
-    tools = discover_and_register(registry, client, namespace=namespace, call_timeout=call_timeout)
-    return McpSession(client, tools, namespace=namespace)
+    session_id = uuid.uuid4().hex
+    tools = discover_and_register(registry, client, namespace=namespace, call_timeout=call_timeout,
+                                  session_owner=session_id)
+    return McpSession(client, tools, namespace=namespace, session_id=session_id)

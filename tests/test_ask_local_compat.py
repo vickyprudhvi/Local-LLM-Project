@@ -59,5 +59,7 @@ def test_dispatch_local_route_uses_tool_loop():
          patch("assistant.ask_claude") as mock_claude:
         reply, _ = assistant.dispatch(decision, "user q", "enriched q", [], "sys")
     assert reply == "local answer"
-    mock_loop.assert_called_once_with("enriched q", [], "sys")
+    # on_tool_result is an additive, generic pass-through (Phase F.1); its default
+    # (None) reproduces the exact prior call/behavior.
+    mock_loop.assert_called_once_with("enriched q", [], "sys", on_tool_result=None)
     mock_claude.assert_not_called()
