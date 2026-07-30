@@ -248,6 +248,19 @@ _TOOL_NAME_MAP = {
     "get_calendar_events": "calendar",
 }
 
+# The exact set of function names offered to the router model in `TOOLS` above,
+# including answer_locally/escalate_to_claude. The router's authority is limited to
+# this fixed set: it decides local vs. claude vs. one of these named built-ins —
+# never an MCP tool, a provisioning/management tool, or any other name. A weaker
+# model can still emit a tool_calls entry with a name that was never offered to it
+# (a hallucination the Ollama tool-calling contract does not prevent); this set is
+# the actual enforcement boundary, independent of whatever _TOOL_NAME_MAP contains,
+# so a future MCP-shaped name (e.g. "mcp.provision.install") can never be routed
+# just because it happens to collide with something else. See tests/test_router_tool_boundary.py.
+_OFFERED_FUNCTION_NAMES = frozenset(
+    entry["function"]["name"] for entry in TOOLS if entry.get("type") == "function"
+)
+
 
 @dataclass(frozen=True)
 class RouteDecision:
@@ -298,6 +311,17 @@ def route_and_answer(text: str, history) -> RouteDecision:
     call = tool_calls[0].get("function", {})
     name = call.get("name")
     args = call.get("arguments") or {}
+
+    if name not in _OFFERED_FUNCTION_NAMES:
+        # The model proposed a tool it was never offered — never trust an
+        # out-of-contract name (e.g. an MCP or provisioning tool). This is a
+        # hallucination, not a routing decision, so fall back exactly like "no
+        # tool call at all"; no warning implies the router had authority here.
+        console.print("[dim]Router proposed a tool outside its offered set; using local.[/dim]")
+        return RouteDecision(
+            mode="local", payload=stripped,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+        )
 
     if name == "answer_locally":
         return RouteDecision(

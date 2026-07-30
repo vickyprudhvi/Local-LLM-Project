@@ -23,3 +23,15 @@ mcp_workspaces/filesystem/*
 !mcp_workspaces/filesystem/hello.txt
 # Locally-installed external MCP servers (node_modules etc.) — never commit these
 external_mcp_servers/
+# Phase F managed state: node_modules, generated server.json / permissions.json /
+# install-record.json / current.json, the installed-server registry, and install
+# logs. All machine-specific. Keep only the directory placeholder.
+app_data/mcp_servers/*
+!app_data/mcp_servers/.gitkeep
+# Local, machine-specific MCP configuration (point MCP_CONFIG_PATH at it)
+config/mcp_server.local.json
+config/*.local.json
+# Phase F manual-test workspace
+mcp_workspaces/user_files/
+# npm dependency trees anywhere in the tree
+**/node_modules/

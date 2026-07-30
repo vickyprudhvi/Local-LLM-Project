@@ -140,7 +140,7 @@ def plan_registration(raw_tools, config):
     return registrations, diagnostics
 
 
-def build_tools(registrations, config, client):
+def build_tools(registrations, config, client, session_owner=None):
     """Create McpTool instances from a registration plan (does not register them)."""
     tools = []
     for reg in registrations:
@@ -153,5 +153,6 @@ def build_tools(registrations, config, client):
             client=client,
             server_label=config.server_id,
             call_timeout=config.call_timeout_seconds,
+            session_owner=session_owner,
         ))
     return tools

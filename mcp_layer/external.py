@@ -11,10 +11,12 @@ swallowed so built-in tools keep working.
 
 import os
 import shutil
+import uuid
 
 import tools.config as app_config
 from mcp_layer.client import McpClient
 from mcp_layer.config import McpServerConfig, load_config
+from mcp_layer.config_resolver import resolve_config
 from mcp_layer.discovery import build_tools, plan_registration
 from mcp_layer.environment import build_child_environment
 from mcp_layer.errors import McpError
@@ -31,7 +33,15 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def default_config_path(base_dir=None):
+    """The effective configuration path, by the documented precedence.
+
+    MCP_CONFIG_PATH override -> enabled managed (Phase F) server -> committed
+    portable template. Phase F never writes the committed template.
+    """
     base_dir = base_dir or _REPO_ROOT
+    resolved = resolve_config(base_dir=base_dir)
+    if resolved.path is not None:
+        return str(resolved.path)
     return os.path.join(base_dir, app_config.mcp_config_path())
 
 
@@ -120,9 +130,14 @@ def start_server(config: McpServerConfig, approved_root=None, base_dir=None, all
 
 
 def bootstrap_from_config(registry, config=None, config_path=None, approved_root=None,
-                          base_dir=None, allow_create=True):
+                          base_dir=None, allow_create=True, session_id=None):
     """Full Phase E startup. Returns an McpSession (with .health). Raises only when
-    the configured server is `required` and startup fails."""
+    the configured server is `required` and startup fails.
+
+    `session_id` (opaque; auto-generated when omitted) is stamped onto every
+    McpTool this call registers, via `McpTool.session_owner` — see
+    `mcp_layer.runtime_manager` for why a runtime replacement needs it.
+    """
     base_dir = base_dir or _REPO_ROOT
     if config is None:
         config = load_config(config_path or default_config_path(base_dir))
@@ -133,6 +148,7 @@ def bootstrap_from_config(registry, config=None, config_path=None, approved_root
         return McpSession(None, [], namespace=ns,
                           health=McpHealth(McpHealthState.DISABLED, sid))
 
+    session_id = session_id or uuid.uuid4().hex
     client = None
     try:
         client = start_server(config, approved_root=approved_root, base_dir=base_dir,
@@ -144,7 +160,7 @@ def bootstrap_from_config(registry, config=None, config_path=None, approved_root
 
         registrations, diagnostics = plan_registration(raw_tools, config)
         diagnostics = list(diagnostics)
-        planned = build_tools(registrations, config, client)
+        planned = build_tools(registrations, config, client, session_owner=session_id)
 
         registered = []
         for tool in planned:
@@ -168,7 +184,8 @@ def bootstrap_from_config(registry, config=None, config_path=None, approved_root
             disabled_tool_count=disabled_count,
             diagnostics=tuple(diagnostics),
         )
-        return McpSession(client, registered, namespace=config.namespace, health=health)
+        return McpSession(client, registered, namespace=config.namespace, health=health,
+                          session_id=session_id)
     except McpError as e:
         if client is not None:
             try:

@@ -1,38 +1,32 @@
 {
-  "enabled": true,
-  "required": false,
-  "server_id": "filesystem",
-  "display_name": "Official Filesystem MCP",
-  "transport": "stdio",
-  "command": "C:/Program Files/nodejs/node.exe",
-  "args": [
-    "C:/Users/Prudhvi/OneDrive/Project/Local LLM Project/external_mcp_servers/filesystem/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
-    "C:/Users/Prudhvi/OneDrive/Project/Local LLM Project/mcp_workspaces/filesystem"
+  "_comment": [
+    "Portable, committed TEMPLATE — disabled by default and safe for source control.",
+    "It contains no machine-specific paths, credentials, or managed installation state.",
+    "While disabled, no executable is resolved and no subprocess is started.",
+    "Phase F never writes this file: a provisioned server's generated configuration",
+    "lives at app_data/mcp_servers/<server_id>/server.json and is selected",
+    "automatically while that server is enabled.",
+    "Effective-configuration precedence at startup:",
+    "  1. MCP_CONFIG_PATH environment override",
+    "  2. enabled managed (Phase F) server configuration",
+    "  3. this template",
+    "To point at a hand-installed server without editing this file, set",
+    "MCP_CONFIG_PATH to your own JSON file (see docs/PHASE_E.md)."
   ],
-  "working_directory": "./mcp_workspaces/filesystem",
-  "startup_timeout_seconds": 15,
-  "call_timeout_seconds": 10,
+  "enabled": false,
+  "required": false,
+  "server_id": "disabled",
+  "display_name": "MCP Disabled",
+  "transport": "stdio",
+  "command": "",
+  "args": [],
+  "working_directory": "./mcp_workspaces/disabled",
+  "startup_timeout_seconds": 10,
+  "call_timeout_seconds": 15,
   "shutdown_timeout_seconds": 5,
   "environment_allowlist": [],
   "tool_policy": {
     "default_permission": "denied",
-    "tools": {
-      "list_allowed_directories": {
-        "enabled": true,
-        "permission": "read"
-      },
-      "list_directory": {
-        "enabled": true,
-        "permission": "read"
-      },
-      "read_text_file": {
-        "enabled": true,
-        "permission": "read"
-      },
-      "write_file": {
-        "enabled": true,
-        "permission": "write"
-      }
-    }
+    "tools": {}
   }
 }

@@ -47,6 +47,17 @@ class McpClient:
         self._stderr_buf = collections.deque(maxlen=_STDERR_MAX_LINES)
         self._id = 0
         self._write_lock = threading.Lock()
+        # Populated by start(): the server's initialize result (Phase F validates the
+        # negotiated protocol version and records serverInfo). No secrets.
+        self.initialize_result = None
+
+    @property
+    def protocol_version(self):
+        return (self.initialize_result or {}).get("protocolVersion")
+
+    @property
+    def server_info(self):
+        return (self.initialize_result or {}).get("serverInfo") or {}
 
     # ---- lifecycle ----
 
@@ -68,7 +79,7 @@ class McpClient:
         self._stderr_reader = threading.Thread(target=self._stderr_loop, daemon=True)
         self._stderr_reader.start()
         try:
-            self._request("initialize", {
+            self.initialize_result = self._request("initialize", {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": {"name": "local-llm-project", "version": "0.1.0"},

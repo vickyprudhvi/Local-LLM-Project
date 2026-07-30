@@ -28,13 +28,16 @@ from mcp_layer.integration import (
     discover_and_register,
     start_test_server,
 )
+from mcp_layer.runtime_manager import ActiveMcpRuntime, McpRuntimeManager
 from mcp_layer.tool import McpTool
 
 __all__ = [
+    "ActiveMcpRuntime",
     "McpClient",
     "McpError",
     "McpHealth",
     "McpHealthState",
+    "McpRuntimeManager",
     "McpServerConfig",
     "McpSession",
     "McpTool",

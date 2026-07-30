@@ -15,6 +15,9 @@ Verified Ollama message shapes (see docs/phase1-tool-call-test.md):
 import json
 import os
 import uuid
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional, Tuple
 
 from rich.console import Console
 
@@ -27,6 +30,45 @@ from tools.models import TOOL_STEP_LIMIT_REACHED, ToolCall, ToolResult
 from tools.registry import bounded_ollama_schema, default_registry
 
 console = Console()
+
+
+# ---- Phase F.1 hotfix: typed tool-loop control contract ----
+#
+# `on_tool_result` may return a ToolLoopDirective to end the turn immediately —
+# before another tool executes and before the local LLM is asked for a final
+# answer. This is how a caller (assistant.py) intercepts an MCP filesystem call
+# blocked by its approved roots, or a successful access-root change, BEFORE the
+# model gets a chance to invent a generic fallback answer or keep calling a
+# soon-to-be-stale MCP tool. Returning None (or omitting the callback entirely,
+# the default) is unchanged and reproduces the exact prior behavior byte-for-byte.
+class ToolLoopControl(Enum):
+    CONTINUE = "continue"
+    HALT_FOR_FILESYSTEM_ACCESS = "halt_for_filesystem_access"
+    RESTART_MCP_AND_RESUME = "restart_mcp_and_resume"
+    HALT_WITH_ERROR = "halt_with_error"
+
+
+@dataclass(frozen=True)
+class ToolLoopDirective:
+    """What the caller wants the loop to do next. Fields are trusted, structured
+    identifiers only — never derived from freshly generated LLM text."""
+
+    control: ToolLoopControl
+    server_id: Optional[str] = None
+    original_user_text: Optional[str] = None
+    request_id: Optional[str] = None
+    plan_id: Optional[str] = None
+    expected_allowed_roots: Tuple[str, ...] = ()
+    error_code: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ToolLoopOutcome:
+    """The full result of a loop that halted early via a directive."""
+
+    final_text: Optional[str]
+    directive: Optional[ToolLoopDirective]
+    tool_calls_executed: int = 0
 
 
 def _env_bool(name, default):
@@ -129,13 +171,30 @@ def _selection_prompt_size(messages, tool_schemas):
     return len(json.dumps(messages)) + len(json.dumps(tool_schemas))
 
 
-def run_local_tool_loop(prompt, history, system_prompt):
+def run_local_tool_loop(prompt, history, system_prompt, on_tool_result=None):
     """Run the local answering path with tool support. Returns (text, metrics).
 
     Metrics are summed across every LLM round-trip so the caller's token
     accounting stays correct. Tool-call / tool-result messages live only inside
     this function's local `messages` list — they are never returned or persisted,
     which is what keeps them out of ChromaDB.
+
+    `on_tool_result`, when given, is called as `on_tool_result(call, result)` after
+    every individual tool execution (success or failure) — an observation hook for
+    the caller (e.g. detecting an MCP filesystem call blocked by its approved
+    roots, so it can offer to expand them). An exception raised by the callback is
+    swallowed and never affects control flow.
+
+    The callback may optionally return a ToolLoopDirective. Returning None (or a
+    directive with control=CONTINUE) — including simply omitting the callback,
+    the default — reproduces the exact prior behavior byte-for-byte. Returning any
+    other control value stops the turn IMMEDIATELY: no further tool calls in the
+    current batch execute, and the local LLM is never asked for another response
+    (no generic fallback answer, no risk of a further call through a soon-to-be-
+    stale MCP session). In that case this function returns `(None, metrics)` — the
+    caller already has the directive (it built it), so it drives whatever happens
+    next itself; this function's `text` is not meaningful when a directive halted
+    the loop.
     """
     metrics = {"prompt_tokens": 0, "completion_tokens": 0}
 
@@ -244,9 +303,21 @@ def run_local_tool_loop(prompt, history, system_prompt):
             # executor requires confirmation, collected here before execution. Read
             # tools run in a single pass. Enforcement stays centralized in the executor.
             result = confirmation.resolve_with_confirmation(EXECUTOR, call, step=steps_used)
-            messages.append(_tool_result_message(result))
             status = "ok" if result.success else f"failed ({result.error.code})"
             console.print(f"[dim]local llm tool result: {name} -> {status}[/dim]")
+
+            directive = None
+            if on_tool_result is not None:
+                try:
+                    directive = on_tool_result(call, result)
+                except Exception:  # noqa: BLE001 — an observer must never break the turn
+                    directive = None
+            if directive is not None and directive.control is not ToolLoopControl.CONTINUE:
+                # Stop immediately: no further tool calls in this batch, no further
+                # LLM call. The caller already holds the directive it just returned.
+                return None, metrics
+
+            messages.append(_tool_result_message(result))
 
         if limit_reached:
             break

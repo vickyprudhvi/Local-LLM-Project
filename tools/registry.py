@@ -88,6 +88,39 @@ class ToolRegistry:
     def has(self, name: str) -> bool:
         return name in self._tools
 
+    def unregister(self, name: str) -> bool:
+        """Remove one tool outright. Returns False if it was not registered."""
+        if name not in self._tools:
+            return False
+        del self._tools[name]
+        self._enabled.pop(name, None)
+        return True
+
+    def unregister_many(self, names) -> int:
+        """Remove several tools by name. Returns the count actually removed."""
+        return sum(1 for name in names if self.unregister(name))
+
+    def unregister_owned(self, names, owner) -> tuple:
+        """Remove tools by name, but ONLY the ones whose current registration still
+        belongs to `owner` (compared via each tool's `session_owner` attribute).
+
+        This is the safe primitive for replacing a stale MCP session's tools: if a
+        name was already re-registered by a NEWER session (or a built-in with no
+        `session_owner`), it is left untouched rather than silently deleted. Returns
+        the tuple of names actually removed, in the order given.
+        """
+        removed = []
+        for name in names:
+            tool = self._tools.get(name)
+            if tool is None:
+                continue
+            if getattr(tool, "session_owner", None) != owner:
+                continue  # ownership changed (or was never this session's) — refuse
+            del self._tools[name]
+            self._enabled.pop(name, None)
+            removed.append(name)
+        return tuple(removed)
+
     def is_enabled(self, name: str) -> bool:
         return self._enabled.get(name, False)
 

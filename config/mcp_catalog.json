@@ -1,0 +1,95 @@
+{
+  "catalog_version": 1,
+  "servers": {
+    "official-filesystem": {
+      "server_id": "filesystem",
+      "display_name": "Filesystem MCP Server",
+      "description": "Read and modify files inside explicitly approved directories.",
+      "capabilities": [
+        "filesystem",
+        "read_files",
+        "write_files",
+        "list_directories",
+        "search_files"
+      ],
+      "risk_category": "local_filesystem",
+      "transport": "stdio",
+      "required_runtimes": [
+        "node",
+        "npm"
+      ],
+      "installer": {
+        "type": "npm",
+        "package": "@modelcontextprotocol/server-filesystem",
+        "version": "2026.7.10",
+        "entrypoint": "node_modules/@modelcontextprotocol/server-filesystem/dist/index.js"
+      },
+      "required_inputs": [
+        {
+          "name": "allowed_directory",
+          "type": "directory",
+          "required": true,
+          "user_approval_required": true
+        }
+      ],
+      "expected_tools": [
+        "list_allowed_directories",
+        "list_directory",
+        "read_text_file"
+      ],
+      "default_tool_policy": {
+        "default_permission": "denied",
+        "tools": {
+          "list_allowed_directories": {
+            "enabled": true,
+            "permission": "read"
+          },
+          "list_directory": {
+            "enabled": true,
+            "permission": "read"
+          },
+          "list_directory_with_sizes": {
+            "enabled": true,
+            "permission": "read"
+          },
+          "directory_tree": {
+            "enabled": true,
+            "permission": "read"
+          },
+          "read_text_file": {
+            "enabled": true,
+            "permission": "read"
+          },
+          "read_multiple_files": {
+            "enabled": true,
+            "permission": "read"
+          },
+          "search_files": {
+            "enabled": true,
+            "permission": "read"
+          },
+          "get_file_info": {
+            "enabled": true,
+            "permission": "read"
+          },
+          "write_file": {
+            "enabled": true,
+            "permission": "write"
+          },
+          "create_directory": {
+            "enabled": true,
+            "permission": "write"
+          },
+          "move_file": {
+            "enabled": false,
+            "permission": "denied"
+          },
+          "edit_file": {
+            "enabled": false,
+            "permission": "denied"
+          }
+        }
+      }
+    }
+  }
+}

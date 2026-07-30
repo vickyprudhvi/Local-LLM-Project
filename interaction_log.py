@@ -57,6 +57,41 @@ def log_tool_selection(registered_tools, shortlisted_tools, selection_prompt_siz
     return record
 
 
+_MCP_LOG_ALLOWED_KEYS = (
+    "catalog_id", "server_id", "package_version", "plan_id", "plan_hash",
+    "approval_result", "state", "installation_result", "validation_result",
+    "discovered_tool_count", "registered_tool_count", "denied_tool_count",
+    "previous_version", "approved_directory_count", "environment_variable_names",
+    # Phase F.1 — filesystem access-root changes on an already-installed server.
+    "operation", "added_directory_count", "removed_directory_count",
+    "resulting_directory_count", "restart_result", "rollback_result",
+    "original_request_id",
+)
+
+
+def log_mcp_event(action, error_code=None, **fields):
+    """Append one JSON line describing a Phase F MCP provisioning/lifecycle action.
+
+    Only an allowlist of safe metadata is recorded (ids, versions, counts, hashes,
+    state, result). Secret values, environment values, raw package output, full
+    file contents, and conversation text are never logged — anything not on the
+    allowlist is dropped.
+    """
+    os.makedirs(os.path.dirname(LOG_PATH) or ".", exist_ok=True)
+    record = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "event": "mcp_management",
+        "action": action,
+        "error_code": error_code,
+    }
+    for key, value in (fields or {}).items():
+        if key in _MCP_LOG_ALLOWED_KEYS:
+            record[key] = value
+    with open(LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+    return record
+
+
 def log_tool_event(tool_name, call_id, step, status, duration_ms=None, error_code=None, extra=None):
     """Append one JSON line describing a single tool-execution event.
 
