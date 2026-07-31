@@ -1,0 +1,6 @@
+# Phase G.3 Task 19 — committed lock file for the TEST-ONLY calculator-test-mcp
+# fixture. Never a production dependency. The path below is resolved relative to
+# the repository root (the python_venv installer always invokes pip with that as
+# its cwd), so this file stays portable across clones/machines: no absolute path,
+# no network index, no unpinned version.
+tests/fixtures/calculator_mcp_pkg/dist/calculator_test_mcp-1.0.0-py3-none-any.whl --hash=sha256:0ec7cfa6b76422e0db9c561709d0f6fe9f5b5d46f08aa2a6eb1ce0323f241bd2

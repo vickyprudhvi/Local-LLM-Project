@@ -29,12 +29,22 @@ ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Exact semantic version only — never a range, tag, or wildcard.
 EXACT_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
 
-SUPPORTED_INSTALLERS = ("npm",)
+SUPPORTED_INSTALLERS = ("npm", "python_venv")
 SUPPORTED_TRANSPORTS = ("stdio",)
 SUPPORTED_INPUT_TYPES = ("directory", "environment_variable")
 MAX_CATALOG_ENTRIES = 100
 MAX_CAPABILITIES = 25
 MAX_TOOLS_PER_POLICY = 100
+
+# Phase G.3 — generalized installer schema (Task 2). Deliberately a SEPARATE,
+# additive set of fields from the npm-only ones above: an npm entry (including
+# the existing Filesystem entry) never populates these, and a python_venv entry
+# never populates entrypoint_relative. Exactly one "shape" applies per
+# installer_type, so the original Filesystem catalog entry keeps loading and
+# validating byte-for-byte as before.
+# Safe, non-shell version-specifier charset (PEP 440-ish comparisons only).
+PYTHON_CONSTRAINT_RE = re.compile(r"^[0-9A-Za-z.,<>=!~* ]+$")
+MODULE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
 # ---- Phase G.1: optional capability-selection metadata ----
 # Deliberately a SEPARATE field from the existing `capabilities` list above (which
@@ -105,6 +115,12 @@ class McpCatalogEntry:
     # not yet selectable by the capability selector, but loads exactly as before.
     granular_capabilities: Tuple[str, ...] = ()
     selection_hints: McpSelectionHints = field(default_factory=McpSelectionHints)
+    # Phase G.3 — populated only for installer_type == "python_venv" (Task 2).
+    lock_file_relative: Optional[str] = None
+    python_constraint: Optional[str] = None
+    launch_module: Optional[str] = None
+    launch_arguments: Tuple[str, ...] = ()
+    install_hosts: Tuple[str, ...] = ()
 
     @property
     def package_source(self) -> str:
@@ -344,22 +360,86 @@ def build_entry(catalog_id, raw) -> McpCatalogEntry:
         raise _invalid(f"{catalog_id}: 'installer' must be an object.")
     installer_type = installer.get("type")
     if installer_type not in SUPPORTED_INSTALLERS:
+        # Fail closed: an unknown installer type is rejected here, at load time —
+        # never silently ignored, never dispatched to a default backend.
         raise _invalid(f"{catalog_id}: installer type {installer_type!r} is not supported.")
     package_name = _string(installer, "package", max_len=214)
     version = installer.get("version")
     if not isinstance(version, str) or not EXACT_VERSION_RE.match(version):
         raise _invalid(f"{catalog_id}: installer version must be an EXACT pinned version "
                        f"(got {version!r}); ranges, tags, and wildcards are rejected.")
-    entrypoint = _string(installer, "entrypoint", max_len=400)
-    if not _is_safe_relative_path(entrypoint):
-        raise _invalid(f"{catalog_id}: 'entrypoint' must be a relative path without '..'.")
 
-    # npm lifecycle scripts are structurally disabled in Phase F. A catalog entry
-    # may omit the key or set it to exactly false; anything else is rejected, so
-    # there is no path — catalog, config, env, or LLM — that turns them on.
-    if installer.get("allow_lifecycle_scripts", False) is not False:
-        raise _invalid(f"{catalog_id}: npm lifecycle scripts cannot be enabled; "
-                       "'allow_lifecycle_scripts' must be absent or false.")
+    entrypoint = ""
+    lock_file_relative = None
+    python_constraint = None
+    launch_module = None
+    launch_arguments: Tuple[str, ...] = ()
+    install_hosts: Tuple[str, ...] = ()
+
+    if installer_type == "npm":
+        entrypoint = _string(installer, "entrypoint", max_len=400)
+        if not _is_safe_relative_path(entrypoint):
+            raise _invalid(f"{catalog_id}: 'entrypoint' must be a relative path without '..'.")
+        # npm lifecycle scripts are structurally disabled in Phase F. A catalog
+        # entry may omit the key or set it to exactly false; anything else is
+        # rejected, so there is no path — catalog, config, env, or LLM — that
+        # turns them on.
+        if installer.get("allow_lifecycle_scripts", False) is not False:
+            raise _invalid(f"{catalog_id}: npm lifecycle scripts cannot be enabled; "
+                           "'allow_lifecycle_scripts' must be absent or false.")
+
+    elif installer_type == "python_venv":
+        lock_file_relative = _string(installer, "lock_file", max_len=400)
+        if not _is_safe_relative_path(lock_file_relative):
+            raise _invalid(f"{catalog_id}: 'installer.lock_file' must be a relative path "
+                           "without '..'.")
+        python_constraint = _string(installer, "python_constraint", max_len=120)
+        if not PYTHON_CONSTRAINT_RE.match(python_constraint):
+            raise _invalid(f"{catalog_id}: 'installer.python_constraint' has an invalid "
+                           "version-specifier format.")
+        launch = raw.get("launch")
+        if not isinstance(launch, dict):
+            raise _invalid(f"{catalog_id}: python_venv installers require a 'launch' object.")
+        if launch.get("entrypoint_type") != "python_module":
+            raise _invalid(f"{catalog_id}: 'launch.entrypoint_type' must be 'python_module'.")
+        launch_module = _string(launch, "module", max_len=200)
+        if not MODULE_NAME_RE.match(launch_module):
+            raise _invalid(f"{catalog_id}: 'launch.module' must be a dotted Python module name.")
+        args_raw = launch.get("arguments", [])
+        if not isinstance(args_raw, list):
+            raise _invalid(f"{catalog_id}: 'launch.arguments' must be a list.")
+        args_out = []
+        for a in args_raw:
+            if not isinstance(a, str) or any(c in a for c in ("\x00", "\n", "\r")):
+                raise _invalid(f"{catalog_id}: 'launch.arguments' entries must be plain strings.")
+            args_out.append(a)
+        launch_arguments = tuple(args_out)
+        # A local file:// path with no scheme is not a "network host"; only
+        # genuine hostnames may be declared as install-time network access.
+        install_hosts_raw = (raw.get("network_policy") or {}).get("install_hosts", [])
+        if not isinstance(install_hosts_raw, list):
+            raise _invalid(f"{catalog_id}: 'network_policy.install_hosts' must be a list.")
+        for h in install_hosts_raw:
+            if not isinstance(h, str) or not h.strip() or any(c in h for c in ("/", "\\", " ")):
+                raise _invalid(f"{catalog_id}: install host {h!r} is invalid.")
+        install_hosts = tuple(install_hosts_raw)
+        # New-schema entries (python_venv today) get the stricter Task 2 rule:
+        # every enabled policy tool must be one of the exact expected tools, and
+        # at least one expected tool is required. The legacy npm shape (including
+        # the existing Filesystem entry, whose default_tool_policy intentionally
+        # enables more tools than its core `expected_tools`) is exempt, so it
+        # keeps loading exactly as before.
+        expected_preview = raw.get("expected_tools") or []
+        if not expected_preview:
+            raise _invalid(f"{catalog_id}: 'expected_tools' must be non-empty for a "
+                           "python_venv installer.")
+        policy_preview = (raw.get("default_tool_policy") or {}).get("tools") or {}
+        enabled_preview = {name for name, spec in policy_preview.items()
+                           if isinstance(spec, dict) and spec.get("enabled")}
+        extra = enabled_preview - set(expected_preview)
+        if extra:
+            raise _invalid(f"{catalog_id}: enabled tool(s) {sorted(extra)} are not in "
+                           "'expected_tools'.")
 
     runtimes_raw = raw.get("required_runtimes", [])
     if not isinstance(runtimes_raw, list):
@@ -402,6 +482,11 @@ def build_entry(catalog_id, raw) -> McpCatalogEntry:
         default_tool_policy=_build_policy(raw.get("default_tool_policy"), catalog_id),
         granular_capabilities=granular_capabilities,
         selection_hints=selection_hints,
+        lock_file_relative=lock_file_relative,
+        python_constraint=python_constraint,
+        launch_module=launch_module,
+        launch_arguments=launch_arguments,
+        install_hosts=install_hosts,
     )
 
 

@@ -23,9 +23,11 @@ from interaction_log import log_turn
 from mcp_layer import FilesystemRootValidator, McpError, MultiMcpRuntimeManager
 from mcp_management.access_classifier import classify_outside_root_failure
 from mcp_management.approval import confirm_provisioning
+from mcp_management.auto_provisioning import AutoProvisioningManager
 from mcp_management.capabilities import CapabilitySelectionStatus
 from mcp_management.capability_detector import extract_directory_candidate
 from mcp_management.capability_service import select_for_request
+from mcp_management.provisioning_models import AutoProvisioningApproval
 from mcp_management.registry import get_installed
 from mcp_management.runtime_activation import ensure_selected_server_active
 from router import route_and_answer
@@ -34,6 +36,7 @@ from tools.models import (
     MCP_RUNTIME_REBIND_FAILED,
     MCP_RUNTIME_RESTART_FAILED,
     MCP_RUNTIME_ROLLBACK_FAILED,
+    MCP_SERVER_NOT_INSTALLED,
 )
 from voice import speak
 
@@ -46,6 +49,15 @@ _FS_SHOW_PLAN_WORDS = {
     "what folder will be added", "what folder will be added?",
     "what directory will be added", "what directory will be added?",
 }
+
+# Phase G.3 — auto-provisioning cross-turn reply words. A DISTINCT constant set
+# from the Phase F.1 filesystem-access ones above (even though the words
+# overlap) because which resolver runs is chosen by the pending request id's
+# prefix ("autoreq_" vs "fsreq_"), never by guessing from the reply text alone.
+_AP_YES_WORDS = {"y", "yes", "approve", "approved", "proceed"}
+_AP_NO_WORDS = {"n", "no", "decline", "declined", "cancel"}
+_AP_SHOW_PLAN_WORDS = {"show plan", "show the plan"}
+_AUTO_PROVISIONING_REQUEST_PREFIX = "autoreq_"
 
 
 def _start_provisioning():
@@ -83,6 +95,24 @@ def _start_filesystem_access(manager):
 
     tools = register_filesystem_access_tools(tool_loop.REGISTRY, manager)
     console.print(f"[dim]Filesystem access management: {len(tools)} tool(s) available.[/dim]")
+
+
+def _start_auto_provisioning(manager):
+    """Register the Phase G.3 automatic-provisioning subsystem on `manager`.
+
+    Deliberately an ATTRIBUTE on the existing `McpProvisioningManager`, not a
+    new constructor parameter: `McpProvisioningManager.__init__` stays exactly
+    as Phase F left it, so every existing test that builds one directly (there
+    are many) is unaffected, and `getattr(manager, "auto_provisioning", None)`
+    is how the rest of this module (and any caller that doesn't wire this up)
+    finds it — `None` simply means "automatic provisioning unavailable," the
+    same tolerance already used for `manager is None` throughout this file.
+    """
+    if manager is None:
+        return
+    manager.auto_provisioning = AutoProvisioningManager(
+        manager.catalog, base_dir=manager.base_dir, managed_root=manager.managed_root,
+        registry_path=manager.registry_path)
 
 
 def _provision_if_needed(manager, user_text, confirmer=None):
@@ -485,6 +515,72 @@ def _log_runtime_activation(runtime_manager, server_id, activation):
         console.print(f"[dim]  error: {activation.error_code}[/dim]")
 
 
+def _offer_mcp_provisioning(auto_manager, capability, catalog_entry, user_text):
+    """Phase G.3 — deterministic control-plane branch, not an LLM decision
+    (Task 14): reached only when Phase G.1 already selected an APPROVED
+    catalog entry and Phase G.2 already found it not installed. Opens a
+    pending auto-provisioning request and prepares its plan. Returns
+    (reply_text, request_id), or None when this catalog entry is not eligible
+    for automatic provisioning (e.g. it requires a directory grant, which
+    stays on the existing Filesystem-specific manual/heuristic path)."""
+    request = auto_manager.begin_request(user_text, capability, catalog_entry)
+    if request is None:
+        return None
+    plan = auto_manager.prepare_plan(request.request_id)
+    lines = list(plan.summary_lines())
+    return "\n".join(lines), request.request_id
+
+
+@dataclass
+class _AutoProvisioningReplyOutcome:
+    matched: bool
+    speak: Optional[str] = None
+    next_pending_id: Optional[str] = None
+    resumed_text: Optional[str] = None
+
+
+def _resolve_auto_provisioning_reply(auto_manager, runtime_manager, request_id, user_text):
+    """Interpret `user_text` as a reply to a pending Phase G.3 provisioning
+    approval. Mirrors `_resolve_filesystem_access_reply`'s exact-reply-only
+    matching (Task 4): unrelated text that merely contains "yes" is never
+    misread as approval, and only the caller's own request id (already
+    disambiguated by its "autoreq_" prefix — see `main()`) reaches here."""
+    if auto_manager is None:
+        return _AutoProvisioningReplyOutcome(matched=False)
+    request = auto_manager.pending(request_id)
+    if request is None:
+        return _AutoProvisioningReplyOutcome(matched=False)
+
+    normalized = user_text.strip().lower().rstrip("?.! ")
+
+    if normalized in _AP_SHOW_PLAN_WORDS:
+        plan = auto_manager.get_plan(request.plan_id) if request.plan_id else None
+        if plan is None:
+            return _AutoProvisioningReplyOutcome(matched=True, speak="That plan is no longer available.")
+        return _AutoProvisioningReplyOutcome(matched=True, speak="\n".join(plan.summary_lines()),
+                                             next_pending_id=request_id)
+
+    if normalized in _AP_NO_WORDS:
+        auto_manager.decline(request_id)
+        return _AutoProvisioningReplyOutcome(matched=True, speak="Okay, I won't install that MCP server.")
+
+    if normalized in _AP_YES_WORDS:
+        plan = auto_manager.get_plan(request.plan_id) if request.plan_id else None
+        if plan is None:
+            return _AutoProvisioningReplyOutcome(
+                matched=True, speak="That plan is no longer available; please ask again.")
+        approval = AutoProvisioningApproval(approved=True, plan_id=plan.plan_id, plan_hash=plan.compute_hash())
+        try:
+            auto_manager.provision_and_activate(request_id, runtime_manager, approval=approval)
+        except McpError as e:
+            return _AutoProvisioningReplyOutcome(
+                matched=True, speak=f"I couldn't install that MCP server ({e.code}): {e.message}")
+        resumed_text = auto_manager.resume(request_id)
+        return _AutoProvisioningReplyOutcome(matched=True, resumed_text=resumed_text)
+
+    return _AutoProvisioningReplyOutcome(matched=False)
+
+
 def _process_local_request_with_capability_selection(manager, runtime_manager, user_text, prompt, history,
                                                       system_prompt, attempted_fs_requests,
                                                       resume_budget=1):
@@ -525,6 +621,22 @@ def _process_local_request_with_capability_selection(manager, runtime_manager, u
             managed_root=manager.managed_root, registry_path=manager.registry_path)
         _log_runtime_activation(runtime_manager, selection.selected_server_id, activation)
         if not activation.activated:
+            if activation.error_code == MCP_SERVER_NOT_INSTALLED:
+                # Phase G.3: an APPROVED provider that simply isn't installed
+                # yet is a deterministic auto-provisioning opportunity, not a
+                # dead end — offered only when a G.3 subsystem is wired up
+                # (`_start_auto_provisioning`) AND the entry is eligible (no
+                # directory grant required; Filesystem stays on its existing
+                # manual/heuristic path unchanged).
+                auto_manager = getattr(manager, "auto_provisioning", None)
+                catalog_entry = manager.catalog.get(selection.selected_catalog_id)
+                if auto_manager is not None and catalog_entry is not None:
+                    capability_id = (selection.required_capabilities[0].capability_id
+                                     if selection.required_capabilities else "")
+                    offer = _offer_mcp_provisioning(auto_manager, capability_id, catalog_entry, user_text)
+                    if offer is not None:
+                        reply, request_id = offer
+                        return reply, dict(_ZERO_METRICS), request_id
             return activation.message, dict(_ZERO_METRICS), None
 
     # NONE_REQUIRED, or SELECTED-and-now-active: existing behavior, completely
@@ -591,6 +703,7 @@ def main():
     console.print("[bold]home-ai (LLM router v2 — consolidated)[/bold]")
     provisioning_manager = _start_provisioning()
     _start_filesystem_access(provisioning_manager)
+    _start_auto_provisioning(provisioning_manager)
     # Phase G.2: a server-keyed runtime manager, built with metadata only — no
     # MCP child process is launched here (Task 4). Every server starts lazily,
     # the first time Phase G.1 actually selects it as the preferred provider.
@@ -614,11 +727,58 @@ def main():
             if not user_text:
                 continue
 
-            # A pending filesystem-access approval takes priority over normal
-            # routing: a bare yes/no/show-plan reply resolves it directly, never
-            # reaching the router or local tool-selection. Anything else falls
-            # through to normal routing below and leaves the plan pending.
-            if pending_fs_request_id is not None:
+            # A pending filesystem-access OR auto-provisioning approval takes
+            # priority over normal routing: a bare yes/no/show-plan reply
+            # resolves it directly, never reaching the router or local
+            # tool-selection. Which resolver runs is chosen by the pending id's
+            # own prefix ("autoreq_" is Phase G.3; anything else is Phase F.1's
+            # filesystem-access id shape) — never guessed from the reply text.
+            # Anything else falls through to normal routing and leaves the
+            # plan pending.
+            if pending_fs_request_id is not None and pending_fs_request_id.startswith(
+                    _AUTO_PROVISIONING_REQUEST_PREFIX):
+                outcome = _resolve_auto_provisioning_reply(
+                    getattr(provisioning_manager, "auto_provisioning", None), runtime_manager,
+                    pending_fs_request_id, user_text)
+                if outcome.matched:
+                    if outcome.resumed_text is None:
+                        if outcome.speak is not None:
+                            console.print(f"[cyan]{outcome.speak}[/cyan]")
+                            speak(outcome.speak)
+                            history.append({"role": "user", "content": user_text})
+                            history.append({"role": "assistant", "content": outcome.speak})
+                        pending_fs_request_id = outcome.next_pending_id
+                        continue
+
+                    # Approved, installed, validated, and activated (Phase G.2's
+                    # ensure_started already ran inside provision_and_activate —
+                    # there is no prior session to "replace", unlike the
+                    # filesystem-restart path below). Resume the ORIGINAL
+                    # blocked request by re-entering the SAME authoritative
+                    # pipeline as a fresh turn.
+                    turn_start = time.perf_counter()
+                    resumed_prompt = _enrich_with_memory(outcome.resumed_text)
+                    resumed_decision = route_and_answer(resumed_prompt, history)
+                    console.print(f"[dim]routing (resumed): mode={resumed_decision.mode} "
+                                 f"tool={resumed_decision.tool}[/dim]")
+                    if resumed_decision.mode == "local":
+                        reply, _extra, pending_fs_request_id = _process_local_request_with_capability_selection(
+                            provisioning_manager, runtime_manager, outcome.resumed_text, resumed_prompt,
+                            history, system_prompt, attempted_fs_requests)
+                    else:
+                        reply, _extra = dispatch(resumed_decision, outcome.resumed_text, resumed_prompt,
+                                                 history, system_prompt)
+                        pending_fs_request_id = None
+                    console.print(f"[cyan]{reply}[/cyan]")
+                    speak(reply)
+                    total_time_sec = time.perf_counter() - turn_start
+                    log_turn(question=outcome.resumed_text, mode="local", tool=None,
+                            prompt_tokens=0, completion_tokens=0, total_time_sec=total_time_sec)
+                    history.append({"role": "user", "content": user_text})
+                    history.append({"role": "assistant", "content": reply})
+                    continue
+
+            elif pending_fs_request_id is not None:
                 outcome = _resolve_filesystem_access_reply(
                     provisioning_manager, pending_fs_request_id, user_text)
                 if outcome.matched:

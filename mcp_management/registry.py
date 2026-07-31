@@ -44,6 +44,15 @@ class InstalledServer:
     last_validated_at: Optional[str] = None
     last_validation_result: Optional[str] = None
     approved_directories: tuple = ()
+    # Phase G.3 (Task 12) — optional; absent on any registry entry written before
+    # this phase (including the existing Filesystem install), so old state keeps
+    # loading exactly as before with these simply unset.
+    installer_type: Optional[str] = None
+    catalog_entry_hash: Optional[str] = None
+    lock_hash: Optional[str] = None
+    expected_tools_hash: Optional[str] = None
+    tool_policy_hash: Optional[str] = None
+    last_known_good_version: Optional[str] = None
 
     def to_dict(self):
         data = asdict(self)
@@ -114,6 +123,12 @@ def load_registry(path=None, base_dir=None, root=None) -> Dict[str, InstalledSer
                 last_validated_at=spec.get("last_validated_at"),
                 last_validation_result=spec.get("last_validation_result"),
                 approved_directories=tuple(spec.get("approved_directories", ())),
+                installer_type=spec.get("installer_type"),
+                catalog_entry_hash=spec.get("catalog_entry_hash"),
+                lock_hash=spec.get("lock_hash"),
+                expected_tools_hash=spec.get("expected_tools_hash"),
+                tool_policy_hash=spec.get("tool_policy_hash"),
+                last_known_good_version=spec.get("last_known_good_version"),
             )
         except KeyError as e:
             raise McpError(MCP_REGISTRY_CORRUPT,
