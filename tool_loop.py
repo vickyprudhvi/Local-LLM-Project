@@ -26,7 +26,7 @@ import tools.config as config
 from brain import ask_local_raw, trim_history_tool_aware
 from interaction_log import log_tool_selection
 from tools.executor import ToolExecutor
-from tools.models import TOOL_STEP_LIMIT_REACHED, ToolCall, ToolResult
+from tools.models import TOOL_NOT_IN_SHORTLIST, TOOL_STEP_LIMIT_REACHED, ToolCall, ToolResult
 from tools.registry import bounded_ollama_schema, default_registry
 
 console = Console()
@@ -213,6 +213,11 @@ def run_local_tool_loop(prompt, history, system_prompt, on_tool_result=None):
     else:
         shortlisted = []
         tool_schemas = []
+    # The EXACT set of tool names offered this round. An mcp.-namespaced call
+    # naming anything outside this set is rejected before ToolExecutor ever
+    # sees it (Task 7) — closes the "hallucinated MCP tool" gap the same way
+    # router.py's _OFFERED_FUNCTION_NAMES already closes it for routing.
+    shortlisted_names = {d.name for d in shortlisted}
 
     # Append the static tool-safety/untrusted-content guidance only when tools are
     # actually offered. Remote content is never placed in the system prompt.
@@ -297,6 +302,21 @@ def run_local_tool_loop(prompt, history, system_prompt, on_tool_result=None):
                 messages.append(_tool_result_message(ToolResult.fail(
                     name, call_id, MALFORMED_TOOL_CALL,
                     "The tool call was malformed and could not be executed.")))
+                continue
+
+            # Shortlist-membership enforcement (Task 7): an mcp.-namespaced call
+            # naming a tool that was never actually offered this round — whether
+            # hallucinated outright (e.g. "filesystem.read_file") or a REAL,
+            # registered-but-not-shortlisted MCP tool — is rejected before
+            # ToolExecutor runs. Scoped to mcp.* only: the small, fixed built-in
+            # set (calculator, echo, ...) is already safe regardless of
+            # shortlisting and this keeps that behavior unchanged.
+            if call.tool_name.startswith("mcp.") and call.tool_name not in shortlisted_names:
+                messages.append(_tool_result_message(ToolResult.fail(
+                    call.tool_name, call.call_id, TOOL_NOT_IN_SHORTLIST,
+                    "This MCP tool was not offered for this request.")))
+                console.print(f"[dim]local llm tool result: {call.tool_name} -> "
+                              f"rejected (not in shortlist)[/dim]")
                 continue
 
             # Write-class tools (e.g. github.clone_repository) are gated: the

@@ -33,13 +33,37 @@ DEFAULT_POLICY = {
 }
 
 
+# Phase G.1 defaults, mirroring config/mcp_catalog.json's real filesystem entry —
+# so a test fixture manager built via make_manager()/catalog_dict() with no
+# overrides supports capability selection exactly like production, and a
+# resumed request (assistant._process_local_request_with_capability_selection)
+# doesn't spuriously report MCP_CAPABILITY_UNAVAILABLE. Pass
+# granular_capabilities=() explicitly to build a pre-G.1, non-selectable entry
+# (see tests/test_mcp_capability_catalog.py's backward-compatibility test).
+DEFAULT_GRANULAR_CAPABILITIES = (
+    "read_local_text_file", "list_local_directory", "search_local_files", "write_local_file",
+)
+DEFAULT_SELECTION_HINTS = {
+    "explicit_names": ["filesystem", "filesystem mcp", "local files"],
+    "actions": {
+        "read_local_text_file": ["read", "open"],
+        "list_local_directory": ["list", "browse"],
+        "search_local_files": ["find", "search"],
+        "write_local_file": ["write", "save"],
+    },
+}
+
+
 def catalog_dict(version=PINNED_VERSION, package=PACKAGE_NAME, tools=None,
                  allow_lifecycle_scripts=None, capabilities=None, transport="stdio",
-                 installer_type="npm"):
+                 installer_type="npm", granular_capabilities=None, selection_hints=None):
     """A valid single-entry catalog document (override pieces per test).
 
     `allow_lifecycle_scripts` is emitted only when explicitly set, so tests can
     build a catalog that REQUESTS lifecycle scripts and assert it is rejected.
+    `granular_capabilities`/`selection_hints` default to Phase G.1 metadata
+    matching the real production catalog; pass `granular_capabilities=()` for a
+    pre-G.1 entry.
     """
     installer = {
         "type": installer_type,
@@ -67,6 +91,11 @@ def catalog_dict(version=PINNED_VERSION, package=PACKAGE_NAME, tools=None,
                 ],
                 "expected_tools": ["list_allowed_directories", "list_directory", "read_text_file"],
                 "default_tool_policy": tools if tools is not None else DEFAULT_POLICY,
+                "granular_capabilities": (list(DEFAULT_GRANULAR_CAPABILITIES)
+                                          if granular_capabilities is None
+                                          else list(granular_capabilities)),
+                "selection_hints": (DEFAULT_SELECTION_HINTS if selection_hints is None
+                                    else selection_hints),
             }
         },
     }

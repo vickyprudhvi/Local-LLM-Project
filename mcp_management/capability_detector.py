@@ -16,6 +16,7 @@ MCP_CAPABILITY_UNAVAILABLE.
 import os
 import re
 
+from mcp_management.capabilities import CapabilityEvidence, CapabilityEvidenceType, CapabilityRequirement
 from mcp_management.models import CapabilityDetection
 from tools.models import MCP_CAPABILITY_UNAVAILABLE, MCP_SERVER_NOT_APPROVED
 
@@ -230,3 +231,319 @@ def validate_detection(raw, catalog) -> CapabilityDetection:
         confidence=confidence,
         reason=reason or f"The request requires the '{capability}' capability.",
     )
+
+
+# ============================================================================
+# Phase G.1 — multi-capability request analysis for server selection.
+#
+# Deliberately separate from detect_capability()/validate_detection() above:
+# those decide "does Phase F need to OFFER TO INSTALL something" for a single
+# coarse capability id matched against fixed patterns. McpCapabilityDetector
+# below extracts zero or more GRANULAR CapabilityRequirement objects (see
+# mcp_management.capabilities) for mcp_management.server_selector, scored using
+# the CATALOG's own selection_hints — so a new catalog entry with metadata is
+# selectable with no code change here. Neither code path calls the other, and
+# nothing above this point is modified.
+#
+# Deterministic and side-effect-free: no os.stat/Path.exists/open, no network,
+# no MCP call, no LLM call. A path is recognized by SHAPE alone; it need not
+# exist on disk.
+# ============================================================================
+
+_UNC_PATH_RE = re.compile(r"\\\\[^\s'\"<>|\\]+\\[^\s'\"<>|]*")
+_URL_RE = re.compile(r"\bhttps?://\S+", re.IGNORECASE)
+
+# Filesystem action verbs, most-specific first — the FIRST one that matches
+# decides the granular capability (Task 5/7: action takes precedence).
+_G1_MANAGE_VERBS = re.compile(r"\b(copy|move|delete|rename)\b", re.IGNORECASE)
+_G1_CREATE_DIR_RE = re.compile(
+    r"\b(?:create|make)\b[^.]{0,20}\b(?:directory|folder)\b", re.IGNORECASE)
+_G1_CREATE_FILE_RE = re.compile(r"\b(?:create)\b[^.]{0,20}\bfile\b", re.IGNORECASE)
+_G1_WRITE_VERBS = re.compile(r"\b(write|save|append)\b", re.IGNORECASE)
+_G1_SEARCH_VERBS = re.compile(r"\b(find|search|locate)\b", re.IGNORECASE)
+_G1_LIST_VERBS = re.compile(r"\b(list|browse)\b", re.IGNORECASE)
+_G1_METADATA_RE = re.compile(r"\bfile\s+(?:info|metadata|size|details)\b", re.IGNORECASE)
+_G1_READ_VERBS = re.compile(r"\b(read|open|view|cat|display|show)\b", re.IGNORECASE)
+
+# Document-conversion verbs are a DISJOINT set from the filesystem verbs above —
+# summarizing/reviewing/analyzing/extracting is never also a plain filesystem op.
+# Bare "explain"/"inspect" are deliberately EXCLUDED (too generic — "Explain the
+# DOCX file format" must stay NONE_REQUIRED); they only count paired with
+# "this document".
+_G1_DOCUMENT_VERBS = re.compile(
+    r"\b(summarize|summarise|review|analyze|analyse)\b"
+    r"|extract\s+(?:text|tables?|content)"
+    r"|convert\s+(?:it\s+)?to\s+markdown"
+    r"|read\s+and\s+summari[sz]e"
+    r"|(?:explain|inspect)\s+this\s+document",
+    re.IGNORECASE,
+)
+_G1_DOCUMENT_NOUNS = re.compile(
+    r"\b(pdf|docx?|pptx?|xlsx?|epub|ipynb|word\s+document|powerpoint(?:\s+\w+)?|excel\s+\w+|"
+    r"presentation|notebook|e-?book)\b",
+    re.IGNORECASE)
+# "inspect"/"explain" alone are too generic (they also read as plain conversation
+# verbs) — they only count as document-conversion evidence together with "this
+# document" or an actual document object; enforced in _document_capability below.
+_G1_GENERIC_DOCUMENT_VERBS = frozenset({"inspect", "explain"})
+_G1_DOCUMENT_EXTENSIONS = frozenset({
+    ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
+    ".html", ".htm", ".ipynb", ".epub",
+})
+# Recognized text extensions, mirrored from the production catalog's own
+# read_local_text_file hints — used ONLY as a lexical path-extension terminator
+# (Task 3), independent of whatever a specific catalog entry declares.
+_G1_TEXT_EXTENSIONS = frozenset({
+    ".txt", ".md", ".json", ".yaml", ".yml", ".py", ".sql", ".csv", ".log", ".ini", ".toml", ".xml",
+})
+_G1_KNOWN_PATH_EXTENSIONS = _G1_DOCUMENT_EXTENSIONS | _G1_TEXT_EXTENSIONS
+
+DOCUMENT_TO_MARKDOWN_CAPABILITY = "document_to_markdown"
+
+_EXPLICIT_SERVER_RE = re.compile(
+    r"\b(?:use|using)\s+(?:the\s+)?(?P<name>[A-Za-z][A-Za-z0-9 _-]{0,40}?)\s+mcp(?:\s+server)?\b",
+    re.IGNORECASE)
+
+
+def _extension_of(path_text):
+    m = _FILE_SUFFIX_RE.search(path_text)
+    return m.group(0).lower() if m else None
+
+
+def _extend_unquoted_path_to_known_extension(text, start):
+    """Grow an UNQUOTED path beginning at `start` across space-separated tokens
+    until the accumulated string ends with a recognized extension (Task 3):
+    "C:\\Users\\...\\learn stuff\\report.pdf" is not truncated at the space
+    before "stuff" merely because the initial regex match stopped there.
+
+    Lexical only — never touches the filesystem (no os.stat/Path.exists/open).
+    Gives up after `_MAX_PATH_TOKENS` tokens and returns None, so a directory
+    path with spaces and no recognizable extension is left to the caller's
+    original (unextended) match rather than guessed at.
+    """
+    tokens = text[start:].split()
+    if not tokens:
+        return None
+    accumulated = tokens[0]
+    if _extension_of(accumulated.strip(_TRAILING_JUNK)) in _G1_KNOWN_PATH_EXTENSIONS:
+        return accumulated.strip(_TRAILING_JUNK)
+    for tok in tokens[1:_MAX_PATH_TOKENS]:
+        accumulated = f"{accumulated} {tok}"
+        stripped = accumulated.strip(_TRAILING_JUNK)
+        if _extension_of(stripped) in _G1_KNOWN_PATH_EXTENSIONS:
+            return stripped
+    return None
+
+
+def _find_local_paths(text):
+    """Return (paths, path_types, has_url) — deterministic path-SHAPE extraction.
+
+    A match that starts inside a URL span is never treated as a local path
+    (Task 6): `open https://example.com/report.pdf` must never be read as a
+    local file. `has_url` is reported separately so callers can distinguish
+    "no path evidence at all" from "the only path-like text was a URL".
+    `path_types` is a same-length list of coarse, privacy-safe labels
+    ("windows_absolute" / "unc" / "posix_absolute" / "quoted") for debug
+    logging (Task 9) — never the path text itself.
+    """
+    url_spans = [(m.start(), m.end()) for m in _URL_RE.finditer(text)]
+
+    def _inside_url(pos):
+        return any(start <= pos < end for start, end in url_spans)
+
+    paths = []
+    path_types = []
+    for pattern, label in ((_UNC_PATH_RE, "unc"), (_WINDOWS_PATH_RE, "windows_absolute"),
+                           (_POSIX_PATH_RE, "posix_absolute")):
+        for m in pattern.finditer(text):
+            if _inside_url(m.start()):
+                continue
+            candidate = m.group(0).strip(_TRAILING_JUNK)
+            if not candidate:
+                continue
+            # An unquoted Windows/UNC path may contain spaces
+            # ("C:\Users\...\learn stuff\report.pdf") and the regex above always
+            # stops at the first one; extend it lexically to the nearest
+            # recognized extension rather than truncating silently.
+            if pattern is not _POSIX_PATH_RE:
+                extended = _extend_unquoted_path_to_known_extension(text, m.start())
+                if extended and len(extended) > len(candidate):
+                    candidate = extended
+            paths.append(candidate)
+            path_types.append(label)
+    for m in _QUOTED_PATH_RE.finditer(text):
+        if _inside_url(m.start()):
+            continue
+        candidate = m.group(1).strip(_TRAILING_JUNK)
+        if candidate and (_WINDOWS_PATH_RE.match(candidate) or _UNC_PATH_RE.match(candidate)
+                          or candidate.startswith("/") or "/" in candidate or "\\" in candidate):
+            paths.append(candidate)
+            path_types.append("quoted")
+
+    # Order-preserving de-duplication, keeping paths/path_types aligned.
+    seen = set()
+    dedup_paths, dedup_types = [], []
+    for p, t in zip(paths, path_types):
+        if p in seen:
+            continue
+        seen.add(p)
+        dedup_paths.append(p)
+        dedup_types.append(t)
+    return dedup_paths, dedup_types, bool(url_spans)
+
+
+def _matches_any(text, phrases):
+    lowered = text.lower()
+    return next((p for p in phrases if p in lowered), None)
+
+
+class McpCapabilityDetector:
+    """Extracts zero or more granular CapabilityRequirements from `user_text`.
+
+    `catalog` supplies the granular-capability vocabulary via each entry's
+    `selection_hints` — this class holds no fixed capability list of its own
+    beyond the built-in filesystem/document classification rules (Task 5).
+    """
+
+    def detect(self, user_text, catalog):
+        if not isinstance(user_text, str) or not user_text.strip():
+            return ()
+        text = user_text[:MAX_REQUEST_CHARS]
+
+        local_paths, path_types, has_url = _find_local_paths(text)
+        has_local_path = bool(local_paths)
+        path_extension = next((e for e in (_extension_of(p) for p in local_paths) if e), None)
+        path_type = path_types[0] if path_types else None
+        explicit_server = self._explicit_server(text, catalog)
+        is_knowledge_question = bool(_KNOWLEDGE_RE.match(text))
+
+        requirements = []
+        fs_capability = self._filesystem_capability(text, has_local_path)
+        if fs_capability is not None:
+            requirements.append(self._build_requirement(
+                fs_capability, text, catalog, has_local_path, path_type, path_extension,
+                explicit_server, action_value=None))
+
+        doc_capability, doc_action = self._document_capability(
+            text, path_extension, has_url, has_local_path)
+        if doc_capability is not None and not (is_knowledge_question and not has_local_path):
+            requirements.append(self._build_requirement(
+                doc_capability, text, catalog, has_local_path, path_type, path_extension,
+                explicit_server, action_value=doc_action))
+
+        return tuple(requirements)
+
+    # ---- capability classification ----
+
+    def _filesystem_capability(self, text, has_local_path):
+        if not has_local_path:
+            return None  # a bare relative name/extension is never enough alone
+        if _G1_MANAGE_VERBS.search(text):
+            return "manage_local_files"
+        if _G1_CREATE_DIR_RE.search(text):
+            return "create_local_directory"
+        if _G1_CREATE_FILE_RE.search(text) or _G1_WRITE_VERBS.search(text):
+            return "write_local_file"
+        if _G1_SEARCH_VERBS.search(text):
+            return "search_local_files"
+        if _G1_LIST_VERBS.search(text):
+            return "list_local_directory"
+        if _G1_METADATA_RE.search(text):
+            return "get_local_file_metadata"
+        if _G1_READ_VERBS.search(text):
+            return "read_local_text_file"
+        return None
+
+    def _document_capability(self, text, path_extension, has_url, has_local_path):
+        """Return (capability_id, matched_verb_text) or (None, None)."""
+        if has_url and not has_local_path:
+            return None, None  # remote URL document handling is unsupported in this phase
+        verb_match = _G1_DOCUMENT_VERBS.search(text)
+        if not verb_match:
+            return None, None
+        looks_like_document = (
+            (path_extension in _G1_DOCUMENT_EXTENSIONS) or bool(_G1_DOCUMENT_NOUNS.search(text)))
+        if not looks_like_document:
+            return None, None
+        return DOCUMENT_TO_MARKDOWN_CAPABILITY, verb_match.group(0).strip().lower()
+
+    # ---- explicit server-name detection ----
+
+    def _explicit_server(self, text, catalog):
+        """Return ("known", server_id) | ("unknown", raw_name) | None.
+
+        Only a name that matches a catalog entry's own `selection_hints.
+        explicit_names` (or its server_id) counts as "known" — an unrecognized
+        name is reported, never guessed at or silently substituted.
+        """
+        m = _EXPLICIT_SERVER_RE.search(text)
+        if not m:
+            return None
+        raw_name = m.group("name").strip().lower()
+        if catalog is None:
+            return ("unknown", raw_name)
+        for entry in catalog.entries.values():
+            if raw_name == entry.server_id or raw_name in entry.selection_hints.explicit_names:
+                return ("known", entry.server_id)
+        return ("unknown", raw_name)
+
+    # ---- evidence + requirement assembly ----
+
+    def _build_requirement(self, capability_id, text, catalog, has_local_path, path_type,
+                           path_extension, explicit_server, action_value=None):
+        evidence = []
+
+        if has_local_path:
+            # `value` is a coarse SHAPE label (Task 9 debug trace), never the
+            # actual path text — the path itself is never stored on evidence.
+            evidence.append(CapabilityEvidence(
+                CapabilityEvidenceType.LOCAL_PATH, path_type or "local_path", 40,
+                "An absolute local filesystem path was found in the request."))
+
+        matched_action = action_value or self._matched_action_phrase(catalog, capability_id, text)
+        if matched_action:
+            evidence.append(CapabilityEvidence(
+                CapabilityEvidenceType.ACTION_OBJECT, matched_action, 35,
+                f"The phrase {matched_action!r} suggests {capability_id!r}."))
+
+        if path_extension:
+            if self._extension_matches(catalog, capability_id, path_extension):
+                evidence.append(CapabilityEvidence(
+                    CapabilityEvidenceType.FILE_EXTENSION, path_extension, 20,
+                    f"The extension {path_extension!r} suggests {capability_id!r}."))
+            elif capability_id == DOCUMENT_TO_MARKDOWN_CAPABILITY and path_extension in _G1_DOCUMENT_EXTENSIONS:
+                evidence.append(CapabilityEvidence(
+                    CapabilityEvidenceType.FILE_EXTENSION, path_extension, 20,
+                    f"The extension {path_extension!r} suggests a convertible document."))
+
+        if explicit_server is not None:
+            kind, value = explicit_server
+            if kind == "known":
+                evidence.append(CapabilityEvidence(
+                    CapabilityEvidenceType.EXPLICIT_SERVER, value, 100,
+                    "The request explicitly named an approved MCP server."))
+            else:
+                evidence.append(CapabilityEvidence(
+                    CapabilityEvidenceType.EXPLICIT_SERVER, f"unknown:{value}", 0,
+                    "The request named a server that is not in the trusted catalog."))
+
+        confidence = min(1.0, 0.5 + 0.1 * len(evidence))
+        return CapabilityRequirement(capability_id=capability_id, confidence=confidence,
+                                     evidence=tuple(evidence))
+
+    def _matched_action_phrase(self, catalog, capability_id, text):
+        if catalog is None:
+            return None
+        for entry in catalog.entries.values():
+            phrases = entry.selection_hints.actions.get(capability_id)
+            if phrases:
+                found = _matches_any(text, phrases)
+                if found:
+                    return found
+        return None
+
+    def _extension_matches(self, catalog, capability_id, extension):
+        if catalog is None:
+            return False
+        return any(extension in entry.selection_hints.extensions.get(capability_id, ())
+                  for entry in catalog.entries.values())

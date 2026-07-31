@@ -25,7 +25,9 @@ from mcp_layer import ActiveMcpRuntime, McpError, McpRuntimeManager
 from mcp_layer.config_resolver import resolve_config
 from mcp_management.access_classifier import classify_outside_root_failure
 from mcp_management.approval import confirm_provisioning
+from mcp_management.capabilities import CapabilitySelectionStatus
 from mcp_management.capability_detector import extract_directory_candidate
+from mcp_management.capability_service import select_for_request
 from mcp_management.registry import get_installed
 from router import route_and_answer
 from tools.models import (
@@ -359,7 +361,12 @@ def _restart_mcp_and_resume(manager, runtime, directive, user_text, history, sys
         reply, _extra = dispatch(resumed_decision, user_text, resumed_prompt, history, system_prompt)
         return reply, None
 
-    reply, _extra, pending_fs_request_id = _run_local_turn(
+    # Task 8: a resumed request re-enters the FULL pipeline — router already ran
+    # above; this re-runs Phase G.1 capability selection before Phase B, exactly
+    # like a fresh request. A resumed document-conversion request with no
+    # approved provider must still report MCP_CAPABILITY_UNAVAILABLE here, not
+    # fall through into Phase B or another Filesystem access cycle.
+    reply, _extra, pending_fs_request_id = _process_local_request_with_capability_selection(
         manager, runtime, user_text, resumed_prompt, history, system_prompt,
         attempted_fs_requests, resume_budget=resume_budget - 1)
     return reply, pending_fs_request_id
@@ -424,6 +431,91 @@ def _run_local_turn(manager, runtime, user_text, prompt, history, system_prompt,
         attempted_fs_requests, resume_budget,
         previous_allowed_roots=halt.get("previous_allowed_roots"))
     return reply, extra_metrics, pending_fs_request_id
+
+
+_ZERO_METRICS = {"prompt_tokens": 0, "completion_tokens": 0}
+
+
+def _log_capability_selection(selection):
+    """Debug-only diagnostics (Task 9/12): silent on a normal request
+    (MCP_CAPABILITY_DEBUG unset) and even then never prints raw request text,
+    file contents, credentials, or full paths — only capability ids, coarse
+    evidence labels (a verb, a path SHAPE like "windows_absolute", an
+    extension), confidence, and the selection outcome.
+    """
+    if not app_config.mcp_capability_debug_enabled():
+        return
+    if selection.status == CapabilitySelectionStatus.NONE_REQUIRED:
+        return
+    for req in selection.required_capabilities:
+        console.print("[dim]capability detection:[/dim]")
+        console.print(f"[dim]  capability: {req.capability_id}[/dim]")
+        console.print("[dim]  evidence:[/dim]")
+        for ev in req.evidence:
+            console.print(f"[dim]    - {ev.evidence_type.value}: {ev.value}[/dim]")
+
+    console.print("[dim]trusted provider lookup:[/dim]")
+    required_ids = ", ".join(r.capability_id for r in selection.required_capabilities)
+    console.print(f"[dim]  capability: {required_ids}[/dim]")
+    console.print(f"[dim]  candidates: {len(selection.candidates)}[/dim]")
+    console.print(f"[dim]  result: {selection.status.value}[/dim]")
+    if selection.selected_server_id:
+        console.print(f"[dim]  selected: {selection.selected_server_id}[/dim]")
+
+
+def _capability_selection_reply(selection):
+    """Normalized user-visible text (Task 11) for a status that skips Phase B
+    entirely. None for NONE_REQUIRED/SELECTED, which proceed exactly as before."""
+    if selection.status in (
+        CapabilitySelectionStatus.UNSUPPORTED,
+        CapabilitySelectionStatus.AMBIGUOUS,
+        CapabilitySelectionStatus.MULTI_SERVER_REQUIRED,
+    ):
+        return selection.explanation
+    if selection.status == CapabilitySelectionStatus.INVALID_CATALOG:
+        return "The trusted MCP catalog could not be used right now; continuing without it."
+    return None
+
+
+def _process_local_request_with_capability_selection(manager, runtime, user_text, prompt, history,
+                                                      system_prompt, attempted_fs_requests,
+                                                      resume_budget=1):
+    """THE single authoritative entrypoint for every local request (Task 1).
+
+    Every local request — the normal typed/push-to-talk turn, a router
+    fallback-to-local, and every resumption (Filesystem approval, runtime
+    restart, a future provisioning approval) — must call this function, never
+    `_run_local_turn` directly. It is the only place `_run_local_turn` is
+    called from in production code.
+
+    A read-only capability/server-selection check runs BEFORE Phase B.
+    NONE_REQUIRED and SELECTED are strictly additive — behavior is EXACTLY the
+    pre-G.1 call to `_run_local_turn` (invariant 15). UNSUPPORTED/AMBIGUOUS/
+    MULTI_SERVER_REQUIRED return immediately: no Phase B shortlist, no local
+    LLM completion, no ToolExecutor call, no Filesystem access state, no MCP
+    runtime call. This function never starts a server, installs a package, or
+    bypasses ToolExecutor; it only reads the already-loaded trusted catalog and
+    existing read-only status providers.
+    """
+    if manager is None:
+        # No trusted catalog available in this configuration at all.
+        return _run_local_turn(manager, runtime, user_text, prompt, history, system_prompt,
+                               attempted_fs_requests, resume_budget=resume_budget)
+
+    selection = select_for_request(
+        user_text, manager.catalog, base_dir=manager.base_dir, managed_root=manager.managed_root,
+        registry_path=manager.registry_path, runtime=runtime)
+    _log_capability_selection(selection)
+
+    reply = _capability_selection_reply(selection)
+    if reply is not None:
+        return reply, dict(_ZERO_METRICS), None
+
+    # NONE_REQUIRED or SELECTED: existing behavior, completely unchanged. Phase B
+    # remains responsible for the exact-tool shortlist; the selection above is
+    # not yet consumed by it (a later Phase G stage does that).
+    return _run_local_turn(manager, runtime, user_text, prompt, history, system_prompt,
+                           attempted_fs_requests, resume_budget=resume_budget)
 
 
 def _start_mcp():
@@ -583,12 +675,16 @@ def main():
             console.print(f"[dim]routing: mode={decision.mode} tool={decision.tool}[/dim]")
 
             if decision.mode == "local":
-                # Phase F.1 hotfix: provisioning-if-needed, immediate outside-root
-                # interception, and a successful access.add/remove all run inside
-                # _run_local_turn — see its docstring for why "immediate" matters.
-                reply, extra_metrics, pending_fs_request_id = _run_local_turn(
+                # Every local request (including a router fallback-to-local —
+                # decision.mode is "local" either way) enters through the ONE
+                # authoritative capability-selection entrypoint (Task 1).
+                # NONE_REQUIRED/SELECTED fall straight through to the unchanged
+                # Phase F.1 hotfix path (provisioning-if-needed, immediate
+                # outside-root interception, access.add/remove restart — see
+                # _run_local_turn's docstring for why "immediate" matters).
+                reply, extra_metrics, pending_fs_request_id = _process_local_request_with_capability_selection(
                     provisioning_manager, runtime, user_text, prompt, history, system_prompt,
-                    attempted_fs_requests, resume_budget=1)
+                    attempted_fs_requests)
             else:
                 reply, extra_metrics = dispatch(decision, user_text, prompt, history, system_prompt)
 

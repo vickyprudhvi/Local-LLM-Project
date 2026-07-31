@@ -67,10 +67,15 @@ TOOLS = [
                 "Handle an ordinary conversational turn, AND any request the local model's own tools can "
                 "serve: searching the web, fetching/reading a web page, searching or inspecting public "
                 "GitHub repositories, reading GitHub files, cloning a public GitHub repository into the "
-                "local workspace, statically inspecting or security-scanning a cloned repository, and "
-                "arithmetic/calculation. Call this whenever the user asks to search online, look something "
-                "up on the web, find/inspect/clone a GitHub repo, or run a calculation — the local model "
-                "runs those tools itself. Use this when no other specific tool applies and Claude isn't needed."
+                "local workspace, statically inspecting or security-scanning a cloned repository, "
+                "arithmetic/calculation, and reading, listing, searching, or analyzing/summarizing a file "
+                "or folder that lives on THIS computer (a Windows or POSIX path such as 'C:\\...' or "
+                "'/home/...'), including local PDFs, Word/PowerPoint/Excel files, and plain text files. "
+                "Call this whenever the user asks to search online, look something up on the web, "
+                "find/inspect/clone a GitHub repo, run a calculation, or read/open/list/find/summarize/"
+                "review/analyze something at a path on their own machine — the local model runs those "
+                "tools itself and Claude cannot reach the local filesystem. Use this when no other "
+                "specific tool applies and Claude isn't needed."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -229,8 +234,11 @@ TOOLS = [
                 "medical/health, legal, resume/salary/career questions, or anything requiring careful/deep "
                 "reasoning or high accuracy — even if you think you know the answer, do not answer these yourself. "
                 "Do NOT escalate requests the local tools already handle — web search, fetching web pages, "
-                "GitHub search/inspection, cloning or statically inspecting repositories, and calculations "
-                "route to answer_locally even though they are technical (Claude cannot reach those tools)."
+                "GitHub search/inspection, cloning or statically inspecting repositories, calculations, and "
+                "reading/listing/searching/summarizing/analyzing a file or folder at a path on the user's own "
+                "computer — route ALL of these to answer_locally even though summarizing or analyzing a "
+                "document can sound like it needs careful reasoning (Claude cannot reach the local filesystem "
+                "or those tools)."
             ),
             "parameters": {"type": "object", "properties": {}},
         },

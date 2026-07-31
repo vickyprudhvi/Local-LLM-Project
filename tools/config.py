@@ -246,3 +246,10 @@ def mcp_install_timeout():
 
 def mcp_provisioning_enabled():
     return _bool("MCP_PROVISIONING_ENABLED", True)
+
+
+# ---- Phase G.1: MCP capability detection / server selection ----
+def mcp_capability_debug_enabled():
+    """Verbose per-request capability/selection logging — off by default so a
+    normal request never prints extra MCP diagnostics."""
+    return _bool("MCP_CAPABILITY_DEBUG", False)

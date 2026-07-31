@@ -64,6 +64,24 @@ def test_halt_for_filesystem_access_stops_before_a_second_llm_call(fresh_tools, 
 
 
 def test_restart_mcp_and_resume_stops_before_a_second_llm_call(fresh_tools, monkeypatch):
+    # Must be a real, shortlisted candidate — an mcp.-namespaced call the model
+    # was never actually offered is now rejected before on_tool_result even runs
+    # (Task 7 shortlist-membership enforcement).
+    from tools.base import BaseTool
+    from tools.models import ToolPermission
+
+    class _AccessAddStub(BaseTool):
+        name = "mcp.filesystem.access.add"
+        description = "grant filesystem access"
+        input_schema = {"type": "object", "properties": {}}
+        permission = ToolPermission.READ  # avoid a real confirmation prompt in this test
+        llm_callable = True
+
+        def execute(self, arguments):
+            return {"server_id": "filesystem", "approved_directories": ["a", "b"]}
+
+    fresh_tools.register(_AccessAddStub())
+
     fake = _install(monkeypatch, [
         _tool_call("mcp.filesystem.access.add", {"server_id": "filesystem", "plan_id": "p",
                                                   "plan_hash": "h"}),
