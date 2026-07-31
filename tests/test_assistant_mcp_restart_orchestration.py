@@ -16,8 +16,9 @@ import os
 import pytest
 
 import assistant
+import tool_loop
 from mcp_layer.errors import McpError
-from mcp_layer.runtime_manager import ActiveMcpRuntime
+from mcp_layer.runtime_manager import ActiveMcpRuntime, MultiMcpRuntimeManager
 from tests.mcp_provisioning_helpers import make_manager
 from tests.test_tool_loop import _tool_call
 from tool_loop import ToolLoopControl, ToolLoopDirective
@@ -147,18 +148,16 @@ _FORBIDDEN_PHRASES = ("wait a moment", "try a new conversation", "cache", "manua
     MCP_FILESYSTEM_RUNTIME_ROOT_MISMATCH, MCP_RUNTIME_ROLLBACK_FAILED,
 ])
 def test_restart_failure_message_is_accurate_and_has_no_forbidden_workaround(ctx, monkeypatch, error_code):
-    class _FailingCoordinator:
-        def __init__(self, *a, **kw):
-            pass
+    def _fail_replace(*a, **kw):
+        raise McpError(error_code, "forced failure")
 
-        def replace_active_session(self, *a, **kw):
-            raise McpError(error_code, "forced failure")
-
-    monkeypatch.setattr(assistant, "McpRuntimeManager", _FailingCoordinator)
+    runtime_manager = MultiMcpRuntimeManager(tool_loop.REGISTRY, base_dir=ctx["paths"]["base_dir"],
+                                             managed_root=ctx["paths"]["managed_root"])
+    monkeypatch.setattr(runtime_manager, "replace_session", _fail_replace)
     directive = ToolLoopDirective(control=ToolLoopControl.RESTART_MCP_AND_RESUME,
                                   server_id="filesystem", expected_allowed_roots=("a",))
     reply, pending_id = assistant._restart_mcp_and_resume(
-        ctx["manager"], ActiveMcpRuntime(None), directive, "read something", [], "sys", set(),
+        ctx["manager"], runtime_manager, directive, "read something", [], "sys", set(),
         resume_budget=1)
     assert pending_id is None
     assert "updated" in reply  # accurately reports the config DID change
@@ -169,14 +168,15 @@ def test_restart_failure_message_is_accurate_and_has_no_forbidden_workaround(ctx
 
 def test_resume_budget_exhausted_refuses_without_touching_the_runtime(ctx, monkeypatch):
     def _must_not_be_called(*a, **kw):
-        raise AssertionError("replace_active_session must not run when resume_budget is exhausted")
+        raise AssertionError("replace_session must not run when resume_budget is exhausted")
 
-    monkeypatch.setattr(assistant, "McpRuntimeManager",
-                        lambda *a, **kw: type("C", (), {"replace_active_session": _must_not_be_called})())
+    runtime_manager = MultiMcpRuntimeManager(tool_loop.REGISTRY, base_dir=ctx["paths"]["base_dir"],
+                                             managed_root=ctx["paths"]["managed_root"])
+    monkeypatch.setattr(runtime_manager, "replace_session", _must_not_be_called)
     directive = ToolLoopDirective(control=ToolLoopControl.RESTART_MCP_AND_RESUME,
                                   server_id="filesystem", expected_allowed_roots=("a",))
     reply, pending_id = assistant._restart_mcp_and_resume(
-        ctx["manager"], ActiveMcpRuntime(None), directive, "read something", [], "sys", set(),
+        ctx["manager"], runtime_manager, directive, "read something", [], "sys", set(),
         resume_budget=0)
     assert pending_id is None
     assert "won't restart it again" in reply

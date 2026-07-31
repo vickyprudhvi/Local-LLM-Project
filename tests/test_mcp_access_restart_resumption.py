@@ -18,7 +18,7 @@ import assistant
 import confirmation
 import tool_loop
 from mcp_layer.external import bootstrap_from_config
-from mcp_layer.runtime_manager import ActiveMcpRuntime
+from mcp_layer.runtime_manager import MultiMcpRuntimeManager, RuntimeState
 from mcp_management.registry import STATUS_INSTALLED, InstalledServer, upsert
 from mcp_management.filesystem_access_tools import register_filesystem_access_tools
 from router import RouteDecision
@@ -84,7 +84,16 @@ def env(tmp_path, monkeypatch):
     config_path = os.path.join(paths["base_dir"], paths["managed_root"], "filesystem", "server.json")
     old_session = bootstrap_from_config(reg, config=load_config(config_path), base_dir=paths["base_dir"])
     assert old_session.health.state.value == "healthy"
-    runtime = ActiveMcpRuntime(old_session)
+
+    runtime = MultiMcpRuntimeManager(reg, base_dir=paths["base_dir"], managed_root=paths["managed_root"])
+    # Seed the "filesystem" slot as already HEALTHY with the pre-bootstrapped
+    # session — simulating a server that was already active before this turn,
+    # exactly like Task 17's "Filesystem starts lazily if inactive" companion
+    # scenario (already-active case).
+    slot = runtime._slot("filesystem")
+    slot.session = old_session
+    slot.state = RuntimeState.HEALTHY
+    runtime._runtimes["filesystem"].replace(old_session)
 
     return {"manager": manager, "paths": paths, "reg": reg, "runtime": runtime,
            "root_a": str(root_a), "root_b": str(root_b), "old_session": old_session}
@@ -121,20 +130,21 @@ def test_access_add_halts_then_restarts_and_resumes_with_real_content(env, monke
     assert pending_id is None
 
     # Old process actually terminated; runtime now points at a NEW session.
+    new_session = runtime.get_session("filesystem")
     assert old_proc.poll() is not None
-    assert runtime.session is not env["old_session"]
-    assert runtime.session.client is not None
+    assert new_session is not env["old_session"]
+    assert new_session.client is not None
 
     # The read tool the model used in step 2 is bound to the NEW client.
     live_tool = reg.get("mcp.filesystem.read_text_file")
-    assert live_tool.session_owner == runtime.session.session_id
+    assert live_tool.session_owner == new_session.session_id
 
     # Built-ins remain registered and callable.
     for name in ("mcp.filesystem.access.list", "mcp.filesystem.access.plan",
                 "mcp.filesystem.access.add", "mcp.filesystem.access.remove"):
         assert reg.has(name)
 
-    runtime.session.shutdown()
+    new_session.shutdown()
 
 
 def test_no_stale_read_reaches_the_old_client_after_access_add(env, monkeypatch):

@@ -15,7 +15,7 @@ import pytest
 
 import assistant
 import tool_loop
-from mcp_layer.runtime_manager import ActiveMcpRuntime
+from mcp_layer.runtime_manager import MultiMcpRuntimeManager
 from mcp_management.capabilities import CapabilitySelectionStatus
 from mcp_management.manager import McpProvisioningManager
 from mcp_management.registry import STATUS_INSTALLED, InstalledServer, upsert
@@ -40,7 +40,7 @@ def real_manager():
 
 @pytest.mark.parametrize("text", [REPORTED_TEXT, REPORTED_TEXT_QUOTED])
 def test_reported_string_is_unsupported_with_full_path_before_extension(real_manager, text):
-    runtime = ActiveMcpRuntime(None)
+    runtime = MultiMcpRuntimeManager(tool_loop.REGISTRY)
 
     def _boom(*a, **kw):
         raise AssertionError("Phase B (the local tool loop) must not run")
@@ -56,7 +56,7 @@ def test_reported_string_is_unsupported_with_full_path_before_extension(real_man
     assert "no approved MCP server currently provides it" in reply
     assert metrics == {"prompt_tokens": 0, "completion_tokens": 0}
     assert pending_id is None
-    assert runtime.session is None  # no MCP process, no runtime call
+    assert runtime.get_session("filesystem") is None  # no MCP process, no runtime call
 
 
 def test_reported_string_full_path_is_not_truncated():
@@ -83,10 +83,10 @@ def test_unsupported_document_request_makes_zero_downstream_calls(real_manager, 
                         _fail("filesystem access classifier"))
     monkeypatch.setattr(McpProvisioningManager, "prepare_filesystem_access_plan",
                         _fail("filesystem access planner"))
-    monkeypatch.setattr(assistant.McpRuntimeManager, "replace_active_session",
-                        _fail("MCP runtime manager"))
+    monkeypatch.setattr(MultiMcpRuntimeManager, "ensure_started", _fail("MCP runtime manager"))
+    monkeypatch.setattr(MultiMcpRuntimeManager, "replace_session", _fail("MCP runtime manager"))
 
-    runtime = ActiveMcpRuntime(None)
+    runtime = MultiMcpRuntimeManager(tool_loop.REGISTRY)
     reply, metrics, pending_id = assistant._process_local_request_with_capability_selection(
         real_manager, runtime, REPORTED_TEXT, REPORTED_TEXT, [], "sys", set())
 
@@ -157,7 +157,7 @@ def test_fixture_document_provider_is_selected_no_tool_no_server(tmp_path):
     }
     catalog = build_catalog(doc)
     manager, paths = make_manager(tmp_path, catalog=catalog)
-    runtime = ActiveMcpRuntime(None)
+    runtime = MultiMcpRuntimeManager(tool_loop.REGISTRY)
 
     def _boom(*a, **kw):
         raise AssertionError("Phase B must not run when SELECTED — G.1 never picks a tool")
@@ -174,7 +174,7 @@ def test_fixture_document_provider_is_selected_no_tool_no_server(tmp_path):
 
     assert selection.status == CapabilitySelectionStatus.SELECTED
     assert selection.selected_server_id == "document-test"
-    assert runtime.session is None  # no server was started to make this selection
+    assert runtime.get_session("document-test") is None  # no server was started to make this selection
 
 
 # ---- Task 1/8: single authoritative entrypoint ----
@@ -185,7 +185,7 @@ def test_router_fallback_to_local_still_invokes_capability_wrapper(real_manager,
     decision = RouteDecision(mode="local", payload=REPORTED_TEXT)  # what a fallback returns
     assert decision.mode == "local"
 
-    runtime = ActiveMcpRuntime(None)
+    runtime = MultiMcpRuntimeManager(tool_loop.REGISTRY)
     called = []
     real_select = assistant.select_for_request
 
@@ -211,16 +211,8 @@ def test_resumed_request_reinvokes_capability_selection(real_manager, monkeypatc
 
     monkeypatch.setattr(tool_loop, "run_local_tool_loop", _boom)
 
-    runtime = ActiveMcpRuntime(None)
-
-    class _NoOpCoordinator:
-        def __init__(self, *a, **kw):
-            pass
-
-        def replace_active_session(self, *a, **kw):
-            return None
-
-    monkeypatch.setattr(assistant, "McpRuntimeManager", _NoOpCoordinator)
+    runtime = MultiMcpRuntimeManager(tool_loop.REGISTRY)
+    monkeypatch.setattr(runtime, "replace_session", lambda *a, **kw: None)
 
     directive = ToolLoopDirective(control=ToolLoopControl.RESTART_MCP_AND_RESUME,
                                   server_id="filesystem", expected_allowed_roots=())
@@ -301,18 +293,23 @@ def _install_stub_server(paths, approved_dir):
     import json
 
     approved_abs = os.path.realpath(approved_dir)
+    from tests.mcp_provisioning_helpers import FIXTURE_SERVER
+
     server_root = os.path.join(paths["base_dir"], paths["managed_root"], "filesystem")
     os.makedirs(server_root, exist_ok=True)
+    workspace = os.path.join(paths["base_dir"], "mcp_workspaces", "filesystem")
+    os.makedirs(workspace, exist_ok=True)
     with open(os.path.join(server_root, "server.json"), "w", encoding="utf-8") as f:
         json.dump({
             "enabled": True, "required": False, "server_id": "filesystem",
             "display_name": "Filesystem MCP Server", "transport": "stdio",
-            "command": "node", "args": ["/entrypoint.js", approved_abs],
-            "working_directory": "./mcp_workspaces/filesystem",
+            "command": "node", "args": [FIXTURE_SERVER, approved_abs],
+            "working_directory": workspace,
             "startup_timeout_seconds": 15, "call_timeout_seconds": 15,
             "shutdown_timeout_seconds": 5, "environment_allowlist": [],
             "tool_policy": {"default_permission": "denied", "tools": {
                 "read_text_file": {"enabled": True, "permission": "read"},
+                "list_allowed_directories": {"enabled": True, "permission": "read"},
             }},
         }, f)
     upsert("filesystem", InstalledServer(
@@ -324,6 +321,8 @@ def _install_stub_server(paths, approved_dir):
     return approved_abs
 
 
+@pytest.mark.skipif(not __import__("tests.mcp_provisioning_helpers", fromlist=["node_available"])
+                    .node_available(), reason="node/npm not available")
 def test_valid_local_read_still_selects_filesystem_and_reaches_phase_b(tmp_path, monkeypatch):
     reg = default_registry()
     monkeypatch.setattr(tool_loop, "REGISTRY", reg)
@@ -337,25 +336,6 @@ def test_valid_local_read_still_selects_filesystem_and_reaches_phase_b(tmp_path,
     approved = _install_stub_server(paths, str(approved_dir))
     (approved_dir / "hello.txt").write_text("hi", encoding="utf-8")
 
-    from tools.base import BaseTool, ToolFailure
-    from tools.models import MCP_CALL_FAILED, ToolPermission
-
-    class _StubReadTool(BaseTool):
-        name = "mcp.filesystem.read_text_file"
-        description = "stub"
-        input_schema = {"type": "object", "properties": {"path": {"type": "string"}}}
-        permission = ToolPermission.READ
-        llm_callable = True
-
-        def execute(self, arguments):
-            path = os.path.realpath(arguments["path"])
-            if not (path == approved or path.startswith(approved + os.sep)):
-                raise ToolFailure(MCP_CALL_FAILED, "outside root")
-            with open(path, encoding="utf-8") as f:
-                return {"content": f.read()}
-
-    reg.register(_StubReadTool())
-
     target = os.path.join(approved, "hello.txt")
     user_text = f"read '{target}'"
     fake = FakeLLM([
@@ -364,10 +344,13 @@ def test_valid_local_read_still_selects_filesystem_and_reaches_phase_b(tmp_path,
     ])
     monkeypatch.setattr(tool_loop, "ask_local_raw", fake)
 
-    runtime = ActiveMcpRuntime(None)
+    runtime = MultiMcpRuntimeManager(reg, base_dir=paths["base_dir"], managed_root=paths["managed_root"])
     reply, metrics, pending_id = assistant._process_local_request_with_capability_selection(
         manager, runtime, user_text, user_text, [], "sys", set())
 
     assert "hi" in reply
     assert pending_id is None
     assert len(fake.calls) == 2  # the tool call round + the final answer — Phase B ran
+    session = runtime.get_session("filesystem")
+    assert session is not None
+    session.shutdown()

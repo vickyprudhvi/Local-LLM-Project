@@ -14,6 +14,7 @@ import pytest
 import assistant
 from mcp_layer.errors import McpError
 from mcp_management.capability_detector import extract_directory_candidate
+from mcp_management.registry import get_installed
 from tests.mcp_provisioning_helpers import (
     FakeNpm,
     make_manager,
@@ -81,75 +82,64 @@ def test_control_characters_never_produce_a_candidate():
 
 
 # ---- the live turn step ----
+#
+# Phase G.2: _provision_if_needed no longer threads an McpSession in/out — a
+# freshly-installed server is never eagerly restarted (no _start_mcp anymore);
+# it starts lazily the moment Phase G.1 selects it on the resumed request. These
+# tests therefore assert on INSTALLED-REGISTRY state, not a session object.
 
 @pytest.fixture
-def ctx(tmp_path, monkeypatch):
+def ctx(tmp_path):
     if not node_available():
         pytest.skip("node/npm not available")
     manager, paths = make_manager(tmp_path)
     workspace = workspace_with_file(tmp_path)
-    # Never touch the real repo config or start a real Phase E session in tests.
-    monkeypatch.setattr(assistant, "_start_mcp", lambda: SimpleNamespace(
-        restarted=True, shutdown=lambda: None))
     return SimpleNamespace(manager=manager, paths=paths, workspace=workspace,
                            text=f"Read hello.txt from {workspace}")
 
 
-class _Session:
-    def __init__(self):
-        self.shutdown_called = False
-
-    def shutdown(self):
-        self.shutdown_called = True
+def _installed_filesystem(ctx):
+    return get_installed("filesystem", None, ctx.paths["base_dir"], ctx.paths["managed_root"])
 
 
 def test_request_needing_a_capability_offers_a_plan_and_installs_on_approval(ctx, monkeypatch):
     shown = []
     monkeypatch.setattr("mcp_management.manager.install",
                         _recording_install(ctx, shown))
-    session = _Session()
 
-    new_session = assistant._provision_if_needed(
-        ctx.manager, session, ctx.text, confirmer=lambda plan: shown.append(plan) or True)
+    assistant._provision_if_needed(
+        ctx.manager, ctx.text, confirmer=lambda plan: shown.append(plan) or True)
 
     assert shown, "the plan must be shown before installing"
     plan = shown[0]
     # The plan names the directory taken from the user's own words.
     assert str(plan.requested_directories[0]) == os.path.realpath(ctx.workspace)
     assert plan.package_version == "2026.7.10"
-    # The old session was replaced so the new tools can register.
-    assert session.shutdown_called is True
-    assert getattr(new_session, "restarted", False) is True
+    # Installed, but nothing was eagerly started — activation is lazy (Task G.2).
+    assert _installed_filesystem(ctx) is not None
 
 
-def test_declining_installs_nothing_and_keeps_the_session(ctx):
-    session = _Session()
-    new_session = assistant._provision_if_needed(
-        ctx.manager, session, ctx.text, confirmer=lambda plan: False)
-    assert new_session is session          # unchanged
-    assert session.shutdown_called is False
-    from mcp_management.registry import load_registry
-    assert load_registry(None, ctx.paths["base_dir"], ctx.paths["managed_root"]) == {}
+def test_declining_installs_nothing(ctx):
+    assistant._provision_if_needed(ctx.manager, ctx.text, confirmer=lambda plan: False)
+    assert _installed_filesystem(ctx) is None
 
 
 def test_no_directory_named_means_no_offer(ctx):
-    session = _Session()
     called = []
-    new_session = assistant._provision_if_needed(
-        ctx.manager, session, "Read my notes please.",
+    assistant._provision_if_needed(
+        ctx.manager, "Read my notes please.",
         confirmer=lambda plan: called.append(plan) or True)
     assert called == [], "must never guess a directory to grant"
-    assert new_session is session
+    assert _installed_filesystem(ctx) is None
 
 
 def test_unrelated_request_is_untouched(ctx):
-    session = _Session()
     called = []
-    new_session = assistant._provision_if_needed(
-        ctx.manager, session, "What is the capital of France?",
+    assistant._provision_if_needed(
+        ctx.manager, "What is the capital of France?",
         confirmer=lambda plan: called.append(plan) or True)
     assert called == []
-    assert new_session is session
+    assert _installed_filesystem(ctx) is None
 
 
 def test_already_installed_capability_makes_no_offer(ctx, monkeypatch):
@@ -160,12 +150,10 @@ def test_already_installed_capability_makes_no_offer(ctx, monkeypatch):
         status=STATUS_INSTALLED, install_directory="x", configuration_path="x/server.json",
         installed_at="now"), None, ctx.paths["base_dir"], ctx.paths["managed_root"])
 
-    session = _Session()
     called = []
-    new_session = assistant._provision_if_needed(
-        ctx.manager, session, ctx.text, confirmer=lambda plan: called.append(plan) or True)
+    assistant._provision_if_needed(
+        ctx.manager, ctx.text, confirmer=lambda plan: called.append(plan) or True)
     assert called == [], "an installed capability must not be re-provisioned"
-    assert new_session is session
 
 
 def test_provisioning_failure_keeps_builtins_working(ctx, monkeypatch):
@@ -173,31 +161,25 @@ def test_provisioning_failure_keeps_builtins_working(ctx, monkeypatch):
         raise McpError("MCP_INSTALLATION_FAILED", "forced")
 
     monkeypatch.setattr("mcp_management.manager.install", failing_install)
-    session = _Session()
-    new_session = assistant._provision_if_needed(
-        ctx.manager, session, ctx.text, confirmer=lambda plan: True)
-    # Failure is contained: the old session survives and the turn continues.
-    assert new_session is session
-    assert session.shutdown_called is False
+    assistant._provision_if_needed(ctx.manager, ctx.text, confirmer=lambda plan: True)
+    # Failure is contained: nothing got installed, and no exception propagated.
+    assert _installed_filesystem(ctx) is None
 
 
 def test_nonexistent_directory_reports_the_reason_not_just_a_code(ctx, capsys):
     """A path that does not exist must explain itself, not print a bare error code."""
-    session = _Session()
     missing = os.path.join(str(ctx.paths["base_dir"]), "no-such-project", "user_files")
-    new_session = assistant._provision_if_needed(
-        ctx.manager, session, f"Read hello.txt from {missing}.",
+    assistant._provision_if_needed(
+        ctx.manager, f"Read hello.txt from {missing}.",
         confirmer=lambda plan: pytest.fail("must not ask for approval"))
 
     output = capsys.readouterr().out
     assert "does not exist" in output, output
     assert "MCP_DIRECTORY_NOT_APPROVED" in output
-    assert new_session is session
 
 
 def test_no_manager_is_a_no_op():
-    session = _Session()
-    assert assistant._provision_if_needed(None, session, "Read a/b/c.txt") is session
+    assistant._provision_if_needed(None, "Read a/b/c.txt")  # must not raise
 
 
 def _recording_install(ctx, shown):
