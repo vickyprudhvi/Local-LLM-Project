@@ -89,6 +89,94 @@
             "permission": "denied"
           }
         }
+      },
+      "granular_capabilities": [
+        "read_local_text_file",
+        "read_multiple_local_files",
+        "list_local_directory",
+        "search_local_files",
+        "get_local_file_metadata",
+        "write_local_file",
+        "create_local_directory",
+        "manage_local_files"
+      ],
+      "selection_hints": {
+        "explicit_names": [
+          "filesystem",
+          "filesystem mcp",
+          "local files"
+        ],
+        "actions": {
+          "read_local_text_file": [
+            "read",
+            "open",
+            "show contents",
+            "display contents",
+            "view",
+            "cat"
+          ],
+          "read_multiple_local_files": [
+            "read multiple files",
+            "read all files"
+          ],
+          "list_local_directory": [
+            "list",
+            "list directory",
+            "list folder",
+            "show files",
+            "folder contents",
+            "browse folder",
+            "browse"
+          ],
+          "search_local_files": [
+            "find",
+            "find file",
+            "search",
+            "search files",
+            "locate file"
+          ],
+          "get_local_file_metadata": [
+            "file info",
+            "file metadata",
+            "file size",
+            "file details"
+          ],
+          "write_local_file": [
+            "write file",
+            "save file",
+            "create file",
+            "write",
+            "save"
+          ],
+          "create_local_directory": [
+            "create directory",
+            "create folder",
+            "make directory",
+            "make folder"
+          ],
+          "manage_local_files": [
+            "copy",
+            "move",
+            "delete",
+            "rename"
+          ]
+        },
+        "extensions": {
+          "read_local_text_file": [
+            ".txt",
+            ".md",
+            ".json",
+            ".yaml",
+            ".yml",
+            ".py",
+            ".sql",
+            ".csv",
+            ".log",
+            ".ini",
+            ".toml",
+            ".xml"
+          ]
+        }
       }
     }
   }

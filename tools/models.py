@@ -50,6 +50,11 @@ TOOL_EXECUTION_ERROR = "TOOL_EXECUTION_ERROR"
 INVALID_TOOL_OUTPUT = "INVALID_TOOL_OUTPUT"
 MALFORMED_TOOL_CALL = "MALFORMED_TOOL_CALL"
 TOOL_STEP_LIMIT_REACHED = "TOOL_STEP_LIMIT_REACHED"
+# Phase G.1 hotfix — an MCP tool call whose name was never in the shortlist
+# actually offered to the model this round (tool_loop.py). Distinct from
+# UNKNOWN_TOOL (not registered at all): this can also reject a REGISTERED
+# tool the model was simply never offered.
+TOOL_NOT_IN_SHORTLIST = "TOOL_NOT_IN_SHORTLIST"
 
 # Phase C — permission / confirmation
 TOOL_PERMISSION_DENIED = "TOOL_PERMISSION_DENIED"
@@ -131,6 +136,13 @@ MCP_RUNTIME_REBIND_FAILED = "MCP_RUNTIME_REBIND_FAILED"
 MCP_FILESYSTEM_RUNTIME_ROOT_MISMATCH = "MCP_FILESYSTEM_RUNTIME_ROOT_MISMATCH"
 MCP_RUNTIME_ROLLBACK_FAILED = "MCP_RUNTIME_ROLLBACK_FAILED"
 MCP_RESUME_ABORTED = "MCP_RESUME_ABORTED"
+
+# Phase G.1 — deterministic MCP capability detection and server selection
+# (mcp_management/capabilities.py, capability_detector.py, server_selector.py).
+# MCP_CAPABILITY_UNAVAILABLE already exists above (Phase F).
+MCP_SERVER_SELECTION_AMBIGUOUS = "MCP_SERVER_SELECTION_AMBIGUOUS"
+MCP_MULTI_SERVER_WORKFLOW_REQUIRED = "MCP_MULTI_SERVER_WORKFLOW_REQUIRED"
+MCP_CAPABILITY_CATALOG_INVALID = "MCP_CAPABILITY_CATALOG_INVALID"
 
 # Phase 2A — permission / internet
 INTERNET_DISABLED = "INTERNET_DISABLED"

@@ -36,6 +36,20 @@ MAX_CATALOG_ENTRIES = 100
 MAX_CAPABILITIES = 25
 MAX_TOOLS_PER_POLICY = 100
 
+# ---- Phase G.1: optional capability-selection metadata ----
+# Deliberately a SEPARATE field from the existing `capabilities` list above (which
+# Phase F's coarse detect_capability()/find_by_capability() already depend on —
+# values like "filesystem", "read_files"). `granular_capabilities` uses the finer
+# per-action vocabulary the Phase G.1 selector matches against (e.g.
+# "read_local_text_file"), so adding it can never change what Phase F already
+# matches. An entry with no `granular_capabilities` is simply invisible to the
+# Phase G.1 selector — fully backward compatible.
+MAX_GRANULAR_CAPABILITIES = 50
+MAX_EXPLICIT_NAMES = 20
+MAX_HINT_PHRASES_PER_CAPABILITY = 20
+MAX_EXTENSIONS_PER_CAPABILITY = 30
+_EXTENSION_RE = re.compile(r"^\.[a-z0-9]{1,10}$")
+
 
 def _invalid(message: str) -> McpError:
     return McpError(MCP_CATALOG_INVALID, f"Invalid MCP catalog: {message}")
@@ -47,6 +61,27 @@ class McpRequiredInput:
     input_type: str
     required: bool
     user_approval_required: bool
+
+
+@dataclass(frozen=True)
+class McpSelectionHints:
+    """Deterministic phrase/extension hints for the Phase G.1 server selector only.
+
+    Never consulted by the installer, activator, or any runtime-lifecycle code —
+    scoring data, not trust or execution data. `actions` and `extensions` map a
+    granular capability id to the lowercase phrases/extensions that suggest it.
+    """
+
+    explicit_names: Tuple[str, ...] = ()
+    actions: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    extensions: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "explicit_names": list(self.explicit_names),
+            "actions": {k: list(v) for k, v in sorted(self.actions.items())},
+            "extensions": {k: list(v) for k, v in sorted(self.extensions.items())},
+        }
 
 
 @dataclass(frozen=True)
@@ -66,6 +101,10 @@ class McpCatalogEntry:
     required_inputs: Tuple[McpRequiredInput, ...]
     expected_tools: Tuple[str, ...]
     default_tool_policy: McpToolPolicy
+    # Phase G.1 — optional; absent (empty tuple / empty hints) means this entry is
+    # not yet selectable by the capability selector, but loads exactly as before.
+    granular_capabilities: Tuple[str, ...] = ()
+    selection_hints: McpSelectionHints = field(default_factory=McpSelectionHints)
 
     @property
     def package_source(self) -> str:
@@ -191,6 +230,89 @@ def _build_required_inputs(raw, catalog_id) -> Tuple[McpRequiredInput, ...]:
     return tuple(inputs)
 
 
+def _build_granular_capabilities(raw, catalog_id) -> Tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise _invalid(f"{catalog_id}: 'granular_capabilities' must be a list.")
+    if len(raw) > MAX_GRANULAR_CAPABILITIES:
+        raise _invalid(f"{catalog_id}: too many granular capabilities.")
+    seen = set()
+    out = []
+    for cap in raw:
+        if not isinstance(cap, str) or not CAPABILITY_RE.match(cap):
+            raise _invalid(f"{catalog_id}: granular capability {cap!r} must match ^[a-z0-9_]+$.")
+        if cap in seen:
+            raise _invalid(f"{catalog_id}: duplicate granular capability {cap!r}.")
+        seen.add(cap)
+        out.append(cap)
+    return tuple(out)
+
+
+def _build_selection_hints(raw, catalog_id, granular_capabilities) -> McpSelectionHints:
+    if raw is None:
+        return McpSelectionHints()
+    if not isinstance(raw, dict):
+        raise _invalid(f"{catalog_id}: 'selection_hints' must be an object.")
+    known = set(granular_capabilities)
+
+    explicit_raw = raw.get("explicit_names", [])
+    if not isinstance(explicit_raw, list):
+        raise _invalid(f"{catalog_id}: 'selection_hints.explicit_names' must be a list.")
+    if len(explicit_raw) > MAX_EXPLICIT_NAMES:
+        raise _invalid(f"{catalog_id}: too many selection_hints.explicit_names.")
+    explicit_names = []
+    for name in explicit_raw:
+        if not isinstance(name, str) or not name.strip():
+            raise _invalid(f"{catalog_id}: an explicit_names entry must be a non-empty string.")
+        normalized = name.strip().lower()
+        if len(normalized) > 80:
+            raise _invalid(f"{catalog_id}: an explicit_names entry is too long.")
+        explicit_names.append(normalized)
+
+    def _phrase_map(key, max_per_capability, validate_phrase):
+        section = raw.get(key, {})
+        if not isinstance(section, dict):
+            raise _invalid(f"{catalog_id}: 'selection_hints.{key}' must be an object.")
+        result = {}
+        for cap, phrases in section.items():
+            if cap not in known:
+                # A hint for a capability the entry never declared is a malformed,
+                # inconsistent catalog entry — fail closed rather than silently drop.
+                raise _invalid(f"{catalog_id}: selection_hints.{key} references undeclared "
+                               f"capability {cap!r}.")
+            if not isinstance(phrases, list) or not phrases:
+                raise _invalid(f"{catalog_id}: selection_hints.{key}[{cap!r}] must be a non-empty list.")
+            if len(phrases) > max_per_capability:
+                raise _invalid(f"{catalog_id}: too many selection_hints.{key}[{cap!r}] entries.")
+            normalized_phrases = []
+            for phrase in phrases:
+                validate_phrase(phrase)
+                normalized_phrases.append(phrase.strip().lower())
+            result[cap] = tuple(normalized_phrases)
+        return result
+
+    def _validate_action_phrase(phrase):
+        if not isinstance(phrase, str) or not phrase.strip() or len(phrase) > 80:
+            raise _invalid(f"{catalog_id}: an action-hint phrase must be a short, non-empty string.")
+
+    def _validate_extension(phrase):
+        if not isinstance(phrase, str) or not _EXTENSION_RE.match(phrase.strip().lower()):
+            raise _invalid(f"{catalog_id}: extension hint {phrase!r} must look like '.ext'.")
+
+    actions = _phrase_map("actions", MAX_HINT_PHRASES_PER_CAPABILITY, _validate_action_phrase)
+    extensions = _phrase_map("extensions", MAX_EXTENSIONS_PER_CAPABILITY, _validate_extension)
+
+    # Reject any unrecognized top-level key so a future field cannot be silently
+    # ignored — fail closed on malformed/unknown shape rather than load it partially.
+    known_keys = {"explicit_names", "actions", "extensions"}
+    unknown = set(raw) - known_keys
+    if unknown:
+        raise _invalid(f"{catalog_id}: selection_hints has unknown field(s): {sorted(unknown)}.")
+
+    return McpSelectionHints(explicit_names=tuple(explicit_names), actions=actions, extensions=extensions)
+
+
 def build_entry(catalog_id, raw) -> McpCatalogEntry:
     """Validate one catalog entry (fail closed)."""
     if not isinstance(catalog_id, str) or not CATALOG_ID_RE.match(catalog_id):
@@ -258,6 +380,9 @@ def build_entry(catalog_id, raw) -> McpCatalogEntry:
             raise _invalid(f"{catalog_id}: expected tool {name!r} is invalid.")
         expected.append(name)
 
+    granular_capabilities = _build_granular_capabilities(raw.get("granular_capabilities"), catalog_id)
+    selection_hints = _build_selection_hints(raw.get("selection_hints"), catalog_id, granular_capabilities)
+
     return McpCatalogEntry(
         catalog_id=catalog_id,
         server_id=server_id,
@@ -275,6 +400,8 @@ def build_entry(catalog_id, raw) -> McpCatalogEntry:
         required_inputs=_build_required_inputs(raw.get("required_inputs"), catalog_id),
         expected_tools=tuple(expected),
         default_tool_policy=_build_policy(raw.get("default_tool_policy"), catalog_id),
+        granular_capabilities=granular_capabilities,
+        selection_hints=selection_hints,
     )
 
 
