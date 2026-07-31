@@ -75,14 +75,25 @@ class RegistryInstalledState:
 
 
 class ActiveRuntimeStatusProvider:
-    """Read-only view over `mcp_layer.runtime_manager.ActiveMcpRuntime` (or any
-    object exposing a `.session` with `.health`). Never calls a lifecycle method."""
+    """Read-only view over a runtime holder — either
+    `mcp_layer.runtime_manager.MultiMcpRuntimeManager` (Phase G.2, preferred:
+    exposes `.get_session(server_id)`) or the older single-slot
+    `ActiveMcpRuntime` (exposes a single `.session`). Never calls a lifecycle
+    method on either."""
 
     def __init__(self, runtime=None):
         self._runtime = runtime
 
+    def _session_for(self, server_id):
+        if self._runtime is None:
+            return None
+        get_session = getattr(self._runtime, "get_session", None)
+        if callable(get_session):
+            return get_session(server_id)
+        return getattr(self._runtime, "session", None)
+
     def _health(self, server_id):
-        session = getattr(self._runtime, "session", None) if self._runtime is not None else None
+        session = self._session_for(server_id)
         health = getattr(session, "health", None)
         if health is not None and getattr(health, "server_id", None) == server_id:
             return health

@@ -28,21 +28,40 @@ from mcp_layer.integration import (
     discover_and_register,
     start_test_server,
 )
-from mcp_layer.runtime_manager import ActiveMcpRuntime, McpRuntimeManager
+from mcp_layer.runtime_manager import (
+    ActiveMcpRuntime,
+    ActiveMcpRuntimeSlot,
+    FilesystemRootValidator,
+    GenericRuntimeValidator,
+    McpRuntimeManager,
+    McpRuntimeStatus,
+    McpRuntimeValidator,
+    MultiMcpRuntimeManager,
+    RuntimeState,
+    RuntimeValidationContext,
+)
 from mcp_layer.tool import McpTool
 
 __all__ = [
     "ActiveMcpRuntime",
+    "ActiveMcpRuntimeSlot",
+    "FilesystemRootValidator",
+    "GenericRuntimeValidator",
     "McpClient",
     "McpError",
     "McpHealth",
     "McpHealthState",
     "McpRuntimeManager",
+    "McpRuntimeStatus",
+    "McpRuntimeValidator",
     "McpServerConfig",
     "McpSession",
     "McpTool",
     "McpToolPolicy",
     "McpToolPolicyEntry",
+    "MultiMcpRuntimeManager",
+    "RuntimeState",
+    "RuntimeValidationContext",
     "bootstrap_from_config",
     "bootstrap_test_server",
     "build_config",

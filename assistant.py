@@ -13,7 +13,6 @@ from typing import Optional
 
 from rich.console import Console
 
-import mcp_layer
 import memory_store
 import tool_dispatch
 import tool_loop
@@ -21,14 +20,14 @@ import tools.config as app_config
 from brain import ask_claude, load_system_prompt
 from ears import listen_push_to_talk
 from interaction_log import log_turn
-from mcp_layer import ActiveMcpRuntime, McpError, McpRuntimeManager
-from mcp_layer.config_resolver import resolve_config
+from mcp_layer import FilesystemRootValidator, McpError, MultiMcpRuntimeManager
 from mcp_management.access_classifier import classify_outside_root_failure
 from mcp_management.approval import confirm_provisioning
 from mcp_management.capabilities import CapabilitySelectionStatus
 from mcp_management.capability_detector import extract_directory_candidate
 from mcp_management.capability_service import select_for_request
 from mcp_management.registry import get_installed
+from mcp_management.runtime_activation import ensure_selected_server_active
 from router import route_and_answer
 from tools.models import (
     MCP_FILESYSTEM_RUNTIME_ROOT_MISMATCH,
@@ -86,36 +85,38 @@ def _start_filesystem_access(manager):
     console.print(f"[dim]Filesystem access management: {len(tools)} tool(s) available.[/dim]")
 
 
-def _provision_if_needed(manager, mcp_session, user_text, confirmer=None):
+def _provision_if_needed(manager, user_text, confirmer=None):
     """Generic capability step: offer to install an approved MCP server when the
-    request needs one that isn't present. Returns the (possibly new) McpSession.
+    request needs one that isn't present.
 
     This is the Phase F entry point into a live turn — a peer of
     _enrich_with_memory, not a tool-specific branch. Detection, the plan, and the
     approval prompt are all deterministic; nothing is installed without an explicit
-    yes. On success the server is started and its tools registered, so the ORIGINAL
-    request is then answered by the normal router / shortlist / executor path.
+    yes. Installation itself never starts the new server (Phase G.2: startup is
+    always lazy) — the ORIGINAL request is re-answered by the normal router /
+    Phase G.1 capability-selection / shortlist / executor path, and THAT lazily
+    activates the newly-installed server the moment it is actually selected.
     """
     if manager is None:
-        return mcp_session
+        return
     try:
         detection, request = manager.begin_request(user_text)
     except McpError as e:
         console.print(f"[yellow]MCP capability check failed ({e.code}).[/yellow]")
-        return mcp_session
+        return
 
     if request is None:
         # Nothing to do: no MCP needed, already installed, or no approved server.
         if detection.requires_mcp and detection.error_code:
             console.print(f"[dim]MCP: {detection.reason}[/dim]")
-        return mcp_session
+        return
 
     directory = extract_directory_candidate(user_text)
     if not directory:
         # Never guess a directory to grant — say so and answer normally instead.
         console.print("[dim]MCP: an approved server could help, but no directory was "
                       "named to grant access to.[/dim]")
-        return mcp_session
+        return
 
     try:
         plan = manager.prepare_plan(request.selected_catalog_id, [directory],
@@ -132,12 +133,6 @@ def _provision_if_needed(manager, mcp_session, user_text, confirmer=None):
         console.print(f"[yellow]MCP provisioning stopped: {e.message}[/yellow]")
         console.print(f"[dim]  directory: {directory}[/dim]")
         console.print(f"[dim]  code: {e.code}[/dim]")
-        return mcp_session
-
-    # Restart MCP so the newly installed server's tools register for this turn.
-    if mcp_session is not None:
-        mcp_session.shutdown()
-    return _start_mcp()
 
 
 def _find_outside_root_failure(manager, calls_and_results):
@@ -313,14 +308,15 @@ _RUNTIME_ERROR_MESSAGES = {
 }
 
 
-def _restart_mcp_and_resume(manager, runtime, directive, user_text, history, system_prompt,
+def _restart_mcp_and_resume(manager, runtime_manager, directive, user_text, history, system_prompt,
                             attempted_fs_requests, resume_budget, previous_allowed_roots=None):
     """Phase F.1 hotfix — the one deterministic path from an applied access change
     to the original request actually succeeding.
 
-    Replaces the active MCP session (mcp_layer.runtime_manager.McpRuntimeManager),
-    verifies the LIVE new server's allowed roots, and — only then — resumes
-    `user_text` through the normal router / Phase B shortlist / local LLM
+    Phase G.2: replaces ONLY `directive.server_id`'s session
+    (`MultiMcpRuntimeManager.replace_session` — every other server's slot is
+    untouched), verifies the LIVE new server's allowed roots, and — only then —
+    resumes `user_text` through the normal router / Phase B shortlist / local LLM
     selection / ToolExecutor / freshly-registered McpTool pipeline exactly once.
     Both the cross-turn "yes" approval and a mid-turn access.add call from the
     model itself route through this same function (Task 10), so the outcome never
@@ -335,15 +331,9 @@ def _restart_mcp_and_resume(manager, runtime, directive, user_text, history, sys
         return ("Filesystem access was already updated and the MCP runtime already restarted "
                 "once for this request; I won't restart it again automatically.", None)
 
-    coordinator = McpRuntimeManager(
-        tool_loop.REGISTRY,
-        base_dir=manager.base_dir if manager else None,
-        managed_root=manager.managed_root if manager else None,
-        registry_path=manager.registry_path if manager else None,
-    )
     try:
-        coordinator.replace_active_session(
-            runtime, directive.server_id, directive.expected_allowed_roots,
+        runtime_manager.replace_session(
+            directive.server_id, expected_allowed_roots=directive.expected_allowed_roots,
             previous_allowed_roots=previous_allowed_roots)
     except McpError as e:
         message = _RUNTIME_ERROR_MESSAGES.get(
@@ -361,18 +351,19 @@ def _restart_mcp_and_resume(manager, runtime, directive, user_text, history, sys
         reply, _extra = dispatch(resumed_decision, user_text, resumed_prompt, history, system_prompt)
         return reply, None
 
-    # Task 8: a resumed request re-enters the FULL pipeline — router already ran
-    # above; this re-runs Phase G.1 capability selection before Phase B, exactly
+    # Task 8 (G.1) / Task 8 (G.2): a resumed request re-enters the FULL pipeline —
+    # router already ran above; this re-runs Phase G.1 capability selection (and,
+    # for a SELECTED result, Phase G.2 lazy activation) before Phase B, exactly
     # like a fresh request. A resumed document-conversion request with no
     # approved provider must still report MCP_CAPABILITY_UNAVAILABLE here, not
     # fall through into Phase B or another Filesystem access cycle.
     reply, _extra, pending_fs_request_id = _process_local_request_with_capability_selection(
-        manager, runtime, user_text, resumed_prompt, history, system_prompt,
+        manager, runtime_manager, user_text, resumed_prompt, history, system_prompt,
         attempted_fs_requests, resume_budget=resume_budget - 1)
     return reply, pending_fs_request_id
 
 
-def _run_local_turn(manager, runtime, user_text, prompt, history, system_prompt,
+def _run_local_turn(manager, runtime_manager, user_text, prompt, history, system_prompt,
                     attempted_fs_requests, resume_budget=1):
     """Run one local-mode turn with immediate Phase F.1 hotfix interception.
 
@@ -382,9 +373,12 @@ def _run_local_turn(manager, runtime, user_text, prompt, history, system_prompt,
     chance to write a generic fallback answer or place another call through a
     soon-to-be-stale MCP session. Returns
     (reply, extra_metrics, pending_fs_request_id_or_None).
+
+    By the time this runs, Phase G.2 has already lazily activated whichever
+    server Phase G.1 selected (see _process_local_request_with_capability_
+    selection) — this function no longer starts anything itself.
     """
-    mcp_session = _provision_if_needed(manager, runtime.session, user_text)
-    runtime.replace(mcp_session)
+    _provision_if_needed(manager, user_text)
 
     halt = {}
 
@@ -427,7 +421,7 @@ def _run_local_turn(manager, runtime, user_text, prompt, history, system_prompt,
     # RESTART_MCP_AND_RESUME — the model itself called access.add/remove and it
     # succeeded; the loop already halted before any stale follow-up call.
     reply, pending_fs_request_id = _restart_mcp_and_resume(
-        manager, runtime, directive, user_text, history, system_prompt,
+        manager, runtime_manager, directive, user_text, history, system_prompt,
         attempted_fs_requests, resume_budget,
         previous_allowed_roots=halt.get("previous_allowed_roots"))
     return reply, extra_metrics, pending_fs_request_id
@@ -477,7 +471,21 @@ def _capability_selection_reply(selection):
     return None
 
 
-def _process_local_request_with_capability_selection(manager, runtime, user_text, prompt, history,
+def _log_runtime_activation(runtime_manager, server_id, activation):
+    """Debug-only diagnostics (Phase G.2 Task 14): silent unless
+    MCP_CAPABILITY_DEBUG is set. Reports state + tool count only — never a raw
+    path, environment value, or credential."""
+    if not app_config.mcp_capability_debug_enabled():
+        return
+    status = runtime_manager.get_status(server_id)
+    console.print(f"[dim]MCP {server_id}:[/dim]")
+    console.print(f"[dim]  state: {status.state.value}[/dim]")
+    console.print(f"[dim]  tools registered: {status.registered_tool_count}[/dim]")
+    if not activation.activated:
+        console.print(f"[dim]  error: {activation.error_code}[/dim]")
+
+
+def _process_local_request_with_capability_selection(manager, runtime_manager, user_text, prompt, history,
                                                       system_prompt, attempted_fs_requests,
                                                       resume_budget=1):
     """THE single authoritative entrypoint for every local request (Task 1).
@@ -488,69 +496,42 @@ def _process_local_request_with_capability_selection(manager, runtime, user_text
     `_run_local_turn` directly. It is the only place `_run_local_turn` is
     called from in production code.
 
-    A read-only capability/server-selection check runs BEFORE Phase B.
-    NONE_REQUIRED and SELECTED are strictly additive — behavior is EXACTLY the
-    pre-G.1 call to `_run_local_turn` (invariant 15). UNSUPPORTED/AMBIGUOUS/
-    MULTI_SERVER_REQUIRED return immediately: no Phase B shortlist, no local
-    LLM completion, no ToolExecutor call, no Filesystem access state, no MCP
-    runtime call. This function never starts a server, installs a package, or
-    bypasses ToolExecutor; it only reads the already-loaded trusted catalog and
-    existing read-only status providers.
+    A read-only capability/server-selection check runs BEFORE Phase B. For
+    SELECTED, Phase G.2 then lazily activates ONLY the selected server_id
+    (Task 4/5) — no other server is touched, and nothing starts merely because
+    it is installed. NONE_REQUIRED and SELECTED-and-activated are strictly
+    additive — behavior is EXACTLY the pre-G.1 call to `_run_local_turn`
+    (invariant 15). UNSUPPORTED/AMBIGUOUS/MULTI_SERVER_REQUIRED/a failed
+    activation (e.g. MCP_SERVER_NOT_INSTALLED) return immediately: no Phase B
+    shortlist, no local LLM completion, no ToolExecutor call.
     """
     if manager is None:
         # No trusted catalog available in this configuration at all.
-        return _run_local_turn(manager, runtime, user_text, prompt, history, system_prompt,
+        return _run_local_turn(manager, runtime_manager, user_text, prompt, history, system_prompt,
                                attempted_fs_requests, resume_budget=resume_budget)
 
     selection = select_for_request(
         user_text, manager.catalog, base_dir=manager.base_dir, managed_root=manager.managed_root,
-        registry_path=manager.registry_path, runtime=runtime)
+        registry_path=manager.registry_path, runtime=runtime_manager)
     _log_capability_selection(selection)
 
     reply = _capability_selection_reply(selection)
     if reply is not None:
         return reply, dict(_ZERO_METRICS), None
 
-    # NONE_REQUIRED or SELECTED: existing behavior, completely unchanged. Phase B
-    # remains responsible for the exact-tool shortlist; the selection above is
-    # not yet consumed by it (a later Phase G stage does that).
-    return _run_local_turn(manager, runtime, user_text, prompt, history, system_prompt,
+    if selection.status == CapabilitySelectionStatus.SELECTED:
+        activation = ensure_selected_server_active(
+            selection, runtime_manager, manager.catalog, base_dir=manager.base_dir,
+            managed_root=manager.managed_root, registry_path=manager.registry_path)
+        _log_runtime_activation(runtime_manager, selection.selected_server_id, activation)
+        if not activation.activated:
+            return activation.message, dict(_ZERO_METRICS), None
+
+    # NONE_REQUIRED, or SELECTED-and-now-active: existing behavior, completely
+    # unchanged. Phase B remains responsible for the exact-tool shortlist; the
+    # selection above is not yet consumed by it (a later Phase G stage does that).
+    return _run_local_turn(manager, runtime_manager, user_text, prompt, history, system_prompt,
                            attempted_fs_requests, resume_budget=resume_budget)
-
-
-def _start_mcp():
-    """Start the configured external MCP server and register its tools (Phase E).
-
-    Generic subsystem bootstrap — not a per-tool branch. Reads config/mcp_server.json
-    (MCP disabled by default). An optional server (`required: false`) that fails to
-    start is logged and skipped so built-in tools keep working. Returns an McpSession.
-    """
-    try:
-        # Which configuration is in effect: env override -> managed (Phase F) -> template.
-        # Only the source + basename are logged, never the path with its contents.
-        resolved = resolve_config()
-        console.print(f"[dim]MCP config: {resolved.describe()}[/dim]")
-        session = mcp_layer.bootstrap_from_config(tool_loop.REGISTRY)
-    except McpError as e:
-        # Only a `required` server (or a bad MCP_CONFIG_PATH) reaches here.
-        console.print(f"[yellow]MCP startup problem ({e.code}); continuing without MCP tools.[/yellow]")
-        return None
-
-    health = session.health
-    if health is not None and health.state.value == "healthy":
-        console.print(f"[dim]MCP '{health.server_id}': discovered={health.discovered_tool_count} "
-                      f"registered={health.registered_tool_count} denied={health.denied_tool_count} "
-                      f"skipped={health.skipped_tool_count} disabled={health.disabled_tool_count} — "
-                      f"{', '.join(session.tool_names())}[/dim]")
-        # Sanitized diagnostics: tool names + skip reasons only (never secrets/args).
-        for name, reason, category in health.diagnostics:
-            console.print(f"[dim]  MCP tool '{name}' {category}: {reason}[/dim]")
-    elif health is not None and health.state.value == "failed":
-        console.print(f"[yellow]MCP server unavailable ({health.last_error_code}); "
-                      f"continuing without MCP tools.[/yellow]")
-    else:
-        console.print("[dim]MCP: disabled.[/dim]")
-    return session
 
 
 def _enrich_with_memory(user_text):
@@ -608,13 +589,18 @@ def main():
     attempted_fs_requests = set()
 
     console.print("[bold]home-ai (LLM router v2 — consolidated)[/bold]")
-    # The one authoritative mutable reference to "the current MCP session" (Phase
-    # F.1 hotfix Task 8) — every consumer reads runtime.session at the moment it
-    # needs it, so a runtime replacement can never leave a component holding a
-    # stale local variable that points at an already-closed session.
-    runtime = ActiveMcpRuntime(_start_mcp())
     provisioning_manager = _start_provisioning()
     _start_filesystem_access(provisioning_manager)
+    # Phase G.2: a server-keyed runtime manager, built with metadata only — no
+    # MCP child process is launched here (Task 4). Every server starts lazily,
+    # the first time Phase G.1 actually selects it as the preferred provider.
+    runtime_manager = MultiMcpRuntimeManager(
+        tool_loop.REGISTRY,
+        base_dir=provisioning_manager.base_dir if provisioning_manager else None,
+        managed_root=provisioning_manager.managed_root if provisioning_manager else None,
+        registry_path=provisioning_manager.registry_path if provisioning_manager else None,
+        validators={"filesystem": FilesystemRootValidator()},
+    )
 
     try:
         while True:
@@ -656,7 +642,7 @@ def main():
                         expected_allowed_roots=outcome.expected_allowed_roots)
                     turn_start = time.perf_counter()
                     reply, pending_fs_request_id = _restart_mcp_and_resume(
-                        provisioning_manager, runtime, directive, outcome.resumed_text, history,
+                        provisioning_manager, runtime_manager, directive, outcome.resumed_text, history,
                         system_prompt, attempted_fs_requests, resume_budget=1,
                         previous_allowed_roots=outcome.previous_allowed_roots)
                     console.print(f"[cyan]{reply}[/cyan]")
@@ -683,7 +669,7 @@ def main():
                 # outside-root interception, access.add/remove restart — see
                 # _run_local_turn's docstring for why "immediate" matters).
                 reply, extra_metrics, pending_fs_request_id = _process_local_request_with_capability_selection(
-                    provisioning_manager, runtime, user_text, prompt, history, system_prompt,
+                    provisioning_manager, runtime_manager, user_text, prompt, history, system_prompt,
                     attempted_fs_requests)
             else:
                 reply, extra_metrics = dispatch(decision, user_text, prompt, history, system_prompt)
@@ -706,9 +692,9 @@ def main():
             history.append({"role": "user", "content": user_text})
             history.append({"role": "assistant", "content": reply})
     finally:
-        # Closes whichever session is CURRENTLY active — never a stale reference to
-        # an already-shutdown session from before a runtime replacement.
-        runtime.close()
+        # Stops every server that is currently active — one server's shutdown
+        # failure never prevents attempting the rest (Task 12).
+        runtime_manager.stop_all()
 
 
 if __name__ == "__main__":
