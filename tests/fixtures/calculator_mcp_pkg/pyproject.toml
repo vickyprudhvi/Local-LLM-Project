@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "calculator-test-mcp"
+version = "1.0.0"
+description = "Test-only fixture MCP server exposing add/echo tools (Phase G.3 Task 19). Never a production catalog entry."
+requires-python = ">=3.9"
+
+[tool.setuptools.packages.find]
+where = ["src"]

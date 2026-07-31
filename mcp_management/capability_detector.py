@@ -300,6 +300,15 @@ _G1_KNOWN_PATH_EXTENSIONS = _G1_DOCUMENT_EXTENSIONS | _G1_TEXT_EXTENSIONS
 
 DOCUMENT_TO_MARKDOWN_CAPABILITY = "document_to_markdown"
 
+# Phase G.3 — capability ids already owned by the dedicated filesystem/document
+# classifiers above; the generic catalog-driven path below never re-classifies
+# them, so Filesystem/document-conversion behavior is completely unchanged.
+_FILESYSTEM_CAPABILITY_IDS = frozenset({
+    "read_local_text_file", "read_multiple_local_files", "list_local_directory",
+    "search_local_files", "get_local_file_metadata", "write_local_file",
+    "create_local_directory", "manage_local_files",
+})
+
 _EXPLICIT_SERVER_RE = re.compile(
     r"\b(?:use|using)\s+(?:the\s+)?(?P<name>[A-Za-z][A-Za-z0-9 _-]{0,40}?)\s+mcp(?:\s+server)?\b",
     re.IGNORECASE)
@@ -431,7 +440,38 @@ class McpCapabilityDetector:
                 doc_capability, text, catalog, has_local_path, path_type, path_extension,
                 explicit_server, action_value=doc_action))
 
+        # Phase G.3 — any OTHER granular capability a catalog entry declares
+        # (e.g. a test-only "arithmetic_calculation" fixture) is recognized
+        # purely from that entry's own selection_hints.actions phrases, with NO
+        # code change needed here for a new such entry (Task 1's own stated
+        # goal for this module, now actually realized beyond filesystem/
+        # document). Never re-classifies a capability the dedicated paths
+        # above already own.
+        already_ids = {r.capability_id for r in requirements}
+        generic_capability = self._generic_catalog_capability(text, catalog, already_ids)
+        if generic_capability is not None:
+            matched_phrase = self._matched_action_phrase(catalog, generic_capability, text)
+            requirements.append(self._build_requirement(
+                generic_capability, text, catalog, has_local_path, path_type, path_extension,
+                explicit_server, action_value=matched_phrase))
+
         return tuple(requirements)
+
+    def _generic_catalog_capability(self, text, catalog, already_ids):
+        if catalog is None:
+            return None
+        considered = set()
+        for entry in catalog.entries.values():
+            for capability_id in entry.granular_capabilities:
+                if (capability_id in already_ids or capability_id in considered
+                        or capability_id in _FILESYSTEM_CAPABILITY_IDS
+                        or capability_id == DOCUMENT_TO_MARKDOWN_CAPABILITY):
+                    continue
+                considered.add(capability_id)
+                phrases = entry.selection_hints.actions.get(capability_id)
+                if phrases and _matches_any(text, phrases):
+                    return capability_id
+        return None
 
     # ---- capability classification ----
 

@@ -65,6 +65,46 @@ def generate_config_dict(plan: McpProvisioningPlan, runtime_executable, entrypoi
     }
 
 
+def generate_config_dict_from_launch_spec(server_id, display_name, transport, launch_spec,
+                                          working_directory, environment_allowlist, tool_policy,
+                                          catalog_id, package_version, installer_type,
+                                          enabled=True, required=False):
+    """Phase G.3 (Task 11) — generalize configuration generation for ANY installer
+    type. Unlike `generate_config_dict` (npm-only: derives `args` from an
+    entrypoint file plus approved directories), this takes the installer's own
+    `McpLaunchSpec` (already-resolved absolute command + argv) directly, so a
+    python_venv candidate's `<venv>/python -m <module>` launch is expressed
+    exactly as naturally as npm's `node <entrypoint.js>` — no server-specific
+    branch here. Still always Phase-E-validated before being written or activated,
+    and never contains secret values — only environment-variable names.
+    """
+    if not launch_spec.command or not os.path.isabs(str(launch_spec.command)):
+        raise McpError(MCP_CONFIGURATION_GENERATION_FAILED,
+                       "The launch command must be an absolute path.")
+
+    policy = policy_fingerprint(tool_policy)
+    return {
+        "enabled": bool(enabled),
+        "required": bool(required),
+        "server_id": server_id,
+        "display_name": display_name,
+        "transport": transport,
+        "command": _portable(launch_spec.command),
+        "args": [_portable(a) for a in launch_spec.args],
+        "working_directory": _portable(working_directory),
+        "startup_timeout_seconds": DEFAULT_STARTUP_TIMEOUT,
+        "call_timeout_seconds": DEFAULT_CALL_TIMEOUT,
+        "shutdown_timeout_seconds": DEFAULT_SHUTDOWN_TIMEOUT,
+        # Names only; values are read from the parent process at launch time.
+        "environment_allowlist": list(environment_allowlist),
+        "tool_policy": policy,
+        "generated_by": "mcp_management.configuration_generator",
+        "catalog_id": catalog_id,
+        "package_version": package_version,
+        "installer_type": installer_type,
+    }
+
+
 def validate_generated(raw):
     """Validate with the Phase E loader. Returns the McpServerConfig."""
     try:
