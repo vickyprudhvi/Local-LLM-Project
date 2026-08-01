@@ -1,0 +1,3 @@
+MarkItDown G.4 text fixture
+Known content marker: G4-VERIFY-TXT-2026
+This is a small plain-text fixture used to validate the MarkItDown MCP provider.

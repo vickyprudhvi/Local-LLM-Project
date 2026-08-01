@@ -178,6 +178,84 @@
           ]
         }
       }
+    },
+    "official-markitdown": {
+      "server_id": "markitdown",
+      "display_name": "Microsoft MarkItDown MCP",
+      "description": "Convert approved local documents to markdown. Curated local-format dependencies only; cloud, YouTube, and audio extras are intentionally omitted.",
+      "capabilities": [
+        "document_to_markdown"
+      ],
+      "risk_category": "local_document_conversion",
+      "transport": "stdio",
+      "required_runtimes": [
+        "python"
+      ],
+      "installer": {
+        "type": "python_venv",
+        "package": "markitdown-mcp",
+        "version": "0.0.1a4",
+        "lock_file": "config/mcp_locks/markitdown-mcp-0.0.1a4.txt",
+        "python_constraint": ">=3.10",
+        "install_options": {
+          "no_deps": true
+        }
+      },
+      "launch": {
+        "entrypoint_type": "python_module",
+        "module": "markitdown_mcp"
+      },
+      "lock_environment": {
+        "python_version": "3.13",
+        "platform": "win_amd64"
+      },
+      "expected_tools": [
+        "convert_to_markdown"
+      ],
+      "default_tool_policy": {
+        "default_permission": "denied",
+        "tools": {
+          "convert_to_markdown": {
+            "enabled": true,
+            "permission": "read"
+          }
+        }
+      },
+      "granular_capabilities": [
+        "document_to_markdown"
+      ],
+      "selection_hints": {
+        "explicit_names": [
+          "markitdown",
+          "document to markdown",
+          "convert document"
+        ],
+        "actions": {
+          "document_to_markdown": [
+            "convert",
+            "to markdown",
+            "read document",
+            "document to text"
+          ]
+        },
+        "extensions": {
+          "document_to_markdown": [
+            ".txt",
+            ".html",
+            ".htm",
+            ".pdf",
+            ".docx",
+            ".pptx",
+            ".xls",
+            ".xlsx"
+          ]
+        }
+      },
+      "candidate_validator": "markitdown_local_document_v1",
+      "invocation_policy": {
+        "argument_mode": "exact_file_uri"
+      },
+      "enabled": true
     }
   }
 }

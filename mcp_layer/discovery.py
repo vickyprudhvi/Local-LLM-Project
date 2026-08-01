@@ -154,5 +154,6 @@ def build_tools(registrations, config, client, session_owner=None):
             server_label=config.server_id,
             call_timeout=config.call_timeout_seconds,
             session_owner=session_owner,
+            invocation_policy=config.invocation_policy,
         ))
     return tools

@@ -16,15 +16,22 @@ import pytest
 import assistant
 import tool_loop
 from mcp_layer.runtime_manager import MultiMcpRuntimeManager
-from mcp_management.capabilities import CapabilitySelectionStatus
+from mcp_management.capabilities import CapabilitySelectionStatus, ToolRequirement
 from mcp_management.manager import McpProvisioningManager
 from mcp_management.registry import STATUS_INSTALLED, InstalledServer, upsert
 from router import RouteDecision
 from tests.mcp_provisioning_helpers import make_manager
 from tests.test_tool_loop import FakeLLM, _final, _tool_call
-from tool_loop import ToolLoopControl, ToolLoopDirective
+from tool_loop import ToolLoopControl, ToolLoopDirective, ToolLoopResultType
+from tools.base import BaseTool
 from tools.executor import ToolExecutor
-from tools.models import TOOL_NOT_IN_SHORTLIST
+from tools.models import (
+    MCP_SELECTED_PROVIDER_TOOL_UNAVAILABLE,
+    SELECTED_PROVIDER_TOOL_NOT_SHORTLISTED,
+    TOOL_NOT_IN_SHORTLIST,
+    TOOL_REQUIRED_NOT_SELECTED,
+    ToolPermission,
+)
 from tools.registry import ToolRegistry, default_registry
 
 REPORTED_TEXT = r"summarize C:\Users\Prudhvi\OneDrive\learn stuff\Hands_on_LLM.pdf"
@@ -35,7 +42,21 @@ REPORTED_TEXT_QUOTED = r'summarize "C:\Users\Prudhvi\OneDrive\learn stuff\Hands_
 
 @pytest.fixture
 def real_manager():
-    return McpProvisioningManager()
+    import json
+    import os
+
+    from mcp_management.catalog import build_catalog, load_catalog
+
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "config", "mcp_catalog.json")
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    # Phase G.4 regression isolation: these G.1 hotfix tests verify behavior
+    # when no document provider is installed.  Keep the MarkItDown entry disabled
+    # in this fixture so enabling the production entry does not change the test
+    # semantics.
+    data["servers"]["official-markitdown"]["enabled"] = False
+    return McpProvisioningManager(catalog=build_catalog(data))
 
 
 @pytest.mark.parametrize("text", [REPORTED_TEXT, REPORTED_TEXT_QUOTED])
@@ -225,10 +246,12 @@ def test_resumed_request_reinvokes_capability_selection(real_manager, monkeypatc
 
 # ---- Task 7: hallucinated MCP tool rejected before ToolExecutor ----
 
-def test_unregistered_non_namespaced_hallucination_is_already_safe(monkeypatch):
-    """The exact observed hallucination, "filesystem.read_file", carries no
-    "mcp." prefix at all — it is rejected by ToolExecutor's own pre-existing
-    UNKNOWN_TOOL check (never registered under any name), with no execution."""
+def test_unregistered_non_namespaced_hallucination_is_rejected_before_executor(monkeypatch):
+    """Phase G.4 Defect 5 — the exact observed hallucination,
+    "filesystem.read_file", carries no "mcp." prefix at all. It must be
+    rejected BEFORE ToolExecutor ever runs (TOOL_NOT_IN_SHORTLIST), never
+    reach the executor's UNKNOWN_TOOL path — "do not let invalid selection
+    degrade into UNKNOWN_TOOL"."""
     reg = default_registry()
     monkeypatch.setattr(tool_loop, "REGISTRY", reg)
     monkeypatch.setattr(tool_loop, "EXECUTOR", ToolExecutor(reg))
@@ -244,7 +267,8 @@ def test_unregistered_non_namespaced_hallucination_is_already_safe(monkeypatch):
     text, metrics = tool_loop.run_local_tool_loop("read something", [], "sys")
     assert text == "done"
     tool_messages = [m for m in fake.calls[1]["messages"] if m.get("role") == "tool"]
-    assert "UNKNOWN_TOOL" in tool_messages[0]["content"]
+    assert "TOOL_NOT_IN_SHORTLIST" in tool_messages[0]["content"]
+    assert "UNKNOWN_TOOL" not in tool_messages[0]["content"]
 
 
 def test_registered_but_not_offered_mcp_tool_is_rejected(monkeypatch):
@@ -354,3 +378,175 @@ def test_valid_local_read_still_selects_filesystem_and_reaches_phase_b(tmp_path,
     session = runtime.get_session("filesystem")
     assert session is not None
     session.shutdown()
+
+
+# ---- Phase G.4 fail-close: REQUIRED tool-selection semantics ----
+
+class _StubMcpTool(BaseTool):
+    name = "mcp.stub-server.read_text_file"
+    description = "read a file"
+    input_schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+    permission = ToolPermission.READ
+    llm_callable = True
+
+    def execute(self, arguments):
+        return {"content": "hello"}
+
+
+def _stub_registry(monkeypatch):
+    """Registry with a single MCP stub provider tool; caller may override shortlist."""
+    reg = default_registry()
+    reg.register(_StubMcpTool())
+    monkeypatch.setattr(tool_loop, "REGISTRY", reg)
+    monkeypatch.setattr(tool_loop, "EXECUTOR", ToolExecutor(reg))
+    monkeypatch.setattr(tool_loop, "TOOL_CALLING_ENABLED", True)
+    monkeypatch.setattr(tool_loop, "MAX_TOOL_STEPS", 5)
+    return reg
+
+
+def test_required_no_provider_tools_fails_closed(monkeypatch):
+    """A: REQUIRED + preferred provider with zero enabled tools -> controlled error."""
+    reg = default_registry()
+    monkeypatch.setattr(tool_loop, "REGISTRY", reg)
+    monkeypatch.setattr(tool_loop, "EXECUTOR", ToolExecutor(reg))
+    monkeypatch.setattr(tool_loop, "TOOL_CALLING_ENABLED", True)
+
+    result = tool_loop.run_local_tool_loop(
+        "read x", [], "sys",
+        tool_requirement=ToolRequirement.REQUIRED,
+        preferred_mcp_server_id="missing-server")
+
+    assert result.result_type == ToolLoopResultType.NO_TOOL_INVALID_REQUIRED
+    assert MCP_SELECTED_PROVIDER_TOOL_UNAVAILABLE in result.text
+    assert result.metrics == {"prompt_tokens": 0, "completion_tokens": 0}
+
+
+def test_required_provider_tools_not_shortlisted_gets_injected(monkeypatch):
+    """B: REQUIRED + provider exists but its tools missed Phase B -> one is injected."""
+    _stub_registry(monkeypatch)
+    reg = tool_loop.REGISTRY
+    # Deterministically exclude the stub tool from the lexical shortlist.
+    monkeypatch.setattr(reg, "shortlist_tools", lambda *a, **kw: [
+        d for d in reg.enabled_definitions()
+        if not d.name.startswith("mcp.stub-server.")
+    ][:5])
+
+    fake = FakeLLM([
+        _tool_call("mcp.stub-server.read_text_file", {"path": "x"}),
+        _final("File says hello."),
+    ])
+    monkeypatch.setattr(tool_loop, "ask_local_raw", fake)
+
+    result = tool_loop.run_local_tool_loop(
+        "read x", [], "sys",
+        tool_requirement=ToolRequirement.REQUIRED,
+        preferred_mcp_server_id="stub-server")
+
+    assert result.result_type == ToolLoopResultType.TOOL_SELECTED
+    assert result.text == "File says hello."
+    # The injected provider tool is present in the first LLM call's tools.
+    first_tools = fake.calls[0]["tools"] or []
+    offered_names = [t.get("function", {}).get("name") for t in first_tools]
+    assert "mcp.stub-server.read_text_file" in offered_names
+
+
+def test_required_model_refusal_triggers_one_retry_then_error(monkeypatch):
+    """C: REQUIRED + model refuses to select a tool -> one nudge, then controlled error."""
+    _stub_registry(monkeypatch)
+    fake = FakeLLM([
+        _final("I can answer directly."),
+        _final("Still no tool."),
+    ])
+    monkeypatch.setattr(tool_loop, "ask_local_raw", fake)
+
+    result = tool_loop.run_local_tool_loop(
+        "read x", [], "sys",
+        tool_requirement=ToolRequirement.REQUIRED,
+        preferred_mcp_server_id="stub-server")
+
+    assert result.result_type == ToolLoopResultType.NO_TOOL_INVALID_REQUIRED
+    assert TOOL_REQUIRED_NOT_SELECTED in result.text
+    assert result.retry_count == 1
+    assert len(fake.calls) == 2
+    # The nudge is appended as a user message on the retry call.
+    assert any(
+        "requires tool-backed data" in m.get("content", "")
+        for m in fake.calls[1]["messages"]
+        if m.get("role") == "user"
+    )
+    # The model's initial direct answer is discarded, never surfaced to the user.
+    assert "I can answer directly" not in result.text
+    assert "Still no tool" not in result.text
+
+
+def test_required_model_selects_tool_on_retry_succeeds(monkeypatch):
+    """D: REQUIRED + model refuses once, then selects the tool on retry -> success."""
+    _stub_registry(monkeypatch)
+    fake = FakeLLM([
+        _final("I can answer directly."),
+        _tool_call("mcp.stub-server.read_text_file", {"path": "x"}),
+        _final("File says hello."),
+    ])
+    monkeypatch.setattr(tool_loop, "ask_local_raw", fake)
+
+    result = tool_loop.run_local_tool_loop(
+        "read x", [], "sys",
+        tool_requirement=ToolRequirement.REQUIRED,
+        preferred_mcp_server_id="stub-server")
+
+    assert result.result_type == ToolLoopResultType.TOOL_SELECTED
+    assert result.text == "File says hello."
+    assert result.retry_count == 1
+    assert result.selected_tool_name == "mcp.stub-server.read_text_file"
+
+
+def test_required_immediate_tool_selection_succeeds(monkeypatch):
+    """E: REQUIRED + model selects the tool immediately -> no retry, success."""
+    _stub_registry(monkeypatch)
+    fake = FakeLLM([
+        _tool_call("mcp.stub-server.read_text_file", {"path": "x"}),
+        _final("File says hello."),
+    ])
+    monkeypatch.setattr(tool_loop, "ask_local_raw", fake)
+
+    result = tool_loop.run_local_tool_loop(
+        "read x", [], "sys",
+        tool_requirement=ToolRequirement.REQUIRED,
+        preferred_mcp_server_id="stub-server")
+
+    assert result.result_type == ToolLoopResultType.TOOL_SELECTED
+    assert result.text == "File says hello."
+    assert result.retry_count == 0
+    assert result.selected_tool_name == "mcp.stub-server.read_text_file"
+
+
+def test_none_request_direct_answer_is_valid(monkeypatch):
+    """F: NONE/OPTIONAL request + model answers directly -> valid final answer."""
+    _stub_registry(monkeypatch)
+    fake = FakeLLM([_final("Plain answer.")])
+    monkeypatch.setattr(tool_loop, "ask_local_raw", fake)
+
+    result = tool_loop.run_local_tool_loop("hello", [], "sys")
+
+    assert result.result_type == ToolLoopResultType.NO_TOOL_VALID
+    assert result.text == "Plain answer."
+    assert result.retry_count == 0
+
+
+def test_required_direct_answer_after_tool_success_is_allowed(monkeypatch):
+    """G: REQUIRED + tool already succeeded -> direct final answer is allowed."""
+    _stub_registry(monkeypatch)
+    fake = FakeLLM([
+        _tool_call("mcp.stub-server.read_text_file", {"path": "x"}),
+        _final("Done."),
+    ])
+    monkeypatch.setattr(tool_loop, "ask_local_raw", fake)
+
+    result = tool_loop.run_local_tool_loop(
+        "read x", [], "sys",
+        tool_requirement=ToolRequirement.REQUIRED,
+        preferred_mcp_server_id="stub-server")
+
+    assert result.result_type == ToolLoopResultType.TOOL_SELECTED
+    assert result.text == "Done."
+    assert result.retry_count == 0

@@ -48,6 +48,7 @@ class McpServerConfig:
     shutdown_timeout_seconds: float
     environment_allowlist: Tuple[str, ...]
     tool_policy: McpToolPolicy
+    invocation_policy: Dict[str, str] = field(default_factory=dict)
     # Internal-development-only: launch the repository's bundled test server by its
     # absolute script path (resolved deterministically from the repo), so it needs
     # no PYTHONPATH injection. Defaults to false; ordinary external servers never
@@ -151,6 +152,17 @@ def build_config(raw: dict) -> McpServerConfig:
     if not isinstance(display_name, str) or not display_name:
         display_name = server_id
 
+    invocation_policy_raw = raw.get("invocation_policy", {})
+    if not isinstance(invocation_policy_raw, dict):
+        raise _invalid("'invocation_policy' must be an object.")
+    invocation_policy = {}
+    for k, v in invocation_policy_raw.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            raise _invalid("'invocation_policy' entries must be strings.")
+        if any(c in k for c in ("\x00", "\n", "\r")) or any(c in v for c in ("\x00", "\n", "\r")):
+            raise _invalid("'invocation_policy' entry contains illegal characters.")
+        invocation_policy[k] = v
+
     return McpServerConfig(
         enabled=enabled,
         required=required,
@@ -165,6 +177,7 @@ def build_config(raw: dict) -> McpServerConfig:
         shutdown_timeout_seconds=shutdown,
         environment_allowlist=tuple(allowlist),
         tool_policy=_tool_policy(raw.get("tool_policy")),
+        invocation_policy=invocation_policy,
         internal_test_server=bool(raw.get("internal_test_server", False)),
     )
 

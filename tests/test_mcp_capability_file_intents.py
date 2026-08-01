@@ -15,7 +15,19 @@ from mcp_management.server_selector import (
 
 @pytest.fixture(scope="module")
 def catalog():
-    return load_catalog()
+    import json
+    import os
+
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "config", "mcp_catalog.json")
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    # Phase G.4 regression isolation: these G.1 tests verify the "no document
+    # provider" path.  Keep the production MarkItDown entry disabled for this
+    # fixture so the production catalog change does not alter the test semantics.
+    data["servers"]["official-markitdown"]["enabled"] = False
+    from mcp_management.catalog import build_catalog
+    return build_catalog(data)
 
 
 @pytest.fixture

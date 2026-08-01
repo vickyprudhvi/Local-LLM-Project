@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
@@ -42,6 +43,13 @@ def _venv_python(venv_dir):
     if sys.platform == "win32":
         return os.path.join(venv_dir, "Scripts", "python.exe")
     return os.path.join(venv_dir, "bin", "python")
+
+
+def _venv_console_script(venv_dir, script_name):
+    """Path to a console-script shim inside the isolated venv."""
+    if sys.platform == "win32":
+        return os.path.join(venv_dir, "Scripts", f"{script_name}.exe")
+    return os.path.join(venv_dir, "bin", script_name)
 
 
 def resolve_trusted_interpreter():
@@ -131,6 +139,8 @@ class PythonVenvInstaller:
             raise McpError(MCP_LOCK_FILE_INVALID,
                            "The lock file changed since this plan was approved.")
 
+        self._enforce_lock_environment(catalog_entry)
+
         venv_python = candidate.extra["venv_python"]
         env = build_child_environment((), extra={"PYTHONNOUSERSITE": "1"})
         argv = [
@@ -139,6 +149,8 @@ class PythonVenvInstaller:
             "--no-cache-dir",
             "-r", lock_path,
         ]
+        if catalog_entry.install_options.get("no_deps"):
+            argv.append("--no-deps")
         # A relative wheel path inside the lock file (portable across clones —
         # never a hardcoded absolute path) resolves against THIS cwd, per pip's
         # documented behavior for bare local-path requirements.
@@ -148,6 +160,37 @@ class PythonVenvInstaller:
         return CandidateInstallation(
             transaction=candidate.transaction, install_directory=candidate.install_directory,
             lock_hash=computed_hash, extra=dict(candidate.extra))
+
+    def _enforce_lock_environment(self, catalog_entry) -> None:
+        """Verify the current interpreter/platform matches the reviewed lock environment.
+
+        The lock file is platform-specific; installation on an unreviewed platform
+        is refused to prevent silent hash/environment skew.
+        """
+        lock_env = catalog_entry.lock_environment
+        if not lock_env:
+            return
+        expected_python = lock_env.get("python_version")
+        expected_platform = lock_env.get("platform")
+        if expected_python:
+            current_python = f"{sys.version_info.major}.{sys.version_info.minor}"
+            # Allow exact major.minor match; micro/patch is intentionally not bound.
+            if current_python != expected_python:
+                raise McpError(
+                    MCP_PYTHON_VERSION_UNSUPPORTED,
+                    f"Lock environment requires Python {expected_python}; running {current_python}.",
+                )
+        if expected_platform:
+            current_platform = sysconfig.get_platform()
+            # Normalize the two common spellings of the Windows platform tag:
+            # sysconfig may report 'win-amd64' while pip/PEP 425 uses 'win_amd64'.
+            normalized_current = current_platform.replace("-", "_")
+            normalized_expected = expected_platform.replace("-", "_")
+            if normalized_expected not in normalized_current and normalized_current not in normalized_expected:
+                raise McpError(
+                    MCP_PYTHON_VERSION_UNSUPPORTED,
+                    f"Lock environment requires platform {expected_platform}; running {current_platform}.",
+                )
 
     def validate_artifacts(self, candidate: CandidateInstallation, plan, catalog_entry) -> None:
         venv_python = candidate.extra.get("venv_python") or _venv_python(
@@ -187,8 +230,15 @@ class PythonVenvInstaller:
                            "The installed package reported an unparseable version.") from e
 
     def build_launch_spec(self, candidate: CandidateInstallation, catalog_entry) -> McpLaunchSpec:
-        venv_python = candidate.extra.get("venv_python") or _venv_python(
-            os.path.join(candidate.install_directory, _VENV_DIRNAME))
+        venv_dir = candidate.extra.get("venv_dir") or os.path.join(candidate.install_directory, _VENV_DIRNAME)
+        venv_python = candidate.extra.get("venv_python") or _venv_python(venv_dir)
+        if catalog_entry.launch_entrypoint_type == "console_script":
+            command = _venv_console_script(venv_dir, catalog_entry.console_script)
+            if not os.path.isfile(command):
+                raise McpError(MCP_EXECUTABLE_VALIDATION_FAILED,
+                               f"Console-script entrypoint {catalog_entry.console_script!r} is missing.")
+            args = tuple(catalog_entry.launch_arguments)
+            return McpLaunchSpec(command=command, args=args)
         args = ("-m", catalog_entry.launch_module, *catalog_entry.launch_arguments)
         return McpLaunchSpec(command=venv_python, args=args)
 

@@ -86,3 +86,15 @@ def test_filesystem_access_approval_type_not_accepted():
     with pytest.raises(McpError) as exc:
         require_auto_provisioning_approval(plan, approval)
     assert exc.value.code == MCP_PROVISIONING_CONFIRMATION_MISMATCH
+
+
+def test_disabled_catalog_entry_is_not_eligible(tmp_path):
+    from dataclasses import replace
+
+    from tests.auto_provisioning_helpers import build_auto_provisioning_env
+
+    env = build_auto_provisioning_env(tmp_path)
+    entry = env["catalog"].get("calculator-test")
+    assert env["manager"].is_eligible(entry)
+    disabled = replace(entry, enabled=False)
+    assert not env["manager"].is_eligible(disabled)
