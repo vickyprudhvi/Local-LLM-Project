@@ -15,11 +15,12 @@ other resumption path in this project.
 
 import os
 import shutil
+import sys
 import threading
 import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Tuple
 
 import tools.config as app_config
 from interaction_log import log_mcp_event
@@ -132,12 +133,14 @@ def _candidate_config_template(catalog_entry):
 
 
 def build_auto_plan(catalog_entry, request_id, original_user_text, base_dir=None,
-                    managed_root=None, ttl_seconds=None) -> AutoProvisioningPlan:
+                    managed_root=None, ttl_seconds=None,
+                    document_snapshots: Tuple = ()) -> AutoProvisioningPlan:
     """Build the immutable, hashed auto-provisioning plan for one catalog entry.
 
     Derived ONLY from the trusted catalog entry plus the request id/text — never
     from model output (Task 3, Task 18: no user- or model-controlled package
-    name, version, path, or permission).
+    name, version, path, or permission).  Any document snapshots the user already
+    showed intent to convert are bound into the plan hash.
     """
     if get_installer(catalog_entry.installer_type) is None:
         raise McpError(MCP_INSTALLER_UNSUPPORTED,
@@ -173,6 +176,7 @@ def build_auto_plan(catalog_entry, request_id, original_user_text, base_dir=None
         runtime_network_policy="disabled",
         target_install_directory=install_directory_for(catalog_entry, base_dir, managed_root),
         candidate_config_hash=hash_arguments(_candidate_config_template(catalog_entry)),
+        document_snapshots=tuple(document_snapshots),
         created_at=now.isoformat(timespec="seconds"),
         expires_at=(now + timedelta(seconds=ttl_seconds)).isoformat(timespec="seconds"),
     ).with_hash()
@@ -187,11 +191,22 @@ def _default_ttl_seconds():
 
 # ---- candidate MCP process validation (Task 10) ----
 
+_STARTUP_TIMEOUT_PYTHON_VENV = 120
+# python_venv-installed servers (e.g. MarkItDown) can take real wall-clock
+# time per call — document conversion parses the actual file — well beyond
+# the 15s generic default sized for fast built-in-style calls (Filesystem
+# reads, etc.), which are unaffected since they stay on that default.
+_CALL_TIMEOUT_PYTHON_VENV = 120
+
+
 def _validate_candidate_process(config, catalog_entry, base_dir):
     """Start the ACTUAL candidate process, exactly like a real server, but
     never register its tools into the production ToolRegistry. Exact-name
-    comparison only — never suffix matching."""
+    comparison only — never suffix matching. If the catalog entry names a
+    versioned candidate validator, it is run against the live process before
+    shutdown."""
     from mcp_layer.external import start_server
+    from mcp_management.candidate_validators import get_candidate_validator
 
     client = None
     try:
@@ -205,6 +220,30 @@ def _validate_candidate_process(config, catalog_entry, base_dir):
         except McpError as e:
             raise McpError(MCP_CANDIDATE_START_FAILED,
                            f"The candidate MCP server did not respond to tools/list ({e.code}).") from e
+
+        discovered = {t.get("name") for t in raw_tools if isinstance(t, dict)}
+        expected = set(catalog_entry.expected_tools)
+        missing = expected - discovered
+        if missing:
+            raise McpError(MCP_EXPECTED_TOOL_MISSING,
+                           f"The candidate server did not expose expected tool(s): {sorted(missing)}.")
+        enabled_policy_tools = {name for name, entry in catalog_entry.default_tool_policy.tools.items()
+                                if entry.enabled}
+        unmet = enabled_policy_tools - discovered
+        if unmet:
+            raise McpError(MCP_EXPECTED_TOOL_MISSING,
+                           f"Catalog-enabled tool(s) {sorted(unmet)} were not exposed by the candidate.")
+
+        report = {"discovered_tool_count": len(discovered),
+                  "expected_tools_present": sorted(expected & discovered)}
+
+        if catalog_entry.candidate_validator:
+            validator = get_candidate_validator(catalog_entry.candidate_validator)
+            validator(client, config, catalog_entry, base_dir)
+            report["candidate_validator"] = catalog_entry.candidate_validator
+            report["candidate_validator_ok"] = True
+
+        return report
     finally:
         if client is not None:
             try:
@@ -212,29 +251,22 @@ def _validate_candidate_process(config, catalog_entry, base_dir):
             except Exception:  # noqa: BLE001 — never mask the validation outcome
                 pass
 
-    discovered = {t.get("name") for t in raw_tools if isinstance(t, dict)}
-    expected = set(catalog_entry.expected_tools)
-    missing = expected - discovered
-    if missing:
-        raise McpError(MCP_EXPECTED_TOOL_MISSING,
-                       f"The candidate server did not expose expected tool(s): {sorted(missing)}.")
-    # default_permission is structurally forced to DENIED at catalog-load time
-    # (mcp_management.catalog._build_policy), so any tool the candidate exposes
-    # that the trusted policy never explicitly enabled is denied by construction
-    # — never silently granted READ. Here we only need every catalog-ENABLED
-    # tool to actually be present, so activation never claims a tool it cannot
-    # deliver.
-    enabled_policy_tools = {name for name, entry in catalog_entry.default_tool_policy.tools.items()
-                            if entry.enabled}
-    unmet = enabled_policy_tools - discovered
-    if unmet:
-        raise McpError(MCP_EXPECTED_TOOL_MISSING,
-                       f"Catalog-enabled tool(s) {sorted(unmet)} were not exposed by the candidate.")
-    return {"discovered_tool_count": len(discovered),
-           "expected_tools_present": sorted(expected & discovered)}
-
 
 # ---- the candidate installation transaction (Task 9) ----
+
+def _reroot_venv_paths(candidate, new_root):
+    """After promoting a python_venv candidate directory, recompute venv paths
+    under the new final root so console-script and module launches still work."""
+    old_python = candidate.extra["venv_python"]
+    relative = os.path.relpath(old_python, candidate.install_directory)
+    new_python = os.path.join(new_root, relative)
+    return {
+        "venv_python": new_python,
+        "venv_dir": os.path.dirname(os.path.dirname(new_python))
+                if sys.platform == "win32"
+                else os.path.dirname(new_python),
+    }
+
 
 def _run_transaction(plan: AutoProvisioningPlan, catalog_entry, base_dir, managed_root, registry_path):
     installer = get_installer(plan.installer_type)
@@ -259,10 +291,18 @@ def _run_transaction(plan: AutoProvisioningPlan, catalog_entry, base_dir, manage
 
         workspace = runtime_workspace_for(catalog_entry, base_dir)
         launch_spec = installer.build_launch_spec(candidate, catalog_entry)
+        startup_timeout = (_STARTUP_TIMEOUT_PYTHON_VENV
+                           if plan.installer_type == "python_venv"
+                           else None)
+        call_timeout = (_CALL_TIMEOUT_PYTHON_VENV
+                        if plan.installer_type == "python_venv"
+                        else None)
         raw_config = generate_config_dict_from_launch_spec(
             plan.server_id, plan.display_name, catalog_entry.transport, launch_spec, workspace,
             plan.environment_allowlist, catalog_entry.default_tool_policy,
-            plan.catalog_id, plan.exact_version, plan.installer_type)
+            plan.catalog_id, plan.exact_version, plan.installer_type,
+            startup_timeout_seconds=startup_timeout, call_timeout_seconds=call_timeout,
+            invocation_policy=catalog_entry.invocation_policy)
         config = validate_generated(raw_config)
         report = _validate_candidate_process(config, catalog_entry, base_dir)
 
@@ -271,15 +311,18 @@ def _run_transaction(plan: AutoProvisioningPlan, catalog_entry, base_dir, manage
             shutil.rmtree(final_dir, ignore_errors=True)
             os.rename(candidate.install_directory, final_dir)
             promoted = True
+            extra_updates = {}
+            if "venv_python" in candidate.extra:
+                extra_updates.update(_reroot_venv_paths(candidate, final_dir))
             candidate = replace(candidate, install_directory=final_dir,
-                                extra={**candidate.extra,
-                                      **({"venv_python": _reroot_venv_python(candidate, final_dir)}
-                                         if "venv_python" in candidate.extra else {})})
+                                extra={**candidate.extra, **extra_updates})
             launch_spec = installer.build_launch_spec(candidate, catalog_entry)
             raw_config = generate_config_dict_from_launch_spec(
                 plan.server_id, plan.display_name, catalog_entry.transport, launch_spec, workspace,
                 plan.environment_allowlist, catalog_entry.default_tool_policy,
-                plan.catalog_id, plan.exact_version, plan.installer_type)
+                plan.catalog_id, plan.exact_version, plan.installer_type,
+                startup_timeout_seconds=startup_timeout, call_timeout_seconds=call_timeout,
+                invocation_policy=catalog_entry.invocation_policy)
             config = validate_generated(raw_config)
 
         generated_config_path = os.path.join(server_root, GENERATED_CONFIG_FILENAME)
@@ -318,14 +361,6 @@ def _run_transaction(plan: AutoProvisioningPlan, catalog_entry, base_dir, manage
         shutil.rmtree(candidates_root, ignore_errors=True)
 
 
-def _reroot_venv_python(candidate, new_root):
-    """After promoting a python_venv candidate directory, its venv python path
-    still points at the OLD candidate location; recompute it under `new_root`."""
-    old_python = candidate.extra["venv_python"]
-    relative = os.path.relpath(old_python, candidate.install_directory)
-    return os.path.join(new_root, relative)
-
-
 # ---- the pending-request / approval facade (Tasks 4, 13, 16, 17) ----
 
 class AutoProvisioningManager:
@@ -350,21 +385,24 @@ class AutoProvisioningManager:
             return lock
 
     def is_eligible(self, catalog_entry) -> bool:
-        return (get_installer(catalog_entry.installer_type) is not None
+        return (catalog_entry.enabled
+                and get_installer(catalog_entry.installer_type) is not None
                 and not catalog_entry.requires_directory())
 
     # ---- detection -> plan -> approval ----
 
-    def begin_request(self, user_text, capability, catalog_entry) -> Optional[PendingAutoProvisioningRequest]:
+    def begin_request(self, user_text, capability, catalog_entry,
+                      document_snapshots=()) -> Optional[PendingAutoProvisioningRequest]:
         if not self.is_eligible(catalog_entry):
             return None
         request = PendingAutoProvisioningRequest(
             request_id=f"autoreq_{uuid.uuid4().hex[:12]}", original_user_text=user_text,
-            capability=capability, catalog_id=catalog_entry.catalog_id, server_id=catalog_entry.server_id)
+            capability=capability, catalog_id=catalog_entry.catalog_id, server_id=catalog_entry.server_id,
+            document_snapshots=tuple(document_snapshots))
         self._pending[request.request_id] = request
         log_mcp_event("auto_provisioning_detected", capability=capability,
                      catalog_id=catalog_entry.catalog_id, server_id=catalog_entry.server_id,
-                     state=request.state.value)
+                     state=request.state.value, document_snapshot_count=len(request.document_snapshots))
         return request
 
     def prepare_plan(self, request_id) -> Optional[AutoProvisioningPlan]:
@@ -376,7 +414,8 @@ class AutoProvisioningManager:
             raise McpError(MCP_SERVER_NOT_APPROVED,
                            f"{request.catalog_id!r} is not in the trusted MCP catalog.")
         plan = build_auto_plan(catalog_entry, request.request_id, request.original_user_text,
-                               base_dir=self.base_dir, managed_root=self.managed_root)
+                               base_dir=self.base_dir, managed_root=self.managed_root,
+                               document_snapshots=request.document_snapshots)
         self._plans[plan.plan_id] = plan
         self._pending[request_id] = request.advanced(PendingAutoProvisioningState.AWAITING_APPROVAL,
                                                       plan_id=plan.plan_id)
@@ -520,14 +559,48 @@ class AutoProvisioningManager:
 
     def resume(self, request_id):
         """Return the original request text so the NORMAL pipeline can re-run
-        it. Never calls the newly installed MCP tool itself."""
+        it. Never calls the newly installed MCP tool itself.
+
+        Phase G.4: before resuming, any document snapshots bound into the plan
+        are revalidated and single-use authorizations are created so the exact-
+        file invocation policy in McpTool.execute can find them.
+        """
         request = self._pending.get(request_id)
         if request is None or request.state is not PendingAutoProvisioningState.READY:
             return None
+        plan = self._plans.get(request.plan_id) if request.plan_id else None
+        if plan is not None:
+            self._create_document_authorizations_for_resumption(plan)
         self._pending[request_id] = request.advanced(PendingAutoProvisioningState.RESUMED)
         log_mcp_event("auto_provisioning_resumed", server_id=request.server_id,
-                     original_request_id=request_id)
+                     original_request_id=request_id,
+                     document_snapshot_count=len(plan.document_snapshots) if plan else 0)
         return request.original_user_text
+
+    def _create_document_authorizations_for_resumption(self, plan: AutoProvisioningPlan):
+        from mcp_management.document_authorization import (
+            DocumentAuthorizationStore,
+            DocumentInputSnapshot,
+            LocalDocumentExactFilePolicy,
+        )
+
+        store = DocumentAuthorizationStore.default()
+        policy = LocalDocumentExactFilePolicy()
+        created = 0
+        for snapshot in plan.document_snapshots:
+            if not isinstance(snapshot, DocumentInputSnapshot):
+                continue
+            try:
+                # Revalidate after install/activation.  bind() raises on any policy failure.
+                policy.bind(snapshot)
+                store.create_authorization(snapshot)
+                created += 1
+            except McpError:
+                # Do not resume with stale or missing document authorizations.
+                raise
+        log_mcp_event("auto_provisioning_document_auth_created",
+                     plan_id=plan.plan_id, created=created,
+                     total=len(plan.document_snapshots))
 
 
 def _read_json(path):

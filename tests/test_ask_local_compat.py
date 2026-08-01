@@ -54,8 +54,12 @@ def test_dispatch_claude_route_calls_ask_claude_not_tool_loop():
 
 def test_dispatch_local_route_uses_tool_loop():
     import assistant
+    from tool_loop import ToolLoopResult, ToolLoopResultType
     decision = RouteDecision(mode="local", payload="q")
-    with patch("tool_loop.run_local_tool_loop", return_value=("local answer", {})) as mock_loop, \
+    loop_result = ToolLoopResult(
+        text="local answer", metrics={},
+        result_type=ToolLoopResultType.NO_TOOL_VALID)
+    with patch("tool_loop.run_local_tool_loop", return_value=loop_result) as mock_loop, \
          patch("assistant.ask_claude") as mock_claude:
         reply, _ = assistant.dispatch(decision, "user q", "enriched q", [], "sys")
     assert reply == "local answer"

@@ -26,8 +26,10 @@ SERVER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 CAPABILITY_RE = re.compile(r"^[a-z0-9_]+$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-# Exact semantic version only — never a range, tag, or wildcard.
-EXACT_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
+# Exact pinned version only — never a range, tag, or wildcard.  Allows PEP 440-ish
+# pre-release/post-release suffixes such as 0.0.1a4, 1.0.0-rc.1, 1.0.0.post2,
+# but rejects trailing or isolated separators so "2.0.0-" is not accepted.
+EXACT_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:[._-]?[0-9A-Za-z]+(?:[._-][0-9A-Za-z]+)*)?$")
 
 SUPPORTED_INSTALLERS = ("npm", "python_venv")
 SUPPORTED_TRANSPORTS = ("stdio",)
@@ -121,6 +123,15 @@ class McpCatalogEntry:
     launch_module: Optional[str] = None
     launch_arguments: Tuple[str, ...] = ()
     install_hosts: Tuple[str, ...] = ()
+    # Phase G.4 — console-script launch and lock-environment metadata.
+    launch_entrypoint_type: str = "python_module"
+    console_script: Optional[str] = None
+    install_options: Dict[str, bool] = field(default_factory=dict)
+    lock_environment: Dict[str, str] = field(default_factory=dict)
+    candidate_validator: Optional[str] = None
+    invocation_policy: Dict[str, str] = field(default_factory=dict)
+    # Phase G.4 — entries can be disabled while still being validated.
+    enabled: bool = True
 
     @property
     def package_source(self) -> str:
@@ -373,8 +384,13 @@ def build_entry(catalog_id, raw) -> McpCatalogEntry:
     lock_file_relative = None
     python_constraint = None
     launch_module = None
+    console_script = None
     launch_arguments: Tuple[str, ...] = ()
     install_hosts: Tuple[str, ...] = ()
+    install_options: Dict[str, bool] = {}
+    lock_environment: Dict[str, str] = {}
+    candidate_validator = None
+    invocation_policy: Dict[str, str] = {}
 
     if installer_type == "npm":
         entrypoint = _string(installer, "entrypoint", max_len=400)
@@ -400,11 +416,17 @@ def build_entry(catalog_id, raw) -> McpCatalogEntry:
         launch = raw.get("launch")
         if not isinstance(launch, dict):
             raise _invalid(f"{catalog_id}: python_venv installers require a 'launch' object.")
-        if launch.get("entrypoint_type") != "python_module":
-            raise _invalid(f"{catalog_id}: 'launch.entrypoint_type' must be 'python_module'.")
-        launch_module = _string(launch, "module", max_len=200)
-        if not MODULE_NAME_RE.match(launch_module):
-            raise _invalid(f"{catalog_id}: 'launch.module' must be a dotted Python module name.")
+        entrypoint_type = launch.get("entrypoint_type", "python_module")
+        if entrypoint_type not in ("python_module", "console_script"):
+            raise _invalid(f"{catalog_id}: 'launch.entrypoint_type' must be 'python_module' or 'console_script'.")
+        if entrypoint_type == "python_module":
+            launch_module = _string(launch, "module", max_len=200)
+            if not MODULE_NAME_RE.match(launch_module):
+                raise _invalid(f"{catalog_id}: 'launch.module' must be a dotted Python module name.")
+        elif entrypoint_type == "console_script":
+            console_script = _string(launch, "console_script", max_len=200)
+            if not console_script or any(c in console_script for c in ("\x00", "\n", "\r", " ", "/", "\\")):
+                raise _invalid(f"{catalog_id}: 'launch.console_script' must be a plain console-script name.")
         args_raw = launch.get("arguments", [])
         if not isinstance(args_raw, list):
             raise _invalid(f"{catalog_id}: 'launch.arguments' must be a list.")
@@ -414,6 +436,38 @@ def build_entry(catalog_id, raw) -> McpCatalogEntry:
                 raise _invalid(f"{catalog_id}: 'launch.arguments' entries must be plain strings.")
             args_out.append(a)
         launch_arguments = tuple(args_out)
+
+        install_opts_raw = installer.get("install_options", {})
+        if not isinstance(install_opts_raw, dict):
+            raise _invalid(f"{catalog_id}: 'installer.install_options' must be an object.")
+        if any(k not in ("no_deps",) for k in install_opts_raw):
+            raise _invalid(f"{catalog_id}: 'installer.install_options' has unknown field(s).")
+        install_options = {k: bool(v) for k, v in install_opts_raw.items()}
+
+        lock_env_raw = raw.get("lock_environment", {})
+        if not isinstance(lock_env_raw, dict):
+            raise _invalid(f"{catalog_id}: 'lock_environment' must be an object.")
+        for k, v in lock_env_raw.items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                raise _invalid(f"{catalog_id}: 'lock_environment' entries must be strings.")
+            if any(c in k for c in ("\x00", "\n", "\r")) or any(c in v for c in ("\x00", "\n", "\r")):
+                raise _invalid(f"{catalog_id}: 'lock_environment' entry contains illegal characters.")
+        lock_environment = dict(lock_env_raw)
+
+        candidate_validator = raw.get("candidate_validator")
+        if candidate_validator is not None and (not isinstance(candidate_validator, str) or not candidate_validator.strip()):
+            raise _invalid(f"{catalog_id}: 'candidate_validator' must be a non-empty string.")
+
+        invocation_policy_raw = raw.get("invocation_policy", {})
+        if not isinstance(invocation_policy_raw, dict):
+            raise _invalid(f"{catalog_id}: 'invocation_policy' must be an object.")
+        if any(k not in ("argument_mode",) for k in invocation_policy_raw):
+            raise _invalid(f"{catalog_id}: 'invocation_policy' has unknown field(s).")
+        argument_mode = invocation_policy_raw.get("argument_mode")
+        if argument_mode is not None and argument_mode not in ("exact_file_uri",):
+            raise _invalid(f"{catalog_id}: 'invocation_policy.argument_mode' is unsupported.")
+        invocation_policy = dict(invocation_policy_raw)
+
         # A local file:// path with no scheme is not a "network host"; only
         # genuine hostnames may be declared as install-time network access.
         install_hosts_raw = (raw.get("network_policy") or {}).get("install_hosts", [])
@@ -463,6 +517,9 @@ def build_entry(catalog_id, raw) -> McpCatalogEntry:
     granular_capabilities = _build_granular_capabilities(raw.get("granular_capabilities"), catalog_id)
     selection_hints = _build_selection_hints(raw.get("selection_hints"), catalog_id, granular_capabilities)
 
+    enabled_raw = raw.get("enabled")
+    enabled = True if enabled_raw is None else bool(enabled_raw)
+
     return McpCatalogEntry(
         catalog_id=catalog_id,
         server_id=server_id,
@@ -487,6 +544,13 @@ def build_entry(catalog_id, raw) -> McpCatalogEntry:
         launch_module=launch_module,
         launch_arguments=launch_arguments,
         install_hosts=install_hosts,
+        launch_entrypoint_type=entrypoint_type if installer_type == "python_venv" else "python_module",
+        console_script=console_script,
+        install_options=install_options,
+        lock_environment=lock_environment,
+        candidate_validator=candidate_validator,
+        invocation_policy=invocation_policy,
+        enabled=enabled,
     )
 
 

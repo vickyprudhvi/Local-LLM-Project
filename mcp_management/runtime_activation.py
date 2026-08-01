@@ -50,7 +50,7 @@ def ensure_selected_server_active(selection, runtime_manager, catalog, base_dir=
             activated=False, server_id=server_id, error_code=MCP_SERVER_NOT_INSTALLED,
             message=(
                 f"The approved MCP server {server_id!r} can provide this capability, but it is not "
-                "installed yet. This will be replaced by approval-driven provisioning in a later phase."
+                "installed yet. Approval-driven provisioning can install it if you approve the plan."
             ),
         )
 

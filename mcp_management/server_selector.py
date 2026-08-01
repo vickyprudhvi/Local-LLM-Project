@@ -24,6 +24,7 @@ from mcp_management.capabilities import (
     CapabilitySelectionStatus,
     McpServerCandidate,
     McpServerSelection,
+    ToolRequirement,
 )
 from tools.models import (
     MCP_CAPABILITY_CATALOG_INVALID,
@@ -195,6 +196,8 @@ class McpServerSelector:
                 selected_catalog_id=winner.catalog_id, candidates=bounded,
                 explanation=(f"Selected {winner.server_id!r} for capability match "
                             f"({', '.join(winner.matched_capabilities)})."),
+                tool_requirement=ToolRequirement.REQUIRED,
+                preferred_mcp_server_id=winner.server_id,
             )
 
         # No single approved server covers every required capability.
@@ -240,6 +243,8 @@ class McpServerSelector:
         for entry in catalog.entries.values():
             if not entry.granular_capabilities:
                 continue  # no Phase G.1 metadata -> not yet selectable (backward compat)
+            if not entry.enabled:
+                continue  # catalog entry explicitly disabled
             matched = tuple(cid for cid in required_ids if cid in entry.granular_capabilities)
             if not matched:
                 continue
@@ -248,7 +253,7 @@ class McpServerSelector:
 
             installed = bool(installed_state.is_installed(entry.server_id))
             active = bool(runtime_status.is_active(entry.server_id))
-            enabled = True  # reached only when not disabled, above
+            enabled = True  # reached only when not catalog- or state-disabled, above
 
             score = 0
             reasons = []

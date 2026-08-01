@@ -30,6 +30,19 @@ class CapabilitySelectionStatus(str, Enum):
     INVALID_CATALOG = "invalid_catalog"
 
 
+class ToolRequirement(str, Enum):
+    """Deterministic requirement for tool use on a request.
+
+    - NONE: no tool is required; the model may answer directly.
+    - OPTIONAL: tools are available but not required; the model may answer directly.
+    - REQUIRED: Phase G.1 selected an MCP provider and a tool must be selected.
+    """
+
+    NONE = "none"
+    OPTIONAL = "optional"
+    REQUIRED = "required"
+
+
 class CapabilityEvidenceType(str, Enum):
     EXPLICIT_SERVER = "explicit_server"
     EXPLICIT_CAPABILITY = "explicit_capability"
@@ -70,13 +83,19 @@ class CapabilityRequirement:
     capability_id: str
     confidence: float
     evidence: Tuple[CapabilityEvidence, ...] = ()
+    # Phase G.4 — for document_to_markdown, the authorization id created during
+    # detection so the later tool invocation can bind to the exact approved file.
+    document_authorization_id: Optional[str] = None
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "capability_id": self.capability_id,
             "confidence": round(self.confidence, 4),
             "evidence": [e.to_dict() for e in self.evidence],
         }
+        if self.document_authorization_id:
+            out["document_authorization_id"] = self.document_authorization_id
+        return out
 
 
 @dataclass(frozen=True)
@@ -123,6 +142,8 @@ class McpServerSelection:
     candidates: Tuple[McpServerCandidate, ...]
     explanation: str
     error_code: Optional[str] = None
+    tool_requirement: ToolRequirement = ToolRequirement.NONE
+    preferred_mcp_server_id: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -133,6 +154,8 @@ class McpServerSelection:
             "candidates": [c.to_dict() for c in self.candidates],
             "explanation": self.explanation,
             "error_code": self.error_code,
+            "tool_requirement": self.tool_requirement.value,
+            "preferred_mcp_server_id": self.preferred_mcp_server_id,
         }
 
 
@@ -159,4 +182,5 @@ NONE_REQUIRED_SELECTION = McpServerSelection(
     selected_catalog_id=None,
     candidates=(),
     explanation="No MCP capability is required for this request.",
+    tool_requirement=ToolRequirement.NONE,
 )

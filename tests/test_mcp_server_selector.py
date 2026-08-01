@@ -109,6 +109,18 @@ def test_disabled_entry_is_never_selected():
     assert all(c.server_id != "server-a" for c in selection.candidates)
 
 
+def test_catalog_disabled_entry_is_never_selected():
+    """A catalog entry with enabled=false is invisible even if installed."""
+    raw = _fs_entry("server-a")
+    raw["enabled"] = False
+    catalog = _catalog({"cat-a": raw})
+    installed = _FakeInstalled(installed=["server-a"])
+    selection = McpServerSelector().select(
+        [_req("read_local_text_file")], catalog, installed, _FakeRuntime())
+    assert selection.status == CapabilitySelectionStatus.UNSUPPORTED
+    assert all(c.server_id != "server-a" for c in selection.candidates)
+
+
 # ---- P: uninstalled approved entries may still be selected ----
 
 def test_uninstalled_entry_may_be_selected_with_no_install_attempted():

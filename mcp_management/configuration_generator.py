@@ -68,7 +68,11 @@ def generate_config_dict(plan: McpProvisioningPlan, runtime_executable, entrypoi
 def generate_config_dict_from_launch_spec(server_id, display_name, transport, launch_spec,
                                           working_directory, environment_allowlist, tool_policy,
                                           catalog_id, package_version, installer_type,
-                                          enabled=True, required=False):
+                                          enabled=True, required=False,
+                                          startup_timeout_seconds=None,
+                                          call_timeout_seconds=None,
+                                          shutdown_timeout_seconds=None,
+                                          invocation_policy=None):
     """Phase G.3 (Task 11) — generalize configuration generation for ANY installer
     type. Unlike `generate_config_dict` (npm-only: derives `args` from an
     entrypoint file plus approved directories), this takes the installer's own
@@ -92,9 +96,9 @@ def generate_config_dict_from_launch_spec(server_id, display_name, transport, la
         "command": _portable(launch_spec.command),
         "args": [_portable(a) for a in launch_spec.args],
         "working_directory": _portable(working_directory),
-        "startup_timeout_seconds": DEFAULT_STARTUP_TIMEOUT,
-        "call_timeout_seconds": DEFAULT_CALL_TIMEOUT,
-        "shutdown_timeout_seconds": DEFAULT_SHUTDOWN_TIMEOUT,
+        "startup_timeout_seconds": startup_timeout_seconds or DEFAULT_STARTUP_TIMEOUT,
+        "call_timeout_seconds": call_timeout_seconds or DEFAULT_CALL_TIMEOUT,
+        "shutdown_timeout_seconds": shutdown_timeout_seconds or DEFAULT_SHUTDOWN_TIMEOUT,
         # Names only; values are read from the parent process at launch time.
         "environment_allowlist": list(environment_allowlist),
         "tool_policy": policy,
@@ -102,6 +106,7 @@ def generate_config_dict_from_launch_spec(server_id, display_name, transport, la
         "catalog_id": catalog_id,
         "package_version": package_version,
         "installer_type": installer_type,
+        "invocation_policy": dict(invocation_policy or {}),
     }
 
 

@@ -7,6 +7,7 @@ ToolExecutor and renders the result. assistant.py knows nothing about how any
 specific tool works — there are no per-tool branches here.
 """
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -21,17 +22,31 @@ from brain import ask_claude, load_system_prompt
 from ears import listen_push_to_talk
 from interaction_log import log_turn
 from mcp_layer import FilesystemRootValidator, McpError, MultiMcpRuntimeManager
-from mcp_management.access_classifier import classify_outside_root_failure
+from mcp_management.access_classifier import (
+    FilesystemAccessFailure,
+    _is_within,
+    classify_outside_root_failure,
+    propose_root,
+)
 from mcp_management.approval import confirm_provisioning
 from mcp_management.auto_provisioning import AutoProvisioningManager
 from mcp_management.capabilities import CapabilitySelectionStatus
 from mcp_management.capability_detector import extract_directory_candidate
 from mcp_management.capability_service import select_for_request
+from mcp_management.document_authorization import (
+    DocumentAuthorizationStore,
+    build_document_snapshots_from_text,
+)
 from mcp_management.provisioning_models import AutoProvisioningApproval
 from mcp_management.registry import get_installed
 from mcp_management.runtime_activation import ensure_selected_server_active
 from router import route_and_answer
 from tools.models import (
+    MCP_DOCUMENT_AUTHORIZATION_CONSUMED,
+    MCP_DOCUMENT_AUTHORIZATION_EXPIRED,
+    MCP_DOCUMENT_AUTHORIZATION_REQUIRED,
+    MCP_DOCUMENT_AUTHORIZATION_RESERVED,
+    MCP_DOCUMENT_SNAPSHOT_MISMATCH,
     MCP_FILESYSTEM_RUNTIME_ROOT_MISMATCH,
     MCP_RUNTIME_REBIND_FAILED,
     MCP_RUNTIME_RESTART_FAILED,
@@ -58,6 +73,31 @@ _AP_YES_WORDS = {"y", "yes", "approve", "approved", "proceed"}
 _AP_NO_WORDS = {"n", "no", "decline", "declined", "cancel"}
 _AP_SHOW_PLAN_WORDS = {"show plan", "show the plan"}
 _AUTO_PROVISIONING_REQUEST_PREFIX = "autoreq_"
+
+# Phase G.4 Defect 4 — every word/phrase that resolves an approval workflow,
+# across both the Phase F.1 filesystem-access and Phase G.3 auto-provisioning
+# reply vocabularies. A bare one of these with NO matching pending request is
+# never a normal request (see `_is_bare_approval_token` / `main()`).
+_ALL_APPROVAL_TOKEN_WORDS = (
+    _FS_YES_WORDS | _FS_NO_WORDS | _FS_SHOW_PLAN_WORDS
+    | _AP_YES_WORDS | _AP_NO_WORDS | _AP_SHOW_PLAN_WORDS
+)
+
+# Phase G.4 Defect 2/9 — internal document-authorization control-plane
+# failures. These mean the REQUEST-BOUND authorization state itself is
+# missing/expired/consumed/reserved/stale — never a reason for the model to
+# see raw error text and improvise (e.g. inventing a Filesystem approval
+# offer). A DIFFERENT failure (a malformed/malicious model-supplied URI, a
+# genuine remote conversion failure, an oversized result) is deliberately NOT
+# in this set — those remain visible to the model exactly as before.
+_DOCUMENT_AUTH_CONTROL_PLANE_CODES = frozenset({
+    MCP_DOCUMENT_AUTHORIZATION_REQUIRED,
+    MCP_DOCUMENT_AUTHORIZATION_EXPIRED,
+    MCP_DOCUMENT_AUTHORIZATION_CONSUMED,
+    MCP_DOCUMENT_AUTHORIZATION_RESERVED,
+    MCP_DOCUMENT_SNAPSHOT_MISMATCH,
+})
+_DOCUMENT_TO_MARKDOWN_CAPABILITY = "document_to_markdown"
 
 
 def _start_provisioning():
@@ -193,6 +233,47 @@ def _find_outside_root_failure(manager, calls_and_results):
         if failure is not None and failure.eligible:
             return server_id, call, failure
     return None
+
+
+def _find_directory_request_outside_roots(manager, call, result, user_text):
+    """A SUCCESSFUL mcp.<server>.list_allowed_directories call paired with a
+    directory the ORIGINAL request named — one not covered by any currently
+    approved root — is functionally the same situation as an outside-root
+    failure: the user asked to work in a directory the server can't reach.
+    This covers the case where the model checks the allowed list first
+    (a normal, successful call) instead of attempting the real read/list
+    operation and letting THAT fail, which is the only case
+    `_find_outside_root_failure` can classify. Detected deterministically
+    from the server's own registry state and a path shape extracted from the
+    user's own words (`extract_directory_candidate`) — never from anything
+    the model generated. Returns (server_id, FilesystemAccessFailure) or None.
+    """
+    if manager is None or not result.success:
+        return None
+    parts = call.tool_name.split(".", 2)
+    if len(parts) != 3 or parts[2] != "list_allowed_directories":
+        return None
+    server_id = parts[1]
+    installed = get_installed(server_id, manager.registry_path, manager.base_dir, manager.managed_root)
+    if installed is None:
+        return None
+    candidate = extract_directory_candidate(user_text)
+    if not candidate:
+        return None
+    try:
+        resolved = os.path.realpath(candidate)
+    except (OSError, ValueError):
+        return None
+    allowed = [os.path.realpath(str(r)) for r in (installed.approved_directories or ())]
+    if _is_within(resolved, allowed):
+        return None  # already covered — nothing to offer
+    proposal = propose_root([resolved], remote_name="list_directory", base_dir=manager.base_dir)
+    if not proposal.ok:
+        return None
+    failure = FilesystemAccessFailure(
+        requested_paths=(resolved,), proposed_root=proposal.directory,
+        restricted=proposal.restricted, eligible=proposal.ok, reason=proposal.reason)
+    return server_id, failure
 
 
 def _offer_filesystem_access(manager, server_id, call, failure, user_text):
@@ -394,7 +475,7 @@ def _restart_mcp_and_resume(manager, runtime_manager, directive, user_text, hist
 
 
 def _run_local_turn(manager, runtime_manager, user_text, prompt, history, system_prompt,
-                    attempted_fs_requests, resume_budget=1):
+                    attempted_fs_requests, resume_budget=1, selection=None):
     """Run one local-mode turn with immediate Phase F.1 hotfix interception.
 
     Unlike the old post-hoc scan (which only looked at what happened after the
@@ -407,13 +488,35 @@ def _run_local_turn(manager, runtime_manager, user_text, prompt, history, system
     By the time this runs, Phase G.2 has already lazily activated whichever
     server Phase G.1 selected (see _process_local_request_with_capability_
     selection) — this function no longer starts anything itself.
+
+    `selection`, when given, carries the Phase G capability decision into the
+    tool loop so a REQUIRED request can be fail-closed if the model refuses to
+    select a tool from the offered shortlist.
     """
     _provision_if_needed(manager, user_text)
+
+    tool_requirement = tool_loop.ToolRequirement.NONE
+    preferred_mcp_server_id = None
+    if selection is not None:
+        tool_requirement = getattr(selection, "tool_requirement", tool_loop.ToolRequirement.NONE)
+        preferred_mcp_server_id = getattr(selection, "preferred_mcp_server_id", None)
 
     halt = {}
 
     def on_result(call, result):
         directive, previous_roots = _classify_access_apply_success(manager, call, result)
+        if directive is None and not result.success and result.error is not None \
+                and result.error.code in _DOCUMENT_AUTH_CONTROL_PLANE_CODES:
+            # Phase G.4 Defect 2 — an internal document-authorization
+            # control-plane failure (missing/expired/consumed/reserved/stale)
+            # must never reach the local LLM: it is not something the model
+            # can reason about, and letting it see the raw code is exactly
+            # what led the model to fabricate a Filesystem approval message
+            # in the reported live failure. Halt immediately, before the model
+            # gets another turn.
+            directive = tool_loop.ToolLoopDirective(
+                control=tool_loop.ToolLoopControl.HALT_WITH_ERROR,
+                error_code=result.error.code)
         if directive is None:
             found = _find_outside_root_failure(manager, [(call, result)])
             if found is not None:
@@ -422,15 +525,63 @@ def _run_local_turn(manager, runtime_manager, user_text, prompt, history, system
                     control=tool_loop.ToolLoopControl.HALT_FOR_FILESYSTEM_ACCESS,
                     server_id=server_id)
                 halt["outside_root"] = (server_id, found_call, failure)
+        if directive is None:
+            # The model checked list_allowed_directories (a normal, successful
+            # call) instead of attempting the real operation and letting THAT
+            # fail — the only case the check above can catch. Detect the same
+            # "directory not covered" situation from the user's own words.
+            found = _find_directory_request_outside_roots(manager, call, result, user_text)
+            if found is not None:
+                server_id, failure = found
+                directive = tool_loop.ToolLoopDirective(
+                    control=tool_loop.ToolLoopControl.HALT_FOR_FILESYSTEM_ACCESS,
+                    server_id=server_id)
+                halt["outside_root"] = (server_id, call, failure)
         if directive is not None:
             halt["directive"] = directive
             halt["previous_allowed_roots"] = previous_roots
         return directive
 
-    reply, extra_metrics = tool_loop.run_local_tool_loop(
-        prompt, history, system_prompt, on_tool_result=on_result)
+    loop_result = tool_loop.run_local_tool_loop(
+        prompt, history, system_prompt, on_tool_result=on_result,
+        tool_requirement=tool_requirement, preferred_mcp_server_id=preferred_mcp_server_id)
+    reply = loop_result.text
+    extra_metrics = dict(loop_result.metrics)
 
     directive = halt.get("directive")
+
+    # Phase G.4 Defects 2/9 — reconstruct exactly once (fresh snapshot + fresh
+    # authorization — never the same authorization id) and retry tool
+    # selection/execution exactly once. A SECOND control-plane failure of the
+    # same kind returns a controlled internal error instead of trying again or
+    # exposing the model to it.
+    document_auth_retried = False
+    while (directive is not None and directive.control == tool_loop.ToolLoopControl.HALT_WITH_ERROR
+          and not document_auth_retried):
+        document_auth_retried = True
+        console.print(f"[dim]MCP document authorization control-plane failure "
+                      f"({directive.error_code}); attempting one deterministic "
+                      "reconstruction.[/dim]")
+        halt.pop("directive", None)
+        if not _reconstruct_document_authorization(user_text):
+            return ("I couldn't re-establish access to that document for this request. "
+                    "Please try again.", extra_metrics, None)
+        loop_result = tool_loop.run_local_tool_loop(
+            prompt, history, system_prompt, on_tool_result=on_result,
+            tool_requirement=tool_requirement, preferred_mcp_server_id=preferred_mcp_server_id)
+        reply = loop_result.text
+        extra_metrics = {
+            "prompt_tokens": extra_metrics.get("prompt_tokens", 0)
+                            + loop_result.metrics.get("prompt_tokens", 0),
+            "completion_tokens": extra_metrics.get("completion_tokens", 0)
+                                + loop_result.metrics.get("completion_tokens", 0),
+        }
+        directive = halt.get("directive")
+
+    if directive is not None and directive.control == tool_loop.ToolLoopControl.HALT_WITH_ERROR:
+        return ("I couldn't convert that document right now because of an internal "
+                "authorization issue. Please try again.", extra_metrics, None)
+
     if directive is None:
         return reply, extra_metrics, None
 
@@ -522,8 +673,16 @@ def _offer_mcp_provisioning(auto_manager, capability, catalog_entry, user_text):
     pending auto-provisioning request and prepares its plan. Returns
     (reply_text, request_id), or None when this catalog entry is not eligible
     for automatic provisioning (e.g. it requires a directory grant, which
-    stays on the existing Filesystem-specific manual/heuristic path)."""
-    request = auto_manager.begin_request(user_text, capability, catalog_entry)
+    stays on the existing Filesystem-specific manual/heuristic path).
+
+    Phase G.4: for the `document_to_markdown` capability, the local document
+    paths extracted from the user's text are captured as READ snapshots and
+    bound into the provisioning plan hash."""
+    document_snapshots = ()
+    if capability == "document_to_markdown":
+        document_snapshots = build_document_snapshots_from_text(user_text)
+    request = auto_manager.begin_request(user_text, capability, catalog_entry,
+                                          document_snapshots=document_snapshots)
     if request is None:
         return None
     plan = auto_manager.prepare_plan(request.request_id)
@@ -579,6 +738,43 @@ def _resolve_auto_provisioning_reply(auto_manager, runtime_manager, request_id, 
         return _AutoProvisioningReplyOutcome(matched=True, resumed_text=resumed_text)
 
     return _AutoProvisioningReplyOutcome(matched=False)
+
+
+def _reconstruct_document_authorization(user_text):
+    """Phase G.4 Defects 1/2/7/9 — deterministically (re)capture and validate
+    document snapshots from `user_text` and create a FRESH, single-use
+    `DocumentInputAuthorization` for each. Reuses the exact same primitives
+    (`build_document_snapshots_from_text`, `DocumentAuthorizationStore.
+    create_authorization`) the first-time-provisioning resume path already
+    uses (`AutoProvisioningManager._create_document_authorizations_for_
+    resumption`) — never a parallel authorization mechanism.
+
+    Returns True when at least one snapshot was found and authorized; False
+    when no local document evidence exists at all, or revalidation fails
+    (file missing, changed, wrong type, etc.) — the caller must fail closed
+    rather than let Phase B run with no live authorization. Every call
+    creates a brand-new authorization id; a prior one (from an earlier
+    request, or a just-consumed one) is never reused.
+    """
+    snapshots = build_document_snapshots_from_text(user_text)
+    if not snapshots:
+        return False
+    store = DocumentAuthorizationStore.default()
+    try:
+        for snapshot in snapshots:
+            store.create_authorization(snapshot)
+    except McpError:
+        return False
+    return True
+
+
+def _is_bare_approval_token(user_text):
+    """Phase G.4 Defect 4 — 'yes'/'no'/'show plan' (and synonyms) are
+    approval-workflow replies, never ordinary requests. Normalized identically
+    to `_resolve_filesystem_access_reply`/`_resolve_auto_provisioning_reply`
+    so this can never disagree with them about what counts as a bare token."""
+    normalized = user_text.strip().lower().rstrip("?.! ")
+    return normalized in _ALL_APPROVAL_TOKEN_WORDS
 
 
 def _process_local_request_with_capability_selection(manager, runtime_manager, user_text, prompt, history,
@@ -639,11 +835,29 @@ def _process_local_request_with_capability_selection(manager, runtime_manager, u
                         return reply, dict(_ZERO_METRICS), request_id
             return activation.message, dict(_ZERO_METRICS), None
 
+        # Phase G.4 Defects 1/7/8 — for document_to_markdown, a HEALTHY,
+        # ALREADY-installed provider (the common, repeat-use case) still needs
+        # a fresh, request-bound DocumentInputAuthorization created before
+        # Phase B ever sees the conversion tool. Any authorization created
+        # during a PAST provisioning approval belongs to that earlier request
+        # and must never be assumed valid for this one — this runs on every
+        # call into this single authoritative entrypoint, fresh request or
+        # resumed one alike, so resumption can never skip it (Defect 7).
+        # Reuses the exact snapshot-capture + create_authorization primitives
+        # the first-time-install resume path already uses — no new mechanism.
+        capability_id = (selection.required_capabilities[0].capability_id
+                         if selection.required_capabilities else "")
+        if capability_id == _DOCUMENT_TO_MARKDOWN_CAPABILITY:
+            if not _reconstruct_document_authorization(user_text):
+                return ("I couldn't find a valid local document to convert for this request. "
+                        "Please give the exact local file path.", dict(_ZERO_METRICS), None)
+
     # NONE_REQUIRED, or SELECTED-and-now-active: existing behavior, completely
     # unchanged. Phase B remains responsible for the exact-tool shortlist; the
     # selection above is not yet consumed by it (a later Phase G stage does that).
     return _run_local_turn(manager, runtime_manager, user_text, prompt, history, system_prompt,
-                           attempted_fs_requests, resume_budget=resume_budget)
+                           attempted_fs_requests, resume_budget=resume_budget,
+                           selection=selection)
 
 
 def _enrich_with_memory(user_text):
@@ -680,7 +894,9 @@ def dispatch(decision, user_text, prompt, history, system_prompt, on_tool_result
     # answer separately. The local tool loop lets the model call its LLM-selectable
     # tools and then writes the final answer itself. With TOOL_CALLING_ENABLED=false
     # it falls back to the original single-shot ask_local behavior.
-    return tool_loop.run_local_tool_loop(prompt, history, system_prompt, on_tool_result=on_tool_result)
+    loop_result = tool_loop.run_local_tool_loop(
+        prompt, history, system_prompt, on_tool_result=on_tool_result)
+    return loop_result.text, loop_result.metrics
 
 
 def get_user_text(mode):
@@ -813,6 +1029,22 @@ def main():
                     history.append({"role": "user", "content": user_text})
                     history.append({"role": "assistant", "content": reply})
                     continue
+
+            # Phase G.4 Defect 4 — a bare approval-workflow reply ("yes", "no",
+            # "show plan", ...) with NO matching pending request (fs-access or
+            # auto-provisioning — pending_fs_request_id is None here) is never
+            # treated as an ordinary new request: no Router call, no capability
+            # selection, no Phase B, no local LLM call, no tool execution. This
+            # is what stops an LLM-fabricated approval-looking answer (which
+            # never creates real pending state) from having any effect when the
+            # user replies to it.
+            if pending_fs_request_id is None and _is_bare_approval_token(user_text):
+                reply = "No pending approval request."
+                console.print(f"[cyan]{reply}[/cyan]")
+                speak(reply)
+                history.append({"role": "user", "content": user_text})
+                history.append({"role": "assistant", "content": reply})
+                continue
 
             turn_start = time.perf_counter()
 

@@ -6,6 +6,8 @@ from the committed local wheel fixture — no network, no fake/mocked subprocess
 
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 
 import pytest
@@ -115,3 +117,72 @@ def test_cleanup_removes_non_final_candidate_directory(tmp_root):
     assert os.path.isdir(txn.candidate_directory)
     installer.cleanup_candidate(candidate)
     assert not os.path.isdir(txn.candidate_directory)
+
+
+def test_no_deps_flag_passed_when_configured(tmp_root, monkeypatch):
+    from dataclasses import replace
+
+    captured = {}
+
+    import mcp_management.installers.python_venv as _pv
+    real_run = _pv._run
+
+    def _fake_run(argv, cwd, env, timeout, error_code):
+        if "install" in argv:
+            captured["argv"] = list(argv)
+            return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
+        return real_run(argv, cwd, env, timeout, error_code)
+
+    monkeypatch.setattr("mcp_management.installers.python_venv._run", _fake_run)
+
+    installer = get_installer("python_venv")
+    entry = calculator_test_catalog_entry()
+    entry = replace(entry, install_options={"no_deps": True})
+    txn = _transaction(tmp_root)
+    candidate = installer.prepare_candidate(None, entry, txn)
+    candidate = installer.install_candidate(candidate, None, entry)
+    assert "--no-deps" in captured["argv"]
+    assert captured["argv"].count("--require-hashes") == 1
+
+
+def test_lock_environment_enforced(tmp_root):
+    from dataclasses import replace
+
+    installer = get_installer("python_venv")
+    entry = calculator_test_catalog_entry()
+    entry = replace(entry, lock_environment={"python_version": "99.99"})
+    txn = _transaction(tmp_root)
+    with pytest.raises(McpError) as exc:
+        installer.install_candidate(installer.prepare_candidate(None, entry, txn), None, entry)
+    assert exc.value.code == MCP_PYTHON_VERSION_UNSUPPORTED
+
+
+def test_console_script_launch_spec(tmp_root):
+    from dataclasses import replace
+
+    installer = get_installer("python_venv")
+    entry = calculator_test_catalog_entry()
+    entry = replace(
+        entry,
+        launch_entrypoint_type="console_script",
+        console_script="calculator-test-mcp",
+        launch_module=None,
+    )
+    txn = _transaction(tmp_root)
+    candidate = installer.prepare_candidate(None, entry, txn)
+    candidate = installer.install_candidate(candidate, None, entry)
+
+    # Create a fake console-script shim so build_launch_spec succeeds.
+    venv_dir = candidate.extra["venv_dir"]
+    if sys.platform == "win32":
+        shim = os.path.join(venv_dir, "Scripts", "calculator-test-mcp.exe")
+    else:
+        shim = os.path.join(venv_dir, "bin", "calculator-test-mcp")
+    os.makedirs(os.path.dirname(shim), exist_ok=True)
+    with open(shim, "w", encoding="utf-8") as f:
+        f.write("")
+
+    spec = installer.build_launch_spec(candidate, entry)
+    assert spec.command == shim
+    assert spec.args == ()
+

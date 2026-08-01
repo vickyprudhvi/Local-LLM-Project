@@ -21,12 +21,18 @@ the version, the lock file, the tool policy, or the original request and the old
 approval no longer matches.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 from tools.models import hash_arguments
+
+if TYPE_CHECKING:
+    from mcp_management.document_authorization import DocumentInputSnapshot
+
 
 DEFAULT_PLAN_TTL_SECONDS = 15 * 60
 
@@ -77,6 +83,8 @@ class AutoProvisioningPlan:
     expires_at: str
     status: ProvisioningPlanStatus = ProvisioningPlanStatus.PREPARED
     risk_summary: Tuple[str, ...] = ()
+    # Phase G.4 — document snapshots bound into approval hash; revalidated before use.
+    document_snapshots: Tuple["DocumentInputSnapshot", ...] = ()
 
     def security_fields(self) -> dict:
         """Exactly the fields the approval is bound to (Task 3)."""
@@ -96,6 +104,9 @@ class AutoProvisioningPlan:
             "runtime_network_policy": self.runtime_network_policy,
             "target_install_directory": self.target_install_directory,
             "candidate_config_hash": self.candidate_config_hash,
+            "document_snapshots": [
+                snapshot.content_fingerprint() for snapshot in self.document_snapshots
+            ],
         }
 
     def compute_hash(self) -> str:
@@ -206,6 +217,9 @@ class PendingAutoProvisioningRequest:
     plan_id: Optional[str] = None
     state: PendingAutoProvisioningState = PendingAutoProvisioningState.DETECTED
     attempts: int = 0
+    # Phase G.4: document snapshots the user showed intent to convert, carried
+    # through detection/plan/approval/resumption and bound into the plan hash.
+    document_snapshots: Tuple["DocumentInputSnapshot", ...] = ()
 
     def advanced(self, state: PendingAutoProvisioningState, plan_id=None, attempts=None):
         return replace(

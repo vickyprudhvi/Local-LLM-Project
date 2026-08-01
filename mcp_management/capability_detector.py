@@ -319,6 +319,19 @@ def _extension_of(path_text):
     return m.group(0).lower() if m else None
 
 
+def extract_document_paths(user_text):
+    """Return the ordered, deduplicated local paths extracted from `user_text`.
+
+    Lexical/side-effect-free — the files need not exist at extraction time.
+    Used by the Phase G.4 provisioning flow to bind document snapshots into the
+    approval plan.
+    """
+    if not isinstance(user_text, str) or not user_text.strip():
+        return ()
+    paths, _path_types, _has_url = _find_local_paths(user_text[:MAX_REQUEST_CHARS])
+    return tuple(paths)
+
+
 def _extend_unquoted_path_to_known_extension(text, start):
     """Grow an UNQUOTED path beginning at `start` across space-separated tokens
     until the accumulated string ends with a recognized extension (Task 3):

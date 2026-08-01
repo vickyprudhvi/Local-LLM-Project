@@ -34,8 +34,8 @@ def test_repository_catalog_is_valid_and_pinned():
     assert catalog.entries, "the shipped catalog must contain at least one entry"
     for entry in catalog.entries.values():
         assert entry.transport == "stdio"
-        assert entry.installer_type == "npm"
-        # Exact pin: three numeric components, no range/tag/wildcard.
+        assert entry.installer_type in ("npm", "python_venv")
+        # Exact pin: three numeric components before any pre-release suffix, no range/tag/wildcard.
         assert entry.package_version.count(".") == 2
         for token in ("latest", "*", "^", "~", ">", "<", "x"):
             assert token not in entry.package_version
