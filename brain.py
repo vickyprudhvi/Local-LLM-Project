@@ -78,12 +78,20 @@ def trim_history_tool_aware(history, turns):
     return flattened
 
 
-def ask_local_raw(messages, tools=None, timeout=120):
+def ask_local_raw(messages, tools=None, timeout=120, options=None, response_format=None):
     """The single Ollama /api/chat request builder.
 
     `messages` is the fully-assembled message list (system + history + user, and,
     inside the tool loop, assistant tool-call and tool-result messages). `tools`,
     when truthy, is a list of Ollama tool schemas; it is omitted entirely otherwise.
+
+    `options`, when given, is passed straight through to Ollama's own `options`
+    object (e.g. `{"num_predict": 600}` to bound the response to ~600 output
+    tokens) — additive and optional, so every existing caller that omits it is
+    unaffected. `response_format`, when given as `"json"`, sets Ollama's
+    `format: "json"` so the model is constrained to emit a JSON object; callers
+    that need strict machine-parseable output (see finance/research_pipeline.py)
+    should pass this rather than relying on prompt wording alone.
 
     Returns the COMPLETE assistant message (including any tool_calls) plus metrics:
         {"message": {...}, "metrics": {...}, "ok": bool}
@@ -98,6 +106,10 @@ def ask_local_raw(messages, tools=None, timeout=120):
     }
     if tools:
         payload["tools"] = tools
+    if options:
+        payload["options"] = options
+    if response_format:
+        payload["format"] = response_format
 
     try:
         resp = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=timeout)
@@ -116,6 +128,14 @@ def ask_local_raw(messages, tools=None, timeout=120):
         "prompt_tokens": data.get("prompt_eval_count"),
         "completion_tokens": data.get("eval_count"),
         "eval_duration": data.get("eval_duration"),
+        # Ollama sets done_reason="length" when the response hit `num_predict`
+        # and was CUT OFF mid-token. That is the difference between "the model
+        # produced bad JSON" and "the model produced fine JSON and we
+        # truncated it" — the same symptom, opposite fixes (reword vs. ask for
+        # less). It was being dropped here, so finance/research_pipeline.py
+        # saw only a generic parse error and had no way to tell them apart.
+        "done_reason": data.get("done_reason"),
+        "truncated": data.get("done_reason") == "length",
     }
     console.print(f"[dim]local metrics: {metrics}[/dim]")
     return {"message": message, "metrics": metrics, "ok": True}

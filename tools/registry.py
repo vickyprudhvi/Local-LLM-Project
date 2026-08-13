@@ -169,14 +169,33 @@ class ToolRegistry:
         if limit is None:
             limit = config.max_shortlist_tools()
         candidates = self.enabled_definitions()  # llm_callable + enabled, name-sorted
+        query_tokens = _tokenize(user_message)
+
+        # Opt-in relevance floor (Phase H.1). The tie-break below is name-ascending,
+        # so when NOTHING in the query matches, the alphabetically-first tools fill
+        # the shortlist regardless of topic. For most built-ins that is harmless.
+        # For a metered external provider it is not: offering market-data tools on
+        # "what is the capital of France" invites a call that costs real quota.
+        # A tool opts in with `shortlist_requires_relevance = True`; every existing
+        # tool leaves it False and its behaviour is unchanged.
+        gated = [d for d in candidates
+                 if self._requires_relevance(d.name) and not _relevance(query_tokens, d)]
+        if gated:
+            gated_names = {d.name for d in gated}
+            candidates = [d for d in candidates if d.name not in gated_names]
+
         if len(candidates) <= limit:
             return candidates
-        query_tokens = _tokenize(user_message)
         ranked = sorted(candidates, key=lambda d: (-_relevance(query_tokens, d), d.name))
         return ranked[:limit]
 
+    def _requires_relevance(self, name) -> bool:
+        tool = self._tools.get(name)
+        return bool(getattr(tool, "shortlist_requires_relevance", False))
 
-def default_registry(include_internet=None, include_clone=None, include_repo=None) -> ToolRegistry:
+
+def default_registry(include_internet=None, include_clone=None, include_repo=None,
+                     include_finance=None) -> ToolRegistry:
     """A fresh registry with the built-in tools registered.
 
     Phase 1 tools are always registered. Phase 2A internet/GitHub tools when internet
@@ -224,6 +243,18 @@ def default_registry(include_internet=None, include_clone=None, include_repo=Non
         from tools.repo_tools import ALL_REPO_TOOL_CLASSES
         for tool_cls in ALL_REPO_TOOL_CLASSES:
             reg.register(tool_cls())
+
+    # Phase H.1: finance. The market-data tools need internet; the DCF tool is
+    # pure local arithmetic and stays available without it, so a user can still
+    # value a company from numbers they supply themselves.
+    if include_finance is None:
+        include_finance = config.market_data_enabled()
+    from tools.finance_tools import ALL_FINANCE_TOOL_CLASSES, OFFLINE_FINANCE_TOOL_CLASSES
+    finance_classes = (ALL_FINANCE_TOOL_CLASSES
+                       if (include_finance and include_internet)
+                       else OFFLINE_FINANCE_TOOL_CLASSES)
+    for tool_cls in finance_classes:
+        reg.register(tool_cls())
     return reg
 
 
