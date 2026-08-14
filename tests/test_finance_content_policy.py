@@ -46,14 +46,29 @@ def test_does_not_flag_bare_verdict_words():
     "share buy back") observed across GE/HOOD/UNH/AMD."""
     for text in (
         "This is a STRONG BUY.", "This is a strong sell.",
-        "Investors should buy this stock.", "Investors should sell this stock.",
         "Overall: AVOID.", "Recommendation: hold",
-        "Investors should HOLD given that markets are volatile.",
         "The company announced a share buy back program.",
         "Retail sell-through improved this quarter.",
         "The 2.8% discrepancy requires careful handling to avoid per-share metric errors.",
     ):
         assert scan_for_prohibited_directives(text) == [], text
+
+
+@pytest.mark.parametrize("text", [
+    "Investors should buy this stock.",
+    "Investors should sell this stock.",
+    "Investors should HOLD given that markets are volatile.",
+])
+def test_a_verdict_aimed_at_the_reader_is_a_violation(text):
+    """Phase H.5, Phase 4 -- these MOVED from the allowed list above.
+
+    A bare verdict word is a characterization and stays allowed ("Overall:
+    AVOID.", "Recommendation: hold"). "Investors should buy this stock" is
+    not a characterization, it is an instruction with the reader as its
+    subject -- the Phase H.3 harm with different vocabulary. The tool may
+    say what the evidence supports; it may not tell the reader what to do.
+    """
+    assert scan_for_prohibited_directives(text) == ["reader-directed action"], text
 
 
 def test_flags_position_sizing_and_order_language():
@@ -97,10 +112,34 @@ def test_holding_dependent_pattern_does_not_swallow_the_logical_hold_that_sense(
     assumption constant" is a modeling construction, not a question about the
     reader's portfolio."""
     for text in (
-        "If you hold that assumption constant, the model still works.",
-        "If you hold true to the base case, the value is $50.",
+        "Holding that assumption constant, the model still works.",
+        "If the base case holds true, the value is $50.",
     ):
         assert scan_for_prohibited_directives(text) == [], text
+
+
+@pytest.mark.parametrize("text", [
+    "If you hold that assumption constant, the model still works.",
+    "If you hold true to the base case, the value is $50.",
+])
+def test_the_modelling_sense_still_trips_the_second_person_rule(text):
+    """Phase H.5, Phase 4 -- a DELIBERATE narrowing, recorded here so it is
+    reversible rather than accidental.
+
+    CP-006's "hold true/constant/that" lookahead exempts the modelling sense
+    of "hold", and it still does. But CP-014 bans SECOND PERSON outright in
+    prose, and these sentences address the reader regardless of what "hold"
+    means in them. Stage output describes a company TO a reader; it has no
+    reason to address them, and the impersonal phrasing asserted in the test
+    above is always available.
+
+    The cost is real: CP-014 is fabrication-class, so a stage that writes
+    this fails outright rather than being quarantined. If that proves too
+    strict in practice, the fix is to require a directive or a holding
+    context alongside the second person, not to add a carve-out for this
+    phrasing -- carve-outs are what this rework exists to stop.
+    """
+    assert "reader-addressed second person" in scan_for_prohibited_directives(text)
 
 
 def test_flags_price_target_language():

@@ -269,6 +269,21 @@ _SHARED_GUARDRAILS = (
     "data available. If it is not CURRENT, the modeled value does not fully reflect the "
     "company's latest reported position — treat conclusions drawn from it with "
     "correspondingly less confidence, and say why.\n"
+    # Phase H.5, Phase 4: the addressing rules are FABRICATION-class, so a
+    # stage that breaks them fails outright. Stating the rule is therefore
+    # not optional -- enforcing a constraint the model was never given is how
+    # you manufacture failures.
+    # Stated WITHOUT demonstrating the violation. An earlier draft spelled out
+    # the banned pronouns and gave a worked counter-example -- which is the
+    # same priming that made the old repair prompt escalate: showing the model
+    # the exact construction is how it learns to write it.
+    "- NEVER address the reader. Write ABOUT the company, in the third person, never TO a "
+    "person. Use no second-person pronouns anywhere. Do not state what a reader, an "
+    "investor or a shareholder ought to do, and do not open a sentence with an "
+    "instruction to trade. This system cannot know who is reading, what they already own, or what "
+    "their circumstances are, so any such sentence would be invented rather than "
+    "analysed. Describe what the evidence shows and let the separate 'recommendation' "
+    "field carry the characterization on its own.\n"
     "- Respond with ONLY a single JSON object matching the schema given. No prose "
     "before or after, no markdown code fences, no explanation of the schema.\n"
 )

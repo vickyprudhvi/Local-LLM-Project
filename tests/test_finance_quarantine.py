@@ -35,8 +35,9 @@ H3_STRING = ("If you do not currently hold a position: AVOID. "
 # Rule identity
 # ---------------------------------------------------------------------------
 
-def test_all_47_patterns_have_a_stable_id_and_a_severity():
-    assert len(cp.RULES) == 13
+def test_every_pattern_has_a_stable_id_and_a_severity():
+    # 13 original + 3 added by Phase 4 (addressing-based fabrication).
+    assert len(cp.RULES) == 16
     assert len(cv.RULES) == 34
     for rule in list(cp.RULES) + list(cv.RULES):
         assert rule.rule_id
@@ -49,17 +50,30 @@ def test_rule_ids_are_unique_within_each_module():
         assert len(ids) == len(set(ids))
 
 
-def test_the_fabrication_set_is_exactly_the_ten_information_lacking_rules():
-    """The split the whole phase turns on. `reader-directed investment
-    imperative` is fabrication, NOT overstatement: it addresses the reader as
-    an agent who should act, which is the Phase H.3 harm mechanism."""
+def test_the_fabrication_set_is_exactly_the_information_lacking_rules():
+    """The split the whole rework turns on. Fabrication guards sentences with
+    no true version -- the system cannot know the reader's capital, or
+    whether they hold anything. Phase 4 added three that ban the ADDRESSING
+    rather than a topic."""
     fabrication = {r.label for r in cp.RULES if r.severity == cp.Severity.FABRICATION}
     assert fabrication == {
+        # topic bans (original)
         "position size", "entry price", "exit price", "stop loss", "target allocation",
         "holding-dependent phrasing", "order instructions", "trading instructions",
         "reader-directed investment imperative",
+        # addressing bans (Phase 4)
+        "reader-addressed second person", "reader-directed action",
+        "bare trading imperative",
     }
     assert all(r.severity == cp.Severity.OVERSTATEMENT for r in cv.RULES)
+
+
+def test_the_phase_four_addressing_rules_are_prose_only():
+    """Invariant: `recommendation` is an enum whose members include `buy`,
+    `hold`, `sell` and `avoid` -- bare imperative verbs. A rule applied to
+    every string would make every real recommendation cascade-fatal."""
+    prose_only = {r.rule_id for r in cp.RULES if r.prose_only}
+    assert prose_only == {"CP-014", "CP-015", "CP-016"}
 
 
 def test_the_rule_table_fails_loudly_if_it_drifts_from_the_pattern_list():
@@ -170,23 +184,22 @@ def test_second_person_variants_of_the_h3_string_are_rejected(variant):
     assert any(f.severity == cp.Severity.FABRICATION for f in findings), variant
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "KNOWN INVARIANT-1 GAP, pre-existing, to be closed by Phase 4. CP-006 only "
-    "matches the SECOND-PERSON framing ('if you ... hold'). The identical harm "
-    "phrased in the third person escapes entirely. Deliberately NOT fixed here "
-    "by widening the regex: adding vocabulary is the anti-pattern this rework "
-    "exists to end, and Phase 4 closes it structurally by banning the "
-    "addressing itself. strict=True so this flips to a FAILURE the moment "
-    "Phase 4 lands, forcing the marker to be removed rather than lingering."))
 @pytest.mark.parametrize("variant", [
     "For readers who currently hold a position: hold.",
     "Investors who already hold shares should trim.",
     "Those holding a position may want to exit.",
+    "Anyone who owns the stock should reduce exposure.",
+    "Investors are advised to avoid the name.",
 ])
-def test_third_person_holding_conditionals_are_not_yet_rejected(variant):
-    """Invariant 1, unmet. Output conditioned on the reader's holding status
-    is the Phase H.3 harm regardless of grammatical person -- the system
-    cannot know whether the reader holds a position either way."""
+def test_third_person_holding_conditionals_are_rejected(variant):
+    """Invariant 1, CLOSED by Phase 4.
+
+    These carried `xfail(strict=True)` markers through phases 2 and 3: output
+    conditioned on the reader's holding status is the Phase H.3 harm
+    regardless of grammatical person, and CP-006 only matched the
+    second-person framing. Phase 4 bans the ADDRESSING rather than the
+    vocabulary, which catches the shape in any person.
+    """
     findings = cp.find_prohibited_directives(variant)
     assert any(f.severity == cp.Severity.FABRICATION for f in findings), variant
 

@@ -92,6 +92,13 @@ class Rule:
     pattern: "re.Pattern"
     label: str
     severity: str
+    # Phase H.5, Phase 4: applies ONLY to prose fields, never to a field
+    # whose value is a closed enum. `recommendation` is validated against
+    # ("buy", "hold", "sell", "avoid", "insufficient_evidence") -- four of
+    # those five ARE bare imperative verbs at position zero, so a rule that
+    # scanned every string would make every real recommendation
+    # cascade-fatal, deleting a feature this project deliberately built.
+    prose_only: bool = False
 
 _PROHIBITED_PATTERNS = [
     # Personal-use verdict patch: the bare verdict words -- STRONG BUY,
@@ -184,6 +191,83 @@ _PROHIBITED_PATTERNS = [
      "reader-directed investment imperative"),
     (re.compile(r"\b(?:you\s+should|investors?\s+should)\s+invest\b", re.IGNORECASE),
      "reader-directed investment imperative"),
+    # -----------------------------------------------------------------
+    # Phase H.5, Phase 4 -- FABRICATION DEFINED BY ADDRESSING, NOT TOPIC.
+    #
+    # The eight original fabrication patterns are TOPIC bans: a list of
+    # things not to mention. The Phase H.3 incident was not about a topic.
+    # "If you do not currently hold a position: AVOID. If you already hold a
+    # position: SELL." is harmful because it addresses the reader as an agent
+    # who holds a position and should act -- and this system cannot know
+    # either of those things. Banning the addressing catches the shape rather
+    # than enumerating its vocabulary, which is the whole point of this
+    # rework.
+    #
+    # The gap that made this necessary: the original CP-006 matches only the
+    # SECOND-PERSON framing. Three third-person variants escaped entirely and
+    # were carried as xfail markers through phases 2 and 3:
+    #     "For readers who currently hold a position: hold."
+    #     "Investors who already hold shares should trim."
+    #     "Those holding a position may want to exit."
+    #
+    # The design point, learned by testing candidates against real prose: the
+    # harm is a directive whose SUBJECT IS THE READER. Neither half alone
+    # works. "The company should trim its cost base" is a directive with a
+    # different subject and must pass; "Investors who hold the stock have
+    # seen a 20% decline" references holdings but is descriptive and must
+    # pass. Only the conjunction is the violation.
+    #
+    # -- CP-014: second person, anywhere in prose.
+    # Deliberately broad. Stage output describes a company TO a reader; it
+    # never addresses them. No legitimate use was found across the six
+    # schemas.
+    (re.compile(r"\b(?:you|your|yours|yourself)\b", re.IGNORECASE),
+     "reader-addressed second person"),
+    # -- CP-015: a directive whose subject is the reader.
+    (re.compile(
+        r"\b(?:you|readers?|investors?|shareholders?|holders?|anyone|those|whoever)\b"
+        r"[^.;!?]{0,60}?"
+        r"\b(?:should|must|ought\s+to|need\s+to|may\s+want\s+to|might\s+want\s+to|"
+        r"are\s+advised\s+to|are\s+encouraged\s+to)\b"
+        r"[^.;!?]{0,20}?"
+        r"\b(?:buy|sell|hold|avoid|add|trim|exit|enter|reduce|increase|accumulate|"
+        r"liquidate|divest|purchase)\b",
+        re.IGNORECASE),
+     "reader-directed action"),
+    # -- CP-016: a bare trading imperative opening a clause.
+    #
+    # The verb list is NARROWER than the phase spec proposed. 'consider',
+    # 'take', 'wait', 'increase' and 'reduce' were dropped after they
+    # false-positived on ordinary analysis prose ("Consider the wide scenario
+    # spread when weighing this", "Increase in receivables drove the swing").
+    # They remain covered by CP-015, where a reader subject disambiguates
+    # them. The trailing lookahead requires an object marker or end of
+    # clause, so a compound noun ("Exit rates improved", "Add-on
+    # acquisitions", "Hold-to-maturity securities") is not an imperative.
+    (re.compile(
+        r"(?:"
+        # (a) opening the text outright -- "Sell into strength."
+        r"^\s*(?:buy|sell|hold|avoid|add|trim|exit|enter)"
+        r"(?=[.!?;:,]|\s+(?:into|out|at|on|to|the|this|that|these|those|it|some|all|"
+        r"any|more|now|today|immediately|here|your|shares?|stock|position|exposure)\b)"
+        r"|"
+        # (b) after a colon/semicolon whose clause REFERENCES THE READER --
+        # "For readers who currently hold a position: hold."
+        #
+        # The reader referent is required. Without it this branch also
+        # flagged "Overall: AVOID." and "Recommendation: hold", which the
+        # personal-use verdict patch deliberately allows: a bare verdict is
+        # a characterization the tool now emits as a first-class enum, and
+        # banning it in prose would re-impose a rule this project reversed
+        # on purpose. What makes the H.3 shape different is not the colon,
+        # it is the reader on the other side of it.
+        r"\b(?:you|your|readers?|investors?|shareholders?|holders?|anyone|those|whoever)\b"
+        r"[^.!?]{0,80}?[:;]\s*(?:buy|sell|hold|avoid|add|trim|exit|enter)"
+        r"(?=[.!?;:,]|\s+(?:into|out|at|on|to|the|this|that|these|those|it|some|all|"
+        r"any|more|now|today|immediately|here|your|shares?|stock|position|exposure)\b)"
+        r")",
+        re.IGNORECASE),
+     "bare trading imperative"),
 ]
 
 # Stable rule ids and severities for the patterns above, in list order.
@@ -201,19 +285,19 @@ _CONTENT_POLICY_RULE_SPECS = (
     # -- FABRICATION: no true version of the sentence exists, because the
     # system lacks the information (the reader's capital, risk tolerance,
     # time horizon, or whether they hold a position). Cascade-fatal.
-    ("CP-001", "position size", Severity.FABRICATION),
-    ("CP-002", "entry price", Severity.FABRICATION),
-    ("CP-003", "exit price", Severity.FABRICATION),
-    ("CP-004", "stop loss", Severity.FABRICATION),
-    ("CP-005", "target allocation", Severity.FABRICATION),
-    ("CP-006", "holding-dependent phrasing", Severity.FABRICATION),
-    ("CP-007", "order instructions", Severity.FABRICATION),
-    ("CP-008", "trading instructions", Severity.FABRICATION),
+    ("CP-001", "position size", Severity.FABRICATION, False),
+    ("CP-002", "entry price", Severity.FABRICATION, False),
+    ("CP-003", "exit price", Severity.FABRICATION, False),
+    ("CP-004", "stop loss", Severity.FABRICATION, False),
+    ("CP-005", "target allocation", Severity.FABRICATION, False),
+    ("CP-006", "holding-dependent phrasing", Severity.FABRICATION, False),
+    ("CP-007", "order instructions", Severity.FABRICATION, False),
+    ("CP-008", "trading instructions", Severity.FABRICATION, False),
     # -- OVERSTATEMENT: a real claim, phrased more strongly than the evidence
     # carries. Quarantined, not fatal.
-    ("CP-009", "price target", Severity.OVERSTATEMENT),
-    ("CP-010", "price target", Severity.OVERSTATEMENT),
-    ("CP-011", "guarantee", Severity.OVERSTATEMENT),
+    ("CP-009", "price target", Severity.OVERSTATEMENT, False),
+    ("CP-010", "price target", Severity.OVERSTATEMENT, False),
+    ("CP-011", "guarantee", Severity.OVERSTATEMENT, False),
     # -- FABRICATION, and NOT the 8 originally specced.
     #
     # These two address the reader as an agent who should act ("you should
@@ -224,9 +308,43 @@ _CONTENT_POLICY_RULE_SPECS = (
     # Phase 4. They are cascade-fatal from here, which also makes Phase 4's
     # general addressing rule a GENERALIZATION of an existing ban rather
     # than a re-tightening of a relaxed one.
-    ("CP-012", "reader-directed investment imperative", Severity.FABRICATION),
-    ("CP-013", "reader-directed investment imperative", Severity.FABRICATION),
+    ("CP-012", "reader-directed investment imperative", Severity.FABRICATION, False),
+    ("CP-013", "reader-directed investment imperative", Severity.FABRICATION, False),
+    # -- Phase 4: fabrication defined by ADDRESSING. Prose-only, because four
+    # of the five `recommendation` enum members are bare imperative verbs.
+    ("CP-014", "reader-addressed second person", Severity.FABRICATION, True),
+    ("CP-015", "reader-directed action", Severity.FABRICATION, True),
+    ("CP-016", "bare trading imperative", Severity.FABRICATION, True),
 )
+
+
+# Leaf field names whose value is a closed enum, an identifier, or a
+# structured token -- never prose. Phase 4's addressing rules skip these.
+#
+# An ALLOWLIST OF NON-PROSE, not of prose, so the fail-safe direction is
+# "scanned": a prose field added to a schema later is checked by default
+# rather than silently exempt. A new ENUM field not listed here would be
+# scanned and could false-positive -- loud, and preferable to a silent gap.
+NON_PROSE_FIELDS = frozenset({
+    "recommendation", "research_stance", "valuation_view", "overall_risk",
+    "aggregated_risk", "model_risk", "evidence_balance", "severity",
+    "confidence", "claim_type", "claim_id", "role",
+    "evidence_cited", "evidence_ids",
+})
+
+
+def _leaf_name(field_path: str) -> str:
+    return field_path.split(".")[-1].split("[")[0] if field_path else ""
+
+
+def _is_prose_field(field_path: str) -> bool:
+    """Unknown context counts as prose.
+
+    `scan_for_prohibited_directives(text)` is called on bare strings with no
+    field path at all (the single-shot fallback report path). Treating an
+    unknown context as non-prose would silently exempt it.
+    """
+    return _leaf_name(field_path) not in NON_PROSE_FIELDS
 
 
 def _build_rules(patterns, specs, module_label) -> Tuple[Rule, ...]:
@@ -236,7 +354,7 @@ def _build_rules(patterns, specs, module_label) -> Tuple[Rule, ...]:
             f"{module_label}: {len(patterns)} patterns but {len(specs)} rule specs. "
             "Every pattern needs an explicit, stable rule id and severity.")
     rules = []
-    for (pattern, label), (rule_id, expected_label, severity) in zip(patterns, specs):
+    for (pattern, label), (rule_id, expected_label, severity, prose_only) in zip(patterns, specs):
         if label != expected_label:
             raise RuntimeError(
                 f"{module_label}: rule {rule_id} expects label {expected_label!r} but the "
@@ -245,7 +363,8 @@ def _build_rules(patterns, specs, module_label) -> Tuple[Rule, ...]:
                 "ids, or every existing quarantine record changes meaning.")
         if severity not in Severity.ALL:
             raise RuntimeError(f"{module_label}: rule {rule_id} has unknown severity {severity!r}.")
-        rules.append(Rule(rule_id=rule_id, pattern=pattern, label=label, severity=severity))
+        rules.append(Rule(rule_id=rule_id, pattern=pattern, label=label,
+                          severity=severity, prose_only=prose_only))
     return tuple(rules)
 
 
@@ -421,8 +540,11 @@ def find_prohibited_directives(text, field_path: str = "") -> List[Finding]:
     if not isinstance(text, str) or not text:
         return []
     disclaimed = _is_disclaimed(text)
+    is_prose = _is_prose_field(field_path)
     findings: List[Finding] = []
     for rule in RULES:
+        if rule.prose_only and not is_prose:
+            continue
         match = rule.pattern.search(text)
         if match is None:
             continue
