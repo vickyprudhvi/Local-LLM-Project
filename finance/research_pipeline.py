@@ -1801,7 +1801,12 @@ def _run_stage(stage_name, system_prompt, user_prompt, validator, ask_local_fn) 
             messages,
             options={"num_predict": config.research_stage_max_output_tokens(stage_name)},
             response_format="json",
-            timeout=config.research_stage_timeout_seconds(),
+            # Per-stage, and derived from THIS stage's budget. Passing the
+            # stage-less default here was the same drift the CF patch fixes
+            # in config: a stage would get research_manager-sized headroom
+            # while a lighter stage got more time than it can ever use, and
+            # the heaviest stage got less than its own budget requires.
+            timeout=config.research_stage_timeout_seconds(stage_name),
         )
     except Exception as e:  # noqa: BLE001 — a stage must never crash the pipeline
         return StageCheckpoint(stage_name, StageStatus.FAILED, error=f"call failed: {type(e).__name__}",

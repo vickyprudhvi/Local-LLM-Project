@@ -266,3 +266,53 @@ def test_brain_surfaces_the_truncation_signal():
 
     assert raw["metrics"]["done_reason"] == "length"
     assert raw["metrics"]["truncated"] is True
+
+
+# ---------------------------------------------------------------------------
+# CF corrective patch: the timeout must cover the budget
+# ---------------------------------------------------------------------------
+
+_STAGES = ("bull_researcher", "bear_researcher", "rebuttal_round",
+           "research_manager", "risk_reviewer", "final_investment_synthesizer")
+
+
+@pytest.mark.parametrize("stage", _STAGES)
+def test_every_stage_timeout_covers_its_own_output_budget(stage):
+    """These were independent constants and they drifted apart.
+
+    Measured live: research_manager's budget was 20,000 tokens, the model ran
+    at 60 tok/s, so using the budget took 333s -- against a 300s timeout. A
+    stage allowed to generate N tokens must be allowed time to generate them,
+    or raising the budget to fix truncation silently converts truncation
+    failures into timeout failures. That is exactly what happened: the budget
+    went up in the morning, the timeout was raised alongside it by guesswork
+    rather than arithmetic, and the first long run hit the gap.
+
+    Asserted at a pessimistic 40 tok/s, below anything measured (60 observed
+    on the configured cloud model, ~90 earlier the same day), because cloud
+    latency varies with remote load.
+    """
+    budget = config.research_stage_max_output_tokens(stage)
+    timeout = config.research_stage_timeout_seconds(stage)
+    assert timeout >= budget / 40, (
+        f"{stage}: {budget} tokens needs >= {budget / 40:.0f}s at 40 tok/s, "
+        f"timeout is {timeout}s")
+
+
+def test_raising_the_budget_raises_the_timeout_with_it(monkeypatch):
+    """The relationship holds under configuration, not just at defaults."""
+    monkeypatch.setenv("RESEARCH_STAGE_MAX_OUTPUT_TOKENS", "40000")
+    for stage in _STAGES:
+        budget = config.research_stage_max_output_tokens(stage)
+        assert config.research_stage_timeout_seconds(stage) >= budget / 40, stage
+
+
+def test_an_explicit_timeout_acts_as_a_floor_not_a_ceiling(monkeypatch):
+    """A configured value may RAISE the limit but must not silently sit below
+    what the budget requires -- that is the drift this patch removes."""
+    monkeypatch.setenv("RESEARCH_STAGE_MAX_OUTPUT_TOKENS", "20000")
+    monkeypatch.setenv("RESEARCH_STAGE_TIMEOUT_SECONDS", "30")
+    assert config.research_stage_timeout_seconds("research_manager") >= 20000 * 1.25 / 40
+
+    monkeypatch.setenv("RESEARCH_STAGE_TIMEOUT_SECONDS", "9000")
+    assert config.research_stage_timeout_seconds("research_manager") == 9000

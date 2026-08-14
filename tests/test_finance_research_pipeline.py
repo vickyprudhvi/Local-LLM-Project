@@ -1224,7 +1224,8 @@ def test_every_stage_call_requests_json_format_and_its_own_bounded_budget():
         assert kwargs.get("response_format") == "json"
         assert kwargs.get("options") == {
             "num_predict": config.research_stage_max_output_tokens(stage)}
-        assert kwargs.get("timeout") == config.research_stage_timeout_seconds()
+        # Per-stage, like the budget it is derived from (CF corrective patch).
+        assert kwargs.get("timeout") == config.research_stage_timeout_seconds(stage)
 
 
 def test_research_manager_gets_the_largest_output_budget():
@@ -1244,7 +1245,12 @@ def test_configured_token_and_timeout_budgets_actually_propagate(monkeypatch):
         stage = _stage_of(messages)
         assert kwargs["options"] == {
             "num_predict": config.research_stage_max_output_tokens(stage)}
-        assert kwargs["timeout"] == 17
+        # CF corrective patch: the configured timeout is a FLOOR, not a
+        # ceiling. 17s cannot cover a 1,000-token budget, so the derived
+        # value wins -- that is the whole point, since a timeout silently
+        # below what the budget needs turns truncation into a timeout.
+        assert kwargs["timeout"] == config.research_stage_timeout_seconds(stage)
+        assert kwargs["timeout"] > 17
     # The base setting genuinely drives the per-stage values.
     assert config.research_stage_max_output_tokens("research_manager") == 1250
     assert config.research_stage_max_output_tokens("rebuttal_round") == 600

@@ -423,7 +423,15 @@ def research_stage_max_output_tokens(stage=None):
     and the final synthesizer carries the recommendation plus its
     justification. `rebuttal_round` needs a fraction of that.
     """
-    base = _int("RESEARCH_STAGE_MAX_OUTPUT_TOKENS", 16000)
+    # 12,000, not 16,000. The largest usage ever MEASURED on this pipeline
+    # is 9,032 completion tokens (research_manager, live WM), so this is
+    # ~33% headroom over the observed peak and 50% above the 8,000 that
+    # demonstrably truncated. 16,000 was picked for comfort rather than
+    # from data, and it pushed the derived timeout (see
+    # `research_stage_timeout_seconds`) to 560s per attempt -- nearly half
+    # an hour of waiting across three attempts on a stage that is simply
+    # stuck.
+    base = _int("RESEARCH_STAGE_MAX_OUTPUT_TOKENS", 12000)
     if not stage:
         return base
     override = _int(f"RESEARCH_STAGE_MAX_OUTPUT_TOKENS_{stage.upper()}", 0)
@@ -446,12 +454,41 @@ _STAGE_OUTPUT_BUDGET_SCALE = {
 }
 
 
-def research_stage_timeout_seconds():
-    """COR corrective patch: raised alongside research_stage_max_output_tokens
-    -- a larger output budget needs more wall-clock time to generate, and a
-    live run observed an actual read timeout at the old 90s on a large
-    (research_manager-sized) prompt even before this change."""
-    return _int("RESEARCH_STAGE_TIMEOUT_SECONDS", 180)
+# The throughput a stage's timeout is sized against. Deliberately BELOW
+# anything measured -- 60 tok/s observed on the configured cloud model, and
+# ~90 tok/s earlier the same day. Cloud latency varies with remote load, so
+# the floor assumes a bad day rather than a good one.
+_ASSUMED_MIN_TOKENS_PER_SECOND = 40
+# Prompt evaluation, queueing and network, on top of generation.
+_STAGE_TIMEOUT_OVERHEAD_SECONDS = 60
+
+
+def research_stage_timeout_seconds(stage=None):
+    """Wall-clock ceiling for one stage, DERIVED FROM ITS OUTPUT BUDGET.
+
+    CF corrective patch. These were two independent constants and they drifted
+    apart, which is a bug the moment either moves:
+
+        research_manager budget   20,000 tokens
+        measured throughput           60 tok/s
+        time to use the budget       333 s
+        configured timeout           300 s   <-- times out before it can finish
+
+    A stage allowed to generate N tokens must be allowed the time to generate
+    them; otherwise raising the budget to fix truncation silently converts
+    truncation failures into timeout failures, which is what happened here.
+    The budget was raised this morning to fix research_manager truncating at
+    8,000 tokens, the timeout was raised alongside it by guesswork rather than
+    arithmetic, and the first long CF run hit the gap.
+
+    So the timeout is now a FUNCTION of the budget, and the explicit setting
+    acts as a floor rather than a ceiling -- a configured value can raise the
+    limit but can no longer silently sit below what the budget requires.
+    """
+    configured = _int("RESEARCH_STAGE_TIMEOUT_SECONDS", 180)
+    budget = research_stage_max_output_tokens(stage)
+    derived = int(budget / _ASSUMED_MIN_TOKENS_PER_SECOND) + _STAGE_TIMEOUT_OVERHEAD_SECONDS
+    return max(configured, derived)
 
 
 def stock_analysis_synthesis_timeout_seconds():
