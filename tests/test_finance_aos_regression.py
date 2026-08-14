@@ -539,7 +539,15 @@ def test_guidance_absence_does_not_fail_the_workflow(wired, monkeypatch):
     )
     compact = build_compact_synthesis_payload(result)
     text = render_compact_report(result, compact, pipeline_result=None)
-    assert "Management guidance: unavailable" in text
+    # DIS/CASY corrective patch: the report states what it actually knows.
+    # Ingestion is disabled here, so no release was read at all -- distinct
+    # from having read some and extracted nothing, and distinct again from
+    # the company having published none.
+    assert "Management guidance: not retrieved" in text
+    # Scoped to the guidance line: "unavailable" legitimately appears
+    # elsewhere in this report (research stance, valuation view) because no
+    # pipeline ran.
+    assert "Management guidance: unavailable" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -592,3 +600,68 @@ def test_an_annual_balance_sheet_is_labelled_as_a_fiscal_year_end():
     assert "Balance sheet: 30 Apr 2026 (fiscal year end, latest annual filing)" in text
     assert "trailing twelve months to 30 Apr 2026" in text
     assert "Q2" not in text
+
+
+# ---------------------------------------------------------------------------
+# DIS/CASY corrective patch: say what is known, not more
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("examined,expected", [
+    (None, "Management guidance: not retrieved"),
+    (0, "Management guidance: no SEC earnings release found"),
+    (1, "Management guidance: none extracted (1 SEC earnings release examined)"),
+    (3, "Management guidance: none extracted (3 SEC earnings releases examined)"),
+])
+def test_absent_guidance_states_only_what_is_known(examined, expected):
+    """"Unavailable" asserted the COMPANY published no guidance. What is
+    actually known is that the EXTRACTOR found none.
+
+    Both live counter-examples had published guidance the report denied:
+
+        DIS   "We continue to expect fiscal 2026 adjusted EPS growth of
+               approximately 12%"  -- a single value; this extractor requires
+               a range, which is the guard that keeps reported actuals out
+        CASY  "inside same-store sales to increase 2% to 5%"  -- a genuine
+               range, missed because the metric vocabulary did not cover
+               same-store sales
+
+    Neither is a wording quibble: the report fell back to history while
+    stating something that reads as a fact about the company.
+    """
+    from finance.workflow import _valuation_basis_lines
+
+    lines = _valuation_basis_lines({
+        "dcf_financial_basis": {"base_revenue_basis": "ttm_calculation",
+                                "flow_period_end": "2026-06-30",
+                                "balance_sheet_as_of": "2026-06-30",
+                                "balance_sheet_source": "quarterly_sec_filing"},
+        "management_guidance": None,
+        "guidance_releases_examined": examined,
+    })
+    text = "\n".join(lines)
+    assert expected in text
+    assert "Management guidance: unavailable" not in text
+
+
+def test_none_and_zero_releases_are_not_conflated():
+    """None means ingestion never ran; 0 means it ran and found no earnings
+    release. Collapsing them erases the distinction the field exists for."""
+    from finance.workflow import _valuation_basis_lines
+
+    def line(examined):
+        return "\n".join(_valuation_basis_lines({
+            "dcf_financial_basis": {"balance_sheet_as_of": "2026-06-30",
+                                    "balance_sheet_source": "quarterly_sec_filing"},
+            "management_guidance": None,
+            "guidance_releases_examined": examined}))
+
+    assert line(None) != line(0)
+
+
+def test_present_guidance_is_still_stated_plainly(wired):
+    """The positive case is unchanged -- this patch only touches absence."""
+    result = run_aos(wired)
+    compact = build_compact_synthesis_payload(result)
+    text = render_compact_report(result, compact, pipeline_result=None)
+    assert "Management guidance: FY2026 current guidance" in text
+    assert "none extracted" not in text

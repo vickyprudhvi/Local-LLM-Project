@@ -758,11 +758,22 @@ def gather_yahoo_and_sec(executor, symbol):
                 sec_extras["guidance"] = guidance_data.get("guidance")
                 sec_extras["superseded_guidance"] = guidance_data.get("superseded_guidance") or []
                 sec_extras["guidance_notes"] = guidance_data.get("notes") or []
+                # DIS/CASY corrective patch: how many earnings releases were
+                # actually READ. Without this the report cannot distinguish
+                # "this company published no guidance" from "the extractor
+                # found none in the releases it read" -- two very different
+                # claims, and the report was making the stronger one.
+                sec_extras["guidance_releases_examined"] = (
+                    guidance_data.get("releases_examined") or 0)
                 if not guidance_data.get("guidance"):
                     warnings.append(
-                        "No current management guidance could be extracted from this company's "
-                        "SEC-filed earnings releases; forward assumptions rest on reported "
-                        "history and trailing-twelve-month trend alone.")
+                        "No current management guidance could be EXTRACTED from this company's "
+                        f"SEC-filed earnings releases ({sec_extras['guidance_releases_examined']} "
+                        "examined); forward assumptions rest on reported history and "
+                        "trailing-twelve-month trend alone. This does not establish that the "
+                        "company published none -- guidance stated as a single value rather "
+                        "than a range, or for a metric outside the reviewed set, is not "
+                        "captured.")
             else:
                 message = (guidance_result.error.message if guidance_result.error
                            else "The guidance request failed.")
@@ -1656,6 +1667,11 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
         facts["_sec_company_facts"] = company_facts
         facts["management_guidance"] = (sec_extras or {}).get("guidance")
         facts["superseded_guidance"] = (sec_extras or {}).get("superseded_guidance") or []
+        # None means ingestion never ran; 0 means it ran and found no
+        # earnings release. Collapsing them with `or 0` would erase the
+        # very distinction this field exists to make.
+        facts["guidance_releases_examined"] = (
+            (sec_extras or {}).get("guidance_releases_examined"))
         warnings.extend(state.warnings)
         for finding in state.findings:
             warnings.append(f"{finding['code']}: {finding['message']}")
@@ -3099,6 +3115,7 @@ def build_compact_synthesis_payload(result: AnalysisResult) -> dict:
         # are full sentences from the filing and belong in full/debug mode.
         "dcf_financial_basis": facts.get("dcf_financial_basis"),
         "management_guidance": _compact_guidance(facts.get("management_guidance")),
+        "guidance_releases_examined": facts.get("guidance_releases_examined"),
         "valuation_freshness": (facts.get("current_financial_state") or {}).get(
             "valuation_freshness"),
         "data_completeness": (facts.get("current_financial_state") or {}).get(
@@ -3666,7 +3683,30 @@ def _valuation_basis_lines(compact: dict) -> List[str]:
         lines.append(f"Management guidance: FY{fiscal_year} current guidance"
                      if fiscal_year else "Management guidance: current guidance")
     else:
-        lines.append("Management guidance: unavailable")
+        # DIS/CASY corrective patch: "unavailable" asserted that the company
+        # published no guidance. What is actually known is that the extractor
+        # found none -- a weaker claim, and the only one the evidence
+        # supports. Live counter-examples where the report said "unavailable"
+        # while the company had in fact guided:
+        #
+        #   DIS   "We continue to expect fiscal 2026 adjusted EPS growth of
+        #          approximately 12%"   -- a single value, and this extractor
+        #          requires a RANGE (the guard that keeps reported actuals out)
+        #   CASY  "inside same-store sales to increase 2% to 5%"  -- a real
+        #          range, missed because the metric vocabulary did not cover
+        #          same-store sales
+        #
+        # Stating what was examined lets a reader tell "nothing to find" from
+        # "nothing found", which is the difference between the two cases.
+        examined = compact.get("guidance_releases_examined")
+        if examined:
+            lines.append(f"Management guidance: none extracted "
+                         f"({examined} SEC earnings release"
+                         f"{'s' if examined != 1 else ''} examined)")
+        elif examined == 0:
+            lines.append("Management guidance: no SEC earnings release found")
+        else:
+            lines.append("Management guidance: not retrieved")
 
     freshness = basis.get("valuation_freshness")
     if freshness and freshness != ValuationFreshness.CURRENT:
