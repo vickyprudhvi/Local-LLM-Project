@@ -418,9 +418,14 @@ def test_compact_report_states_the_financial_base_concisely(wired):
     result = run_aos(wired)
     compact = build_compact_synthesis_payload(result)
     text = render_compact_report(result, compact, pipeline_result=None)
-    assert "Financial base: TTM through Q2 2026" in text
-    assert "Balance sheet: Q2 2026" in text
+    # CASY corrective patch: explicit dates, not calendar-quarter shorthand.
+    # AOS runs on a calendar fiscal year, so both readings coincided here --
+    # which is exactly why the bug hid until an April-year-end issuer
+    # (Casey's) rendered its fiscal year end as "Q2 2026".
+    assert "Financial base: trailing twelve months to 30 Jun 2026" in text
+    assert "Balance sheet: 30 Jun 2026 (latest quarterly filing)" in text
     assert "Management guidance: FY2026 current guidance" in text
+    assert "Q2 2026" not in text, "calendar-quarter labels are ambiguous for non-calendar years"
 
 
 def test_compact_report_does_not_dump_a_freshness_audit(wired):
@@ -535,3 +540,55 @@ def test_guidance_absence_does_not_fail_the_workflow(wired, monkeypatch):
     compact = build_compact_synthesis_payload(result)
     text = render_compact_report(result, compact, pipeline_result=None)
     assert "Management guidance: unavailable" in text
+
+
+# ---------------------------------------------------------------------------
+# CASY corrective patch: non-calendar fiscal years must not be mislabelled
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("date_text,expected", [
+    ("2026-04-30", "30 Apr 2026"),   # Casey's fiscal year end -- calendar Q2
+    ("2026-06-30", "30 Jun 2026"),
+    ("2025-12-31", "31 Dec 2025"),
+    ("2026-01-31", "31 Jan 2026"),   # a January fiscal year end
+    ("2026-08-31", "31 Aug 2026"),   # Costco's fiscal year end
+])
+def test_period_labels_are_explicit_dates_not_calendar_quarters(date_text, expected):
+    """The label must not encode a quarter.
+
+    Casey's FY2026 ended 2026-04-30 with no newer quarterly filing. Rendering
+    that as "Q2 2026" turned a fiscal year end into a quarter and produced
+    "Balance sheet: Q2 2026 (latest annual filing)" -- self-contradictory, and
+    readable as interim data the analysis did not have.
+    """
+    from finance.workflow import _period_label
+    assert _period_label(date_text) == expected
+    assert "Q" not in _period_label(date_text)
+
+
+@pytest.mark.parametrize("bad", [None, "", "not-a-date", "2026-13-45", 20260430])
+def test_a_malformed_period_label_degrades_to_none(bad):
+    """The caller falls back to the raw value rather than rendering junk."""
+    from finance.workflow import _period_label
+    assert _period_label(bad) is None
+
+
+def test_an_annual_balance_sheet_is_labelled_as_a_fiscal_year_end():
+    """The half that actually broke: the KIND of period is stated in words,
+    so a non-calendar fiscal year cannot be misread as an interim period."""
+    from finance.workflow import _valuation_basis_lines
+
+    lines = _valuation_basis_lines({
+        "dcf_financial_basis": {
+            "base_revenue_basis": "ttm_calculation",
+            "flow_period_end": "2026-04-30",
+            "balance_sheet_as_of": "2026-04-30",
+            "balance_sheet_source": "annual_sec_filing",
+            "valuation_freshness": "MOSTLY_CURRENT",
+        },
+        "management_guidance": None,
+    })
+    text = "\n".join(lines)
+    assert "Balance sheet: 30 Apr 2026 (fiscal year end, latest annual filing)" in text
+    assert "trailing twelve months to 30 Apr 2026" in text
+    assert "Q2" not in text

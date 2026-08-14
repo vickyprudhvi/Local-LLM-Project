@@ -3600,17 +3600,41 @@ def _compact_status_section(result: "AnalysisResult", compact: dict) -> List[str
     return ["## Status", "", sentence, ""]
 
 
-def _quarter_label(date_text) -> Optional[str]:
-    """'2026-06-30' -> 'Q2 2026'. Calendar quarters — a company on a 4-4-5 or
-    non-calendar fiscal year will see its period expressed in calendar terms,
-    which is the unambiguous reading for a date."""
+_MONTH_ABBREVIATIONS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _period_label(date_text) -> Optional[str]:
+    """'2026-04-30' -> '30 Apr 2026'.
+
+    CASY corrective patch. This used to render a CALENDAR QUARTER ("Q2
+    2026"), which is wrong for any issuer whose fiscal year is not the
+    calendar year -- and wrong in the most misleading possible way.
+
+    Casey's General Stores has an April fiscal year end. Its FY2026 10-K
+    covers the year to 2026-04-30, and there is no newer quarterly filing.
+    The old label turned that annual balance-sheet date into "Q2 2026",
+    so the report read "Balance sheet: Q2 2026 (latest annual filing)" --
+    a fiscal year end presented as a quarter, contradicting itself in the
+    same line. A reader could reasonably conclude the analysis was using
+    interim data it did not have.
+
+    The bug hid because every company checked until then (AOS, WM, VZ,
+    TSLA, AMZN, COR) runs on a calendar fiscal year, where the two readings
+    coincide exactly.
+
+    An explicit date needs no fiscal-calendar inference, cannot be
+    misread, and costs nothing -- the quarter shorthand was never worth
+    the ambiguity. The KIND of period is stated separately by the caller,
+    which is where it belongs.
+    """
     if not isinstance(date_text, str) or len(date_text) < 10:
         return None
     try:
-        year, month = int(date_text[0:4]), int(date_text[5:7])
-    except ValueError:
+        year, month, day = (int(date_text[0:4]), int(date_text[5:7]), int(date_text[8:10]))
+        return f"{day} {_MONTH_ABBREVIATIONS[month - 1]} {year}"
+    except (ValueError, IndexError):
         return None
-    return f"Q{(month - 1) // 3 + 1} {year}"
 
 
 def _valuation_basis_lines(compact: dict) -> List[str]:
@@ -3621,17 +3645,20 @@ def _valuation_basis_lines(compact: dict) -> List[str]:
 
     flow_end = basis.get("flow_period_end")
     if basis.get("base_revenue_basis") == "ttm_calculation" and flow_end:
-        lines.append(f"Financial base: TTM through {_quarter_label(flow_end) or flow_end}")
+        lines.append("Financial base: trailing twelve months to "
+                     f"{_period_label(flow_end) or flow_end}")
     elif flow_end:
-        lines.append(f"Financial base: fiscal year to {flow_end}")
+        lines.append(f"Financial base: fiscal year to {_period_label(flow_end) or flow_end}")
 
     balance_as_of = basis.get("balance_sheet_as_of")
     if balance_as_of:
-        label = _quarter_label(balance_as_of) or balance_as_of
-        if basis.get("balance_sheet_source") == "quarterly_sec_filing":
-            lines.append(f"Balance sheet: {label}")
-        else:
-            lines.append(f"Balance sheet: {label} (latest annual filing)")
+        label = _period_label(balance_as_of) or balance_as_of
+        # The KIND of period is stated in words rather than encoded in a
+        # quarter label, so a non-calendar fiscal year cannot be misread.
+        kind = ("latest quarterly filing"
+                if basis.get("balance_sheet_source") == "quarterly_sec_filing"
+                else "fiscal year end, latest annual filing")
+        lines.append(f"Balance sheet: {label} ({kind})")
 
     metrics = (guidance or {}).get("metrics") or {}
     if metrics:
