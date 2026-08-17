@@ -666,7 +666,16 @@ class SecCurrentGuidanceTool(_SecTool):
                 guidance_module.html_to_text(exhibit), symbol, accession, document,
                 filing["filed"], expected_fiscal_year=fiscal_year))
 
-        current, superseded = guidance_module.select_current_guidance(releases, fiscal_year)
+        # Phase H.6: `fiscal_year` is no longer a FILTER. Passing the calendar
+        # year and rejecting anything that named a different one is what
+        # discarded every NVIDIA value -- NVDA's May-2026 release guides
+        # fiscal 2027 throughout. Each figure now carries the period it names
+        # (finance/guidance.py::resolve_guidance_period) and is checked for
+        # plausibility against the FILING DATE, which rejects prior-year
+        # actuals without assuming a calendar fiscal year. `as_of` retires
+        # guidance for a period that has already ended.
+        current, superseded = guidance_module.select_current_guidance(
+            releases, as_of=_dt.datetime.now(_dt.timezone.utc).date().isoformat())
         now = coordinator.ledger._clock()  # noqa: SLF001
         return {
             "provider": "sec", "dataset": "current_guidance", "symbol": symbol,

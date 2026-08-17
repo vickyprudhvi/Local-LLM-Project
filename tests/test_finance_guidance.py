@@ -107,7 +107,9 @@ def test_a_range_for_the_wrong_fiscal_year_is_rejected():
 def test_a_range_with_no_identifiable_fiscal_year_is_rejected():
     release = _extract("The Company expects diluted EPS of between $3.70 and $3.85.")
     assert release.metrics == {}
-    assert any("no fiscal year" in w for w in release.warnings)
+    # Phase H.6 wording: the extractor now resolves a fiscal PERIOD (which may
+    # be a quarter), not just a year, so the rejection says so.
+    assert any("no fiscal period could be identified" in w for w in release.warnings)
 
 
 def test_a_range_with_no_forward_looking_language_is_not_guidance():
@@ -180,10 +182,27 @@ def test_narrowed_raised_and_lowered_guidance_all_resolve_to_the_newest():
         assert current.metrics["revenue_growth"].high == pytest.approx(newer)
 
 
-def test_guidance_for_another_fiscal_year_is_not_selected():
-    releases = [_release("2026-07-30", 0.02, 0.03, fiscal_year=2027)]
-    current, superseded = G.select_current_guidance(releases, 2026)
-    assert current is None and superseded == []
+def test_guidance_for_an_ALREADY_PAST_fiscal_year_is_not_selected():
+    """Phase H.6 changed what `fiscal_year` means here, deliberately.
+
+    It is now the EARLIEST period still relevant, not an exact match. The old
+    exact-match rule is what discarded every NVIDIA value: NVDA's May-2026
+    release guides fiscal 2027 throughout, and a caller passing the calendar
+    year 2026 got nothing at all. Guidance for a LATER period is the whole
+    point of asking; only guidance for a period already behind us is stale.
+    """
+    stale = [_release("2025-07-30", 0.02, 0.03, fiscal_year=2025)]
+    current, _superseded = G.select_current_guidance(stale, 2026)
+    assert current is None
+
+
+def test_guidance_for_a_LATER_fiscal_year_is_selected():
+    """A non-calendar fiscal year guides ahead of the calendar year, and that
+    is not a reason to discard it."""
+    ahead = [_release("2026-05-20", 0.02, 0.03, fiscal_year=2027)]
+    current, _superseded = G.select_current_guidance(ahead, 2026)
+    assert current is not None
+    assert current.metrics["revenue_growth"].fiscal_year == 2027
 
 
 def test_no_releases_at_all_is_a_supported_outcome():

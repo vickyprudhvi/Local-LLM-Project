@@ -33,10 +33,42 @@ CONCEPT_MAP: Dict[str, Tuple[bool, Tuple[str, ...]]] = {
     "net_income": (False, ("NetIncomeLoss", "ProfitLoss")),
     "operating_income": (False, ("OperatingIncomeLoss",)),
     "cash_and_cash_equivalents": (True, ("CashAndCashEquivalentsAtCarryingValue",)),
+    # Phase H.6 -- CURRENT MARKETABLE SECURITIES.
+    #
+    # NVIDIA is the case that exposed the gap. Through fiscal 2026 NVDA
+    # reported its current securities as `MarketableSecuritiesCurrent`
+    # ($49.1B at 2025-10-26); from the fiscal-2027 10-Q it reports the SAME
+    # balance-sheet line as `DebtSecuritiesCurrent` ($37.1B at 2026-04-26)
+    # and stopped using the old tag entirely. With only the old spelling
+    # mapped, `short_term_investments` resolved to None on the current
+    # balance sheet and $37.1B of liquidity vanished from the equity bridge
+    # -- on a company whose whole capital structure is net cash.
+    #
+    # The reconciliation that proves the list is right: NVDA's current assets
+    # at 2026-04-26 are $150,995M = cash 13,237 + DebtSecuritiesCurrent
+    # 37,098 + EquitySecuritiesFvNi 30,237 + receivables 40,710 + inventory
+    # 25,797 + prepaid 3,916. Exactly. `AvailableForSaleSecuritiesDebt-
+    # Securities` ($39,233M) is deliberately NOT listed: it is the
+    # current-PLUS-noncurrent total (24,307 within one year + 14,926 after
+    # one year), and using it as a CURRENT balance would overstate liquidity
+    # by the noncurrent tranche. Only ONE concept ever wins per field (see
+    # period_facts._winning_concept_facts), so these spellings can never sum.
     "short_term_investments": (True, (
         "ShortTermInvestments",
         "MarketableSecuritiesCurrent",
+        "DebtSecuritiesCurrent",
+        "AvailableForSaleSecuritiesDebtSecuritiesCurrent",
         "ShortTermInvestmentsAndMarketableSecurities",
+    )),
+    # Equity securities carried at fair value. Kept as its OWN field rather
+    # than folded into short_term_investments: it is a distinct asset class
+    # with distinct risk, section 14 requires the components to stay
+    # separable, and no net-debt policy in this project treats it as cash.
+    # Resolved so it can be REPORTED and reconciled, never so it can be
+    # netted silently.
+    "equity_securities_at_fair_value": (True, (
+        "EquitySecuritiesFvNiCurrentAndNoncurrent",
+        "EquitySecuritiesFvNi",
     )),
     "assets": (True, ("Assets",)),
     "current_assets": (True, ("AssetsCurrent",)),
@@ -93,8 +125,30 @@ CONCEPT_MAP: Dict[str, Tuple[bool, Tuple[str, ...]]] = {
         "LongTermDebt",
         "LongTermDebtAndCapitalLeaseObligations",
     )),
-    "total_debt_combined": (True, ("DebtLongtermAndShorttermCombinedAmount",)),
-    "operating_cash_flow": (False, ("NetCashProvidedByUsedInOperatingActivities",)),
+    "total_debt_combined": (True, (
+        "DebtLongtermAndShorttermCombinedAmount",
+        # `LongTermDebt` in us-gaap is the total carrying amount INCLUDING the
+        # current maturities, not the noncurrent tranche (that is
+        # `LongTermDebtNoncurrent`). It is therefore an independent
+        # cross-check on the component sum -- see finance/net_debt.py, which
+        # uses it to detect the DebtCurrent/LongTermDebtCurrent double-count
+        # rather than to replace the components.
+        "LongTermDebt",
+    )),
+    # Phase H.6 -- AT&T switched spellings for fiscal 2026. `NetCashProvided-
+    # ByUsedInOperatingActivities` stops at 2025-12-31 for T; every 2026 10-Q
+    # reports `...ContinuingOperations` instead ($18,396M for H1 2026). With
+    # only the first spelling mapped, T's operating cash flow produced a
+    # "trailing twelve months" ending 2025-12-31 while its revenue TTM ended
+    # 2026-06-30, and free cash flow was then derived by subtracting a capex
+    # window ending 2026-06-30 from it -- a figure belonging to no period at
+    # all. The continuing-operations spelling is listed second so an issuer
+    # that reports both keeps the total-company figure; `_winning_concept_
+    # facts` prefers whichever tag actually reaches furthest forward.
+    "operating_cash_flow": (False, (
+        "NetCashProvidedByUsedInOperatingActivities",
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+    )),
     # VZ corrective patch -- the productive-assets tags were MISSING, and
     # their absence is expensive rather than merely incomplete. Verizon
     # reports capital expenditure as PaymentsToAcquireOtherProductiveAssets

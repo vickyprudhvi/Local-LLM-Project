@@ -1553,22 +1553,135 @@ _BIDIRECTIONAL_MARKERS = (
     "are disclosed", "is published", "recalculated", "re-calculated", "revised",
     "either direction", "company-specific wacc", "is confirmed either way",
 )
-# Only words whose direction holds REGARDLESS of subject. Deliberately
-# excludes "increase"/"rises"/"higher"/"above"/"falls"/"lower"/"below":
-# rising REVENUE is favourable but rising DEBT is not, and a price FALLING
-# is favourable when the concern is overvaluation. Including them made
-# "free cash flow deteriorates while debt increases" score favourable and
-# unfavourable simultaneously, cancelling to UNCLASSIFIED. Subject-aware
-# scoring is not reachable with this approach, so ambiguous words are left
-# out and the classifier falls back to UNCLASSIFIED (which is accepted).
+# Words whose direction holds REGARDLESS of subject. These alone were the
+# whole classifier before Phase H.6; "increase"/"rises"/"falls"/"declines"
+# were deliberately excluded because rising REVENUE is favourable while
+# rising DEBT is not, and no subject was available to tell them apart.
+#
+# `_SUBJECT_AWARE` below supplies the missing subject, so those words are now
+# usable — but only THROUGH it. This list stays subject-independent.
 _FAVOURABLE_MARKERS = (
     "improve", "improving", "expand", "expanding", "accelerat", "strengthen",
     "strengthening", "outperform", "recover", "beat", "exceed", "sustain",
 )
 _UNFAVOURABLE_MARKERS = (
-    "deteriorat", "decline", "declining", "weaken", "worsen", "contract",
-    "compress", "shortfall", "underperform", "erode", "breach", "impair",
+    "deteriorat", "weaken", "worsen", "compress", "shortfall", "underperform",
+    "erode", "breach", "impair",
 )
+
+# ---------------------------------------------------------------------------
+# Phase H.6, section 22 — SUBJECT-AWARE direction
+# ---------------------------------------------------------------------------
+#
+# THE BUG THIS FIXES (live AT&T, 2026-08-17). The T report listed
+#
+#     "net debt / FCF declines below 5x while margins remain stable"
+#
+# under DOWNGRADE conditions. Leverage FALLING while margins hold is
+# favourable — it is close to the definition of the bull case for a company
+# whose whole equity story is deleveraging. It was filed as a downgrade
+# because "decline" was an unconditional unfavourable marker, which is right
+# for revenue and exactly backwards for debt.
+#
+# The fix is not a longer word list; it is knowing WHAT is declining. A
+# direction word is now scored against the nearest metric it modifies, and a
+# metric is classified by which way is good for it.
+
+# Metrics where MORE is better.
+_HIGHER_IS_BETTER = (
+    "revenue", "sales", "margin", "earnings", "eps", "profit", "income",
+    "free cash flow", "fcf", "cash flow", "growth", "roe", "roic", "roa",
+    "return on", "subscriber", "customer", "backlog", "bookings", "market share",
+    "arpu", "utilization", "throughput", "dividend", "buyback", "coverage",
+)
+# Metrics where LESS is better. "net debt / fcf" and "net debt / ebitda" are
+# listed explicitly and BEFORE the bare "fcf"/"ebitda" tokens can match, so a
+# leverage RATIO is never read as the cash-flow metric in its denominator.
+_LOWER_IS_BETTER = (
+    "net debt / fcf", "net debt/fcf", "net debt / ebitda", "net debt/ebitda",
+    "debt / ebitda", "debt/ebitda", "debt-to-ebitda", "net debt to ebitda",
+    "leverage", "net debt", "total debt", "gross debt", "debt load", "borrowing",
+    "churn", "cost", "expense", "capex intensity", "dilution", "payout ratio",
+    "interest expense", "days sales outstanding", "inventory days", "attrition",
+)
+
+_INCREASE_WORDS = ("increase", "increasing", "rise", "rises", "rising", "grow",
+                   "grows", "growing", "climb", "higher", "above", "exceeds",
+                   "expands", "expanding", "up to", "widen", "widening")
+_DECREASE_WORDS = ("decrease", "decreasing", "decline", "declines", "declining",
+                   "fall", "falls", "falling", "drop", "drops", "dropping",
+                   "lower", "below", "under ", "contract", "contracts",
+                   "contracting", "shrink", "narrows", "reduces", "reduced",
+                   "reduction")
+
+# Conditions are compound: "X declines while Y remains stable". Each clause is
+# scored on its own so one neutral clause cannot cancel a clear one.
+_CLAUSE_SPLIT = re.compile(r"\s+(?:while|whilst|as|and|but|although|though|,|;)\s+")
+
+
+def _subject_polarity(clause: str, before: Optional[int] = None) -> Optional[str]:
+    """"higher"/"lower"/None — which direction is good for this clause's metric.
+
+    The metric is the clause's SUBJECT: the earliest one appearing before the
+    direction word, with the longest match at that position winning. Both
+    halves of that rule are load-bearing and each fixes a real misreading:
+
+    * earliest-before-the-verb — "costs increase faster than revenue" is about
+      COSTS. Taking the longest match anywhere in the clause picks "revenue"
+      and reads a cost overrun as good news.
+    * longest-at-that-position — "net debt / FCF declines" starts with both
+      "net debt / fcf" and "net debt" at offset 0, and contains "fcf" at
+      offset 11. Only the longest match at the earliest position keeps it a
+      LEVERAGE measure rather than the cash-flow metric in its denominator.
+    """
+    candidates = []
+    for polarity, terms in (("lower", _LOWER_IS_BETTER), ("higher", _HIGHER_IS_BETTER)):
+        for term in terms:
+            index = clause.find(term)
+            if index < 0:
+                continue
+            if before is not None and index >= before:
+                continue
+            candidates.append((index, -len(term), polarity))
+    if not candidates:
+        return None
+    return min(candidates)[2]
+
+
+def _direction_of_change(clause: str) -> Tuple[Optional[str], Optional[int]]:
+    """("up"/"down"/None, position) for the movement this clause describes."""
+    increase = min((clause.find(w) for w in _INCREASE_WORDS if w in clause),
+                   default=None)
+    decrease = min((clause.find(w) for w in _DECREASE_WORDS if w in clause),
+                   default=None)
+    if increase is not None and decrease is None:
+        return "up", increase
+    if decrease is not None and increase is None:
+        return "down", decrease
+    return None, None
+
+
+def _subject_aware_direction(text: str) -> Optional[str]:
+    """FAVORABLE/UNFAVORABLE from metric + movement, or None if unclear.
+
+    Returns None — not a guess — when clauses disagree or when either the
+    metric or the movement cannot be identified. An unclassifiable condition
+    is ACCEPTED where the model filed it (see `_route_conditions_by_direction`);
+    this classifier exists to catch clear contradictions, not to adjudicate
+    every phrasing.
+    """
+    votes = set()
+    for clause in _CLAUSE_SPLIT.split(text):
+        movement, position = _direction_of_change(clause)
+        polarity = _subject_polarity(clause, before=position)
+        if polarity is None or movement is None:
+            continue
+        good = (polarity == "higher" and movement == "up") or \
+               (polarity == "lower" and movement == "down")
+        votes.add(CONDITION_FAVOURABLE if good else CONDITION_UNFAVOURABLE)
+    if len(votes) == 1:
+        return votes.pop()
+    return None
 CONDITION_FAVOURABLE = "FAVORABLE"
 CONDITION_UNFAVOURABLE = "UNFAVORABLE"
 CONDITION_BIDIRECTIONAL = "BIDIRECTIONAL"
@@ -1577,15 +1690,31 @@ CONDITION_UNCLASSIFIED = "UNCLASSIFIED"
 
 def classify_condition_direction(text: str) -> str:
     """FAVORABLE / UNFAVORABLE / BIDIRECTIONAL / UNCLASSIFIED for one
-    condition. BIDIRECTIONAL wins outright -- an information change ("a
-    company-specific WACC becomes available", "the share-count conflict is
-    reconciled") has no known direction even when its wording sounds
-    positive. UNCLASSIFIED means "no clear signal", and callers accept it."""
+    condition.
+
+    Order matters and is deliberate:
+
+    1. BIDIRECTIONAL wins outright — an information change ("a
+       company-specific WACC becomes available", "the share-count conflict is
+       reconciled") has no known direction even when its wording sounds
+       positive.
+    2. SUBJECT-AWARE scoring next (Phase H.6, section 22). "net debt / FCF
+       declines below 5x" is favourable and "revenue declines" is not, and
+       only the subject distinguishes them.
+    3. Subject-independent vocabulary last, as the fallback it always was.
+
+    UNCLASSIFIED means "no clear signal", and callers accept it.
+    """
     if not isinstance(text, str) or not text.strip():
         return CONDITION_UNCLASSIFIED
     lowered = text.lower()
     if any(marker in lowered for marker in _BIDIRECTIONAL_MARKERS):
         return CONDITION_BIDIRECTIONAL
+
+    subject_aware = _subject_aware_direction(lowered)
+    if subject_aware is not None:
+        return subject_aware
+
     favourable = any(marker in lowered for marker in _FAVOURABLE_MARKERS)
     unfavourable = any(marker in lowered for marker in _UNFAVOURABLE_MARKERS)
     if favourable and not unfavourable:

@@ -691,7 +691,14 @@ def gather_yahoo_and_sec(executor, symbol):
     omission_reasons: Dict[str, str] = {}
     omission_effects: Dict[str, str] = {}
     sec_extras: Dict[str, object] = {"company_facts": None, "guidance": None,
-                                     "superseded_guidance": [], "guidance_notes": []}
+                                     "superseded_guidance": [], "guidance_notes": [],
+                                     # Phase H.6: the filing index. Needed for
+                                     # structural-break detection (which
+                                     # periods the issuer restated) and for
+                                     # material events filed AFTER the balance
+                                     # sheet the equity bridge uses -- neither
+                                     # is answerable from company facts alone.
+                                     "submissions": None}
 
     def omit(capability, reason):
         omitted.append(capability)
@@ -735,6 +742,17 @@ def gather_yahoo_and_sec(executor, symbol):
             # below buckets by (fiscal_year, fiscal_period) and cannot answer
             # "which balance sheet is newest".
             sec_extras["company_facts"] = company_facts
+            # The submissions index is already cached by the guidance path
+            # below (and by CIK resolution), so this is normally a cache hit
+            # and never an extra external call in a run that fetches guidance.
+            submissions_result = _call_tool(
+                executor, "finance.sec.company_submissions", {"symbol": symbol}, 255)
+            if submissions_result.success:
+                sec_extras["submissions"] = (submissions_result.data or {}).get("data")
+            else:
+                warnings.append(
+                    "The SEC filing index was not retrieved, so structural-break detection "
+                    "and post-balance-sheet event detection are unavailable for this run.")
             try:
                 pre_normalized_statements, sec_fact_provenance = normalize_sec_statements(
                     company_facts, symbol, provenance,
@@ -978,7 +996,8 @@ def propose_assumptions(analysis_facts, forecast_years=None) -> List[dict]:
     if state is not None:
         forward_paths, forward_evidence = build_forward_assumptions(
             state, forecast_years,
-            company_facts=analysis_facts.get("_sec_company_facts"))
+            company_facts=analysis_facts.get("_sec_company_facts"),
+            comparability=state.historical_comparability)
 
     revenue_growth_source = "revenue_cagr" if observed("revenue_cagr") is not None \
         else "revenue_growth_yoy"
@@ -1072,6 +1091,7 @@ def propose_assumptions(analysis_facts, forecast_years=None) -> List[dict]:
             scenario_paths, _ = build_forward_assumptions(
                 state, forecast_years,
                 company_facts=analysis_facts.get("_sec_company_facts"),
+                comparability=state.historical_comparability,
                 scenario=name, growth_delta=growth_delta, margin_delta=margin_delta,
                 # Fade to THIS scenario's own perpetuity rate, so the explicit
                 # forecast hands off to the terminal value continuously.
@@ -1089,7 +1109,11 @@ def propose_assumptions(analysis_facts, forecast_years=None) -> List[dict]:
             "revenue_growth": ({
                 "value": revenue_growth_value,
                 "clamped": any(e.clamped for e in growth_entries),
-                "raw_value": growth_entries[0].original_proposed_value,
+                # Section 19: the DERIVED value, always -- not just when a
+                # clamp bound. A reader comparing "applied 25.0%" against a
+                # reported 65.5% needs to see what the evidence implied, and
+                # `original_proposed_value` is None unless a clamp fired.
+                "raw_value": growth_entries[0].raw_value,
                 "applied_value": revenue_growth_value,
                 "clamp_bounds": list(FORWARD_GROWTH_BOUNDS),
                 "clamp_reason": next(
@@ -1532,6 +1556,35 @@ def _dcf_inputs_from_facts(symbol, facts, forecast_years):
                         and config.dcf_short_term_investments_eligible())
                     else 0.0)
 
+    # Phase H.6, section 16 — recalculate net debt from the SELECTED
+    # components and check it against what these inputs will produce, BEFORE
+    # the DCF runs. NVDA is why: `DebtCurrent` and `LongTermDebtCurrent` are
+    # the same $1.0B obligation, and summing both put a $1.0B error into the
+    # equity bridge that nothing downstream could see. The check compares two
+    # independent derivations of the same figure, so it catches a component
+    # defect rather than an arithmetic one.
+    net_debt_reconciliation = None
+    if state is not None and state.net_debt_detail:
+        from finance import net_debt as net_debt_module
+        expected = total_debt - cash_and_cash_equivalents - eligible_sti
+        recalculated = state.net_debt_detail.get("net_debt")
+        net_debt_reconciliation = {
+            "policy": policy,
+            "dcf_net_debt": expected,
+            "recalculated_net_debt": recalculated,
+            "reconciled": (recalculated is None
+                           or abs(expected - recalculated)
+                           <= max(abs(expected) * net_debt_module
+                                  .RECONCILIATION_RELATIVE_TOLERANCE,
+                                  net_debt_module.RECONCILIATION_ABSOLUTE_FLOOR)),
+            "components": (state.net_debt_detail.get("components") or {}),
+            "evidence_ids": ((state.net_debt_detail.get("components") or {})
+                             .get("evidence_ids") or {}),
+        }
+        if not net_debt_reconciliation["reconciled"]:
+            net_debt_reconciliation["code"] = \
+                net_debt_module.DCF_NET_DEBT_RECONCILIATION_FAILURE
+
     return {
         "ticker": symbol,
         "valuation_date": datetime.datetime.now(datetime.timezone.utc).date().isoformat(),
@@ -1569,8 +1622,46 @@ def _dcf_inputs_from_facts(symbol, facts, forecast_years):
                                 if state is not None and "revenue" in state.flows else None),
             "valuation_freshness": (state.valuation_freshness if state is not None else None),
             "data_completeness": (state.data_completeness if state is not None else None),
+            # Phase H.6 — everything a reader needs to check the period and
+            # the bridge without opening the full state.
+            "flow_base_construction": (
+                (state.flows["revenue"].ttm or {}).get("construction_method")
+                if state is not None and state.flows.get("revenue") is not None
+                and state.flows["revenue"].ttm else None),
+            "flow_base_validation": (
+                (state.flows["revenue"].ttm or {}).get("validation_status")
+                if state is not None and state.flows.get("revenue") is not None
+                and state.flows["revenue"].ttm else None),
+            "net_debt_policy": policy,
+            "net_debt_reconciliation": net_debt_reconciliation,
+            "historical_comparability": (
+                (state.historical_comparability or {}).get("historical_comparability_status")
+                if state is not None else None),
+            "post_balance_sheet_events": (
+                [dict(e) for e in state.post_balance_sheet_events] if state is not None else []),
+            "guidance_period": _guidance_period_label(state),
         },
     }, None
+
+
+def _guidance_period_label(state) -> Optional[str]:
+    """Section 24: say WHICH period guidance covers, not just that it exists.
+
+    "Management guidance: Q2 FY2027 current guidance" and "Management
+    guidance: FY2027 guidance" are different claims, and a next-quarter
+    outlook rendered as a full-year one overstates what the company said.
+    """
+    if state is None:
+        return None
+    metrics = ((state.management_guidance or {}).get("metrics") or {})
+    periods = []
+    for entry in metrics.values():
+        if isinstance(entry, dict) and entry.get("fiscal_period"):
+            periods.append(entry["fiscal_period"])
+    if not periods:
+        return None
+    unique = sorted(set(periods))
+    return unique[0] if len(unique) == 1 else ", ".join(unique)
 
 
 def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=None,
@@ -1660,6 +1751,7 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
                 for name, entry in (facts.get("fundamental_metrics") or {}).items()
                 if isinstance(entry, dict)},
             management_guidance=(sec_extras or {}).get("guidance"),
+            submissions=(sec_extras or {}).get("submissions"),
             data_completeness=(DataCompleteness.COMPLETE if plan.mode == AnalysisMode.FULL
                                else DataCompleteness.REDUCED))
         facts["current_financial_state"] = state.to_dict()
@@ -2000,6 +2092,18 @@ def _research_readiness(plan: AnalysisPlan, facts: dict) -> dict:
         limited = True
         reasons.append(reason)
 
+    # Phase H.6, section 25 — freshness signals that change what this run can
+    # bear. An incorrectly constructed TTM makes the valuation's base period
+    # meaningless (NOT_READY); an unreconciled net debt breaks the equity
+    # bridge; a structural break or a post-quarter capital event leaves the
+    # analysis usable but materially more uncertain.
+    blocking, limiting = _freshness_readiness_signals(facts)
+    if blocking:
+        return {"status": ResearchReadiness.NOT_READY, "reasons": reasons + blocking}
+    for reason in limiting:
+        limited = True
+        reasons.append(reason)
+
     if limited:
         return {"status": ResearchReadiness.LIMITED, "reasons": reasons}
     return {"status": ResearchReadiness.READY,
@@ -2017,6 +2121,77 @@ def _research_readiness(plan: AnalysisPlan, facts: dict) -> dict:
 # 0.90 default flags a range wider than the base value itself, which is a
 # defensible line for "the valuation cannot discriminate much", but it is a
 # starting point to tune as more tickers are observed, not a settled number.
+def _freshness_readiness_signals(facts: dict) -> Tuple[List[str], List[str]]:
+    """Section 25 — (blocking, limiting) readiness reasons from freshness.
+
+    Returns two lists rather than a status so the caller keeps ownership of
+    the NOT_READY / LIMITED decision. The split follows what each defect
+    actually breaks:
+
+        TTM incorrectly constructed  -> the valuation's base period is not
+                                        what it claims; nothing built on it
+                                        can be relied on. BLOCKING.
+        net debt unreconciled        -> the equity bridge does not equal its
+                                        own components. BLOCKING when the DCF
+                                        actually used the disputed figure.
+        guidance missing, TTM valid  -> LIMITED (the existing behaviour).
+        structural break             -> LIMITED: history is still shown, it
+                                        just cannot carry a forecast.
+        post-quarter capital event   -> LIMITED: the bridge may describe a
+                                        capital structure the company has
+                                        since changed.
+    """
+    blocking: List[str] = []
+    limiting: List[str] = []
+    state = facts.get("current_financial_state") or {}
+    if not state:
+        return blocking, limiting
+
+    revenue = (state.get("flows") or {}).get("revenue") or {}
+    ttm = revenue.get("ttm") or {}
+    if revenue.get("source") == "ttm_calculation" and ttm:
+        if ttm.get("validation_status") == "invalid":
+            blocking.append(
+                "The trailing-twelve-month base period could not be validly constructed "
+                f"({ttm.get('reason')}); a valuation labelled TTM would not describe twelve "
+                "months, so valuation-based conclusions are withheld.")
+        elif ttm.get("validation_status") == "partial":
+            limiting.append(
+                "The trailing-twelve-month base period is a valid twelve months but ends "
+                "before this company's latest reported period, so it is not fully current: "
+                f"{ttm.get('reason')}")
+
+    basis = facts.get("dcf_financial_basis") or {}
+    reconciliation = basis.get("net_debt_reconciliation") or {}
+    if reconciliation and reconciliation.get("reconciled") is False:
+        blocking.append(
+            f"Net debt used by the valuation ({reconciliation.get('dcf_net_debt'):,.0f}) does "
+            f"not reconcile with the figure recalculated from the selected balance-sheet "
+            f"components ({reconciliation.get('recalculated_net_debt'):,.0f}) under the "
+            f"{reconciliation.get('policy')!r} policy; the equity bridge cannot be relied on.")
+    elif (state.get("net_debt_detail") or {}).get("reconciled") is False:
+        limiting.append(
+            "Net debt could not be fully reconciled against the issuer's own reported debt "
+            "total; the components used are listed in the valuation state.")
+
+    comparability = (state.get("historical_comparability") or {})
+    if comparability.get("historical_comparability_status") == "STRUCTURAL_BREAK":
+        limiting.append(
+            "This company's reported history spans a structural break, so a long-period growth "
+            "rate measures a different business from the one being valued. "
+            + (comparability.get("summary") or ""))
+
+    events = state.get("post_balance_sheet_events") or []
+    if events:
+        first = events[0]
+        limiting.append(
+            f"A {first.get('form')} filed {first.get('filed')} reports "
+            f"{first.get('description')}, after the {state.get('financial_as_of')} balance sheet "
+            "the equity bridge uses; the capital structure in this valuation may already be out "
+            "of date.")
+    return blocking, limiting
+
+
 def _material_scenario_spread() -> float:
     return config.research_material_scenario_spread()
 # Residual share-count gap, AFTER split restatement, that counts as an
@@ -3002,6 +3177,51 @@ def _compact_guidance(guidance):
     }
 
 
+def _compact_financial_state(state: Optional[dict]) -> Optional[dict]:
+    """The selected values the compact report quotes, and nothing else.
+
+    Keeping the whole state would roughly double the compact payload for no
+    benefit: the per-field `derivation` strings are paragraphs, and the TTM
+    records list every component period. What a reader of the compact report
+    needs is the VALUE, the PERIOD it covers and whether it is a trailing
+    twelve months — enough to see that the Snapshot and the Valuation section
+    are quoting the same basis.
+    """
+    if not state:
+        return None
+    flows = {}
+    for name, selection in (state.get("flows") or {}).items():
+        if not isinstance(selection, dict) or selection.get("value") is None:
+            continue
+        flows[name] = {
+            "value": selection.get("value"),
+            "source": selection.get("source"),
+            "period_start": selection.get("period_start"),
+            "as_of_date": selection.get("as_of_date"),
+            "validation_status": (selection.get("ttm") or {}).get("validation_status"),
+        }
+    comparability = state.get("historical_comparability") or {}
+    compact = {
+        "flows": flows,
+        "net_debt": state.get("net_debt"),
+        "net_debt_policy": (state.get("net_debt_detail") or {}).get("net_debt_policy"),
+        "net_debt_reconciled": (state.get("net_debt_detail") or {}).get("reconciled"),
+        "financial_as_of": state.get("financial_as_of"),
+        "historical_comparability": comparability.get("historical_comparability_status"),
+        "post_balance_sheet_events": [
+            {k: v for k, v in event.items() if k in ("filed", "form", "description")}
+            for event in (state.get("post_balance_sheet_events") or [])
+        ][:3],
+    }
+    # The comparability SUMMARY is a paragraph and only earns its bytes when
+    # it changes a conclusion — i.e. when the history is not fully
+    # comparable. A COMPARABLE verdict needs no explanation in the compact
+    # payload; the full text stays in `facts` for full/debug mode.
+    if comparability.get("historical_comparability_status") not in (None, "COMPARABLE"):
+        compact["historical_comparability_summary"] = comparability.get("summary")
+    return compact
+
+
 def build_compact_synthesis_payload(result: AnalysisResult) -> dict:
     """The BOUNDED payload actually sent to the local LLM (Problem 9).
 
@@ -3124,6 +3344,14 @@ def build_compact_synthesis_payload(result: AnalysisResult) -> dict:
             {k: v for k, v in finding.items() if k in ("code", "severity", "message")}
             for finding in ((facts.get("current_financial_state") or {}).get("findings") or [])
         ],
+        # Phase H.6 — the selected flow values and the reconciled net debt,
+        # so the Snapshot table and the Valuation section quote ONE set of
+        # numbers. Deliberately trimmed to the fields the renderer reads: the
+        # full state (per-field derivations, the TTM component list, the
+        # freshness audit) stays in `facts` for full/debug mode and is not
+        # worth its size in the compact payload (section 23's last line).
+        "current_financial_state": _compact_financial_state(
+            facts.get("current_financial_state")),
         "research_readiness": facts.get("research_readiness"),
         "data_provenance": bounded_provenance,
         "plan": {
@@ -3566,13 +3794,41 @@ def _snapshot_rows(compact: dict) -> List[Tuple[str, str]]:
         if formatted is not None:
             rows.append((label, formatted))
 
+    # Phase H.6 — the snapshot's headline figures come from the SAME
+    # selection the valuation uses, when one exists.
+    #
+    # This is the NVDA failure in its most visible form. The Valuation
+    # section said "Financial base: trailing twelve months to 26 Apr 2026"
+    # and the Snapshot two inches above it said "Revenue $215.94B" — NVDA's
+    # FY2026 ANNUAL revenue, $37B below the actual trailing twelve months of
+    # $253.49B, read straight out of `financial_history` while the DCF used
+    # the TTM. Net debt had the same split: -$1.14B in the snapshot against
+    # -$3.77B in the state. Two numbers for one quantity, on one page, with
+    # nothing saying which was which.
+    #
+    # The labels now name the period, so a reader can see which basis each
+    # figure is on rather than assuming they share one.
+    state_flows = (compact.get("current_financial_state") or {}).get("flows") or {}
+
+    def flow_row(field_name, fallback):
+        selection = state_flows.get(field_name)
+        if isinstance(selection, dict) and selection.get("value") is not None:
+            suffix = " (TTM)" if selection.get("source") == "ttm_calculation" else " (FY)"
+            return selection["value"], suffix
+        return fallback, ""
+
     add("Price", _fmt_price(quote.get("price"), currency))
     add("Market Cap", _fmt_currency(company.get("market_capitalisation"), currency))
-    add("Revenue", _fmt_currency(latest_income_values.get("revenue"), currency))
+    revenue_value, revenue_suffix = flow_row("revenue", latest_income_values.get("revenue"))
+    add(f"Revenue{revenue_suffix}", _fmt_currency(revenue_value, currency))
     add("Revenue Growth", _fmt_pct(fm("revenue_growth_yoy").get("value")))
-    add("Net Income", _fmt_currency(latest_income_values.get("net_income"), currency))
-    add("FCF", _fmt_currency(fm("free_cash_flow").get("value"), currency))
-    add("Net Debt", _fmt_currency(fm("net_debt").get("value"), currency))
+    income_value, income_suffix = flow_row("net_income", latest_income_values.get("net_income"))
+    add(f"Net Income{income_suffix}", _fmt_currency(income_value, currency))
+    fcf_value, fcf_suffix = flow_row("free_cash_flow", fm("free_cash_flow").get("value"))
+    add(f"FCF{fcf_suffix}", _fmt_currency(fcf_value, currency))
+    state_net_debt = (compact.get("current_financial_state") or {}).get("net_debt")
+    add("Net Debt", _fmt_currency(
+        state_net_debt if state_net_debt is not None else fm("net_debt").get("value"), currency))
     add("Operating Margin", _fmt_pct(fm("operating_margin").get("value")))
     add("Current Ratio", _fmt_ratio(fm("current_ratio").get("value")))
 
@@ -3661,9 +3917,20 @@ def _valuation_basis_lines(compact: dict) -> List[str]:
     lines: List[str] = []
 
     flow_end = basis.get("flow_period_end")
-    if basis.get("base_revenue_basis") == "ttm_calculation" and flow_end:
+    # Phase H.6, section 24: the label may only say "trailing twelve months"
+    # when a twelve-month window was ACTUALLY constructed and validated. On
+    # the live NVDA run this line read "trailing twelve months to 26 Apr
+    # 2026" above a headline revenue that was the prior FISCAL YEAR's — the
+    # label was derived from `base_revenue_basis` alone, which said
+    # `ttm_calculation` regardless of whether the construction had held.
+    validation = basis.get("flow_base_validation")
+    if basis.get("base_revenue_basis") == "ttm_calculation" and flow_end \
+            and validation in (None, "valid", "partial"):
         lines.append("Financial base: trailing twelve months to "
                      f"{_period_label(flow_end) or flow_end}")
+        if validation == "partial":
+            lines.append("  (that twelve-month window ends before this company's latest "
+                         "reported period — see the research view)")
     elif flow_end:
         lines.append(f"Financial base: fiscal year to {_period_label(flow_end) or flow_end}")
 
@@ -3679,9 +3946,20 @@ def _valuation_basis_lines(compact: dict) -> List[str]:
 
     metrics = (guidance or {}).get("metrics") or {}
     if metrics:
-        fiscal_year = guidance.get("fiscal_year")
-        lines.append(f"Management guidance: FY{fiscal_year} current guidance"
-                     if fiscal_year else "Management guidance: current guidance")
+        # Section 24: name the period the guidance ACTUALLY covers. NVIDIA's
+        # current guidance is a NEXT-QUARTER outlook; rendering it as
+        # "FY2027 guidance" claims a full-year outlook the company did not
+        # give. The period label comes from the guidance record itself.
+        period = basis.get("guidance_period")
+        if period:
+            lines.append(f"Management guidance: {period} current guidance")
+        else:
+            fiscal_year = guidance.get("fiscal_year")
+            lines.append(f"Management guidance: FY{fiscal_year} current guidance"
+                         if fiscal_year else "Management guidance: current guidance")
+        guided = sorted(name for name in metrics)
+        if guided:
+            lines.append(f"  (guided metrics: {', '.join(guided)})")
     else:
         # DIS/CASY corrective patch: "unavailable" asserted that the company
         # published no guidance. What is actually known is that the extractor
@@ -3712,6 +3990,33 @@ def _valuation_basis_lines(compact: dict) -> List[str]:
     if freshness and freshness != ValuationFreshness.CURRENT:
         lines.append(f"Valuation freshness: {freshness.replace('_', ' ').lower()}")
     return lines + [""] if lines else []
+
+
+def _base_growth_clamp(compact: dict) -> Optional[dict]:
+    """The base scenario's year-1 revenue-growth clamp, if it bound.
+
+    Reads the assumption PROVENANCE rather than re-deriving anything: the
+    builder already recorded `raw_growth`, `applied_growth` and
+    `clamp_reason` on the entry (finance/forward_assumptions.py), and the
+    report's job is to show them, not to recompute a bound.
+    """
+    dcf = compact.get("dcf") or {}
+    candidates = []
+    for scenario in (dcf.get("scenarios") or []):
+        if scenario.get("scenario") != "base":
+            continue
+        candidates.append(((scenario.get("assumptions") or {})
+                           .get("assumption_provenance") or {}).get("revenue_growth"))
+    # `_hoist_shared_assumption_provenance` moves an entry that is identical
+    # across every scenario into one shared dict, so look there too.
+    candidates.append((dcf.get("shared_assumption_provenance") or {}).get("revenue_growth"))
+    for entry in candidates:
+        if isinstance(entry, dict) and entry.get("clamped") \
+                and entry.get("raw_value") is not None:
+            return {"raw_growth": entry["raw_value"],
+                    "applied_growth": entry.get("applied_value"),
+                    "clamp_reason": entry.get("clamp_reason")}
+    return None
 
 
 def _valuation_section(compact: dict) -> List[str]:
@@ -3795,7 +4100,20 @@ def _valuation_section(compact: dict) -> List[str]:
             revenue_growth = revenue_growth[0] if revenue_growth else None
         bits = []
         if revenue_growth is not None:
-            bits.append(f"- Revenue growth: {_fmt_pct(revenue_growth)}")
+            # Section 19: a clamped growth rate is the MODEL'S BOUND, not an
+            # estimate of the company's growth, and printing it bare invites
+            # exactly the reading the live NVDA report got — "25.0%" beside a
+            # 65.5% reported growth rate, with nothing saying the 25% was a
+            # ceiling rather than a forecast.
+            clamp = _base_growth_clamp(compact)
+            if clamp:
+                bits.append(
+                    f"- Revenue growth: {_fmt_pct(revenue_growth)} "
+                    f"(CLAMPED — the evidence implied {_fmt_pct(clamp['raw_growth'])}; "
+                    "this is the model's configured bound, not an estimate of the "
+                    "company's growth)")
+            else:
+                bits.append(f"- Revenue growth: {_fmt_pct(revenue_growth)}")
         if assumptions.get("wacc") is not None:
             bits.append(f"- WACC: {_fmt_pct(assumptions['wacc'])}")
         if assumptions.get("terminal_growth") is not None:

@@ -155,8 +155,28 @@ def main():
         check("the historical CAGR was NOT copied into year-1 growth",
               abs(growth_path[0] - cagr["value"]) > 1e-9,
               f"year1={growth_path[0]:.4%} vs CAGR={cagr['value']:.4%}")
-        check("year-1 growth is anchored on management guidance",
+
+    # Phase H.6 narrowed this check, deliberately. The old form asserted that
+    # year-1 growth is anchored on guidance whenever ANY guidance exists,
+    # which is exactly the substitution the AT&T failure was made of: AT&T
+    # publishes adjusted-EBITDA, adjusted-EPS, cash-tax and free-cash-flow
+    # guidance and NO consolidated revenue-growth range, and the old
+    # extractor satisfied this check by mapping the EBITDA range onto
+    # revenue growth. Only CONSOLIDATED REVENUE GROWTH may anchor
+    # (finance/guidance.py::may_anchor_revenue_growth); when a company guides
+    # other metrics, falling through to the trailing-twelve-month trend is
+    # the CORRECT outcome, not a failure.
+    guided_metrics = (guidance.get("metrics") or {})
+    revenue_growth_guidance = guided_metrics.get("revenue_growth")
+    if revenue_growth_guidance is not None:
+        check("year-1 growth is anchored on consolidated revenue guidance",
               provenance.get("source_type") == AssumptionSourceType.MANAGEMENT_GUIDANCE)
+    elif guided_metrics:
+        check("no consolidated revenue guidance exists, so growth falls through "
+              "to reported evidence rather than borrowing another metric",
+              provenance.get("source_type") != AssumptionSourceType.MANAGEMENT_GUIDANCE
+              or (provenance.get("derivation") or "").find("COMPONENT of revenue") >= 0,
+              f"guided metrics: {', '.join(sorted(guided_metrics))}")
 
     print("\n-- assumption provenance (base) --")
     for field, entry in base["assumptions"]["assumption_provenance"].items():

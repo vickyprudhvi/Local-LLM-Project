@@ -37,7 +37,7 @@ facts, labelled as reconstructed) or None with a stated reason.
 """
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from finance.xbrl_mapping import CONCEPT_MAP, _candidate_facts
@@ -175,7 +175,98 @@ def _winning_concept_facts(company_facts: dict, field_name: str) -> Tuple[Option
             best = (key, concept, facts)
     if best is None:
         return None, []
-    return best[1], best[2]
+    winner_concept, winner_facts = best[1], best[2]
+    return winner_concept, _merge_equivalent_concepts(
+        company_facts, field_name, winner_concept, winner_facts, candidates)
+
+
+# How closely two concepts must agree on a shared period to be treated as the
+# same series. Exact equality in practice; the tolerance only absorbs the
+# float round-tripping of a JSON payload.
+_CONCEPT_EQUIVALENCE_TOLERANCE = 1e-6
+# At least this many periods must be reported under BOTH concepts before one
+# can be declared a continuation of the other. One coincidental match is not
+# evidence; three identical periods is a tag rename.
+_MIN_OVERLAP_FOR_EQUIVALENCE = 3
+# How far back the equivalence test looks, in days before the winning
+# concept's latest period.
+#
+# Scoped to the RECENT era on purpose. Two spellings of the same line can
+# legitimately differ in the past and coincide now: AT&T's total-company and
+# continuing-operations operating cash flow differ in 2017, 2020 and 2021 —
+# the years it HAD discontinued operations — and are identical from 2023
+# onward, because the separations are complete. Testing over all history
+# would refuse the merge on evidence about a company that no longer exists,
+# which is the same mistake finance/structural_breaks.py exists to prevent.
+# Merging is likewise confined to this window, so the chain never crosses the
+# era where the two genuinely disagreed.
+_EQUIVALENCE_WINDOW_DAYS = 3 * 366
+
+
+def _merge_equivalent_concepts(company_facts: dict, field_name: str, winner_concept: str,
+                               winner_facts: List[dict],
+                               candidates: Sequence[str]) -> List[dict]:
+    """Extend the winning concept's series with an EARLIER concept that is
+    demonstrably the same series under a different tag.
+
+    Phase H.6. AT&T renamed its operating-cash-flow tag for fiscal 2026:
+    `NetCashProvidedByUsedInOperatingActivities` stops at 2025-12-31 and
+    `...ContinuingOperations` starts. Choosing one concept for the whole
+    series — the rule that keeps this module from differencing two unrelated
+    tags — then leaves EITHER a stale window (the old tag, ending six months
+    early) or too little history to build twelve months from (the new tag,
+    which has no fiscal-year figure to roll forward from). T's operating cash
+    flow and therefore its free cash flow came out unavailable.
+
+    The merge is only performed when the two tags are PROVED interchangeable
+    on this issuer's own data: every period reported under both must carry
+    the same value, and there must be at least three such periods. AT&T's do
+    (Q1 2025 = $9,049M and H1 2025 = $18,812M under both spellings) because
+    the change is a tagging change, not a change of basis. An issuer whose
+    continuing-operations figures genuinely DIFFER from its total-company
+    ones fails the test and keeps the single-concept behaviour, which is the
+    conservative outcome — the periods stay unmixed.
+    """
+    latest_end = max((f.get("end") or "") for f in winner_facts)
+    if not latest_end:
+        return winner_facts
+    try:
+        cutoff = (date.fromisoformat(latest_end)
+                  - timedelta(days=_EQUIVALENCE_WINDOW_DAYS)).isoformat()
+    except (ValueError, TypeError):
+        return winner_facts
+
+    winner_by_period = {(f.get("start"), f.get("end")): f for f in winner_facts}
+    merged = list(winner_facts)
+    for concept in candidates:
+        if concept == winner_concept:
+            continue
+        other = [f for f in _candidate_facts(company_facts, concept)
+                 if (f.get("end") or "") >= cutoff]
+        if not other:
+            continue
+        agreements = 0
+        for fact in other:
+            key = (fact.get("start"), fact.get("end"))
+            existing = winner_by_period.get(key)
+            if existing is None:
+                continue
+            try:
+                if abs(float(fact["val"]) - float(existing["val"])) > max(
+                        abs(float(existing["val"])) * _CONCEPT_EQUIVALENCE_TOLERANCE, 1.0):
+                    agreements = -1
+                    break
+            except (TypeError, ValueError, KeyError):
+                agreements = -1
+                break
+            agreements += 1
+        if agreements < _MIN_OVERLAP_FOR_EQUIVALENCE:
+            continue
+        for fact in other:
+            if (fact.get("start"), fact.get("end")) not in winner_by_period:
+                merged.append(fact)
+                winner_by_period[(fact.get("start"), fact.get("end"))] = fact
+    return merged
 
 
 def _dedupe_by_period(facts: List[dict]) -> List[dict]:

@@ -257,7 +257,12 @@ def test_a_clamped_assumption_records_what_it_was_clamped_from():
     assert first.clamped is True
     assert first.original_proposed_value == pytest.approx(0.90)
     assert first.applied_value == pytest.approx(fa.GROWTH_BOUNDS[1])
-    assert "CLAMPED" in first.derivation
+    # Phase H.6, section 19: the derivation now explains that the applied
+    # value is the MODEL'S BOUND rather than an estimate, and carries the
+    # derived value beside it, instead of just flagging the word CLAMPED.
+    assert first.raw_value == pytest.approx(0.90)
+    assert first.clamp_reason and "NOT an estimate" in first.clamp_reason
+    assert "configured bound" in first.derivation
 
 
 # ---------------------------------------------------------------------------
@@ -356,4 +361,7 @@ def test_the_evidence_block_states_guidance_is_unavailable_when_it_is():
     state = _state_with()
     paths, evidence = fa.build_forward_assumptions(state, 5, company_facts=_company())
     block = fa.build_evidence_block(state, evidence, paths)
-    assert "CURRENT MANAGEMENT GUIDANCE: unavailable" in block
+    # Phase H.6 names WHICH guidance is unavailable: a company can publish
+    # component or EBITDA guidance and still have none for consolidated
+    # revenue growth, and those are different statements.
+    assert "CURRENT MANAGEMENT GUIDANCE for consolidated revenue growth: unavailable" in block

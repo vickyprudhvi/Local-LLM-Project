@@ -45,7 +45,10 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import tools.config as config
+from finance import net_debt as nd
 from finance import period_facts as pf
+from finance import structural_breaks as sb
+from finance import ttm as ttm_module
 
 # ---------------------------------------------------------------------------
 # Statuses
@@ -72,13 +75,20 @@ class ValuationFreshness:
     """
 
     CURRENT = "CURRENT"
+    # Section 18: every input IS the newest filed, and something material was
+    # filed after the balance sheet anyway. Distinct from MOSTLY_CURRENT,
+    # which means "nothing fresher exists"; this means "something fresher
+    # exists and it is not an accounting balance we may apply".
+    MOSTLY_CURRENT_WITH_EVENT_WARNING = "MOSTLY_CURRENT_WITH_EVENT_WARNING"
     MOSTLY_CURRENT = "MOSTLY_CURRENT"
     STALE_INPUT_WARNING = "STALE_INPUT_WARNING"
     STALE_INVALID = "STALE_INVALID"
-    ALL = (CURRENT, MOSTLY_CURRENT, STALE_INPUT_WARNING, STALE_INVALID)
+    ALL = (CURRENT, MOSTLY_CURRENT, MOSTLY_CURRENT_WITH_EVENT_WARNING,
+           STALE_INPUT_WARNING, STALE_INVALID)
 
     # Ordered worst-last so a run's overall status is max() over its findings.
-    _RANK = {CURRENT: 0, MOSTLY_CURRENT: 1, STALE_INPUT_WARNING: 2, STALE_INVALID: 3}
+    _RANK = {CURRENT: 0, MOSTLY_CURRENT: 1, MOSTLY_CURRENT_WITH_EVENT_WARNING: 2,
+             STALE_INPUT_WARNING: 3, STALE_INVALID: 4}
 
     @classmethod
     def worst(cls, statuses) -> str:
@@ -106,9 +116,13 @@ DCF_STALE_BALANCE_SHEET_INPUT = "DCF_STALE_BALANCE_SHEET_INPUT"
 DCF_STALE_FLOW_INPUT = "DCF_STALE_FLOW_INPUT"
 DCF_STALE_DEBT_INPUT = "DCF_STALE_DEBT_INPUT"
 DCF_CURRENT_GUIDANCE_NOT_CONSIDERED = "DCF_CURRENT_GUIDANCE_NOT_CONSIDERED"
+# Section 18. A balance sheet can be the newest one filed and still not
+# describe the company: something material was filed after it.
+DCF_POST_BALANCE_SHEET_EVENT = "DCF_POST_BALANCE_SHEET_EVENT"
 
 ALL_STALE_GUARD_CODES = (DCF_STALE_BALANCE_SHEET_INPUT, DCF_STALE_FLOW_INPUT,
-                         DCF_STALE_DEBT_INPUT, DCF_CURRENT_GUIDANCE_NOT_CONSIDERED)
+                         DCF_STALE_DEBT_INPUT, DCF_CURRENT_GUIDANCE_NOT_CONSIDERED,
+                         DCF_POST_BALANCE_SHEET_EVENT)
 
 
 # ---------------------------------------------------------------------------
@@ -123,15 +137,30 @@ ALL_STALE_GUARD_CODES = (DCF_STALE_BALANCE_SHEET_INPUT, DCF_STALE_FLOW_INPUT,
 BALANCE_SHEET_FIELDS = (
     "cash_and_cash_equivalents",
     "short_term_investments",
+    # Phase H.6, section 14: kept as its own component so a net-debt policy
+    # that does NOT treat equity holdings as cash can still report them.
+    "equity_securities_at_fair_value",
     "short_term_debt",
     "current_portion_of_long_term_debt",
     "long_term_debt",
+    # Not a component of the bridge: an issuer-reported combined debt figure,
+    # selected purely so finance/net_debt.py can cross-check the component
+    # sum against it (section 16). NVDA reports `LongTermDebt` = $8,470M,
+    # which is what proves its $1,000M `DebtCurrent`/`LongTermDebtCurrent`
+    # pair is one obligation and not two.
+    "total_debt_combined",
     "current_assets",
     "current_liabilities",
     "stockholders_equity",
     "preferred_equity",
     "minority_interest",
 )
+
+# Balance-sheet fields that are POINT-IN-TIME by definition and must never be
+# rolled into a trailing-twelve-month figure (section 4). Enforced in
+# finance/ttm.py::build_ttm as well; stated here so the rule is visible at
+# the place the two kinds of field sit side by side.
+POINT_IN_TIME_ONLY_FIELDS = frozenset(BALANCE_SHEET_FIELDS)
 
 # Flow fields that get a trailing-twelve-month treatment, per section 3.
 TTM_FLOW_FIELDS = (
@@ -168,6 +197,15 @@ class SelectedValue:
     period_start: Optional[str] = None
     derivation: Optional[str] = None
     components: Tuple[str, ...] = ()
+    # The winning XBRL concept. Phase H.6: previously this was recorded only
+    # inside the human-readable `derivation` text, which meant a rule that
+    # depends on WHICH TAG supplied a value -- the debt-overlap rule in
+    # finance/net_debt.py most of all -- had to parse prose to work. NVDA's
+    # $1.0B double-count is exactly a which-tag question (`DebtCurrent`
+    # already contains `LongTermDebtCurrent`), so the concept is now a field.
+    concept: Optional[str] = None
+    # Section 3's TTM record, present only on a ttm_calculation selection.
+    ttm: Optional[dict] = None
 
     def to_dict(self) -> dict:
         return {
@@ -186,6 +224,8 @@ class SelectedValue:
             "freshness_status": self.freshness_status,
             "derivation": self.derivation,
             "components": list(self.components),
+            "concept": self.concept,
+            "ttm": dict(self.ttm) if self.ttm else None,
         }
 
 
@@ -226,69 +266,59 @@ _MAX_QUARTER_JOIN_GAP = 7
 
 @dataclass
 class TtmResult:
+    """Backwards-compatible view over finance/ttm.py's `TtmMetric`.
+
+    Phase H.6 moved TTM construction into its own module so a second
+    construction (fiscal year + current year-to-date - prior-year
+    year-to-date) could be added and every window could carry an explicit
+    `construction_method`/`validation_status`. This wrapper keeps the shape
+    the rest of this module and its tests already read.
+    """
+
     value: Optional[float] = None
     quarters: List[pf.PeriodFact] = field(default_factory=list)
     ok: bool = False
     reason: Optional[str] = None
     used_reconstruction: bool = False
+    metric: Optional["ttm_module.TtmMetric"] = None
 
     @property
     def period_start(self) -> Optional[str]:
+        if self.metric is not None:
+            return self.metric.start_date
         return self.quarters[0].start if self.quarters else None
 
     @property
     def period_end(self) -> Optional[str]:
+        if self.metric is not None:
+            return self.metric.end_date
         return self.quarters[-1].end if self.quarters else None
 
 
-def build_ttm(company_facts: dict, field_name: str, offset: int = 0) -> TtmResult:
-    """Sum the latest four CONTIGUOUS discrete quarters, or fail closed.
+def build_ttm(company_facts: dict, field_name: str, offset: int = 0,
+              reference_end: Optional[str] = None) -> TtmResult:
+    """The trailing twelve months for one flow field, or a stated failure.
 
-    "Fail closed" is load-bearing here. A TTM that silently sums three
-    quarters, or sums across a gap, understates a flow by a quarter and there
-    is no way to see that from the resulting number alone. Every rejection
-    states its reason so the caller can fall back to the annual figure
-    explicitly and say so in the report.
+    Delegates to finance/ttm.py::build_ttm, which owns both supported
+    constructions and the section-3 invariants. "Fail closed" is still
+    load-bearing: a TTM that silently sums three quarters, or sums across a
+    gap, understates a flow by a quarter and there is no way to see that from
+    the resulting number alone.
 
     `offset` steps the window BACK by whole quarters, so offset=4 gives the
-    prior-year trailing twelve months. That is what makes a TTM-over-TTM
-    growth rate possible — the only growth measure that compares a current
-    twelve-month period against an equivalent one.
+    prior-year trailing twelve months — what makes a TTM-over-TTM growth rate
+    possible, the only growth measure comparing a twelve-month period against
+    an equivalent one.
     """
-    series = pf.discrete_quarters(company_facts, field_name)
-    available = series.quarters[:len(series.quarters) - offset] if offset else series.quarters
-    quarters = available[-4:] if len(available) >= 4 else []
-    if len(quarters) < 4:
-        return TtmResult(reason=(
-            f"Only {len(available)} discrete quarter(s) of {field_name} could be built "
-            f"{'before the requested offset ' if offset else ''}; four are required for a "
-            "trailing-twelve-month figure."))
-
-    for earlier, later in zip(quarters, quarters[1:]):
-        gap = pf._span_days(earlier.end, later.start)
-        if gap is None or abs(gap) > _MAX_QUARTER_JOIN_GAP:
-            return TtmResult(reason=(
-                f"{field_name} quarters are not contiguous: {earlier.start}..{earlier.end} is "
-                f"followed by {later.start}..{later.end}, so summing them would "
-                f"{'double-count' if (gap or 0) < 0 else 'skip'} part of the year."))
-
-    total_span = pf._span_days(quarters[0].start, quarters[-1].end)
-    low, high = TTM_SPAN_DAYS
-    if total_span is None or not (low <= total_span <= high):
-        return TtmResult(reason=(
-            f"{field_name}'s four quarters span {total_span} days, outside the {low}-{high} day "
-            "window a trailing twelve months must cover."))
-
-    units = {q.unit for q in quarters}
-    if len(units) > 1:
-        return TtmResult(reason=(
-            f"{field_name} quarters mix units ({', '.join(sorted(units))}); they cannot be summed."))
-
+    metric = ttm_module.build_ttm(company_facts, field_name, offset=offset,
+                                  reference_end=reference_end)
     return TtmResult(
-        value=sum(q.value for q in quarters),
-        quarters=list(quarters),
-        ok=True,
-        used_reconstruction=any(q.reconstructed_from for q in quarters),
+        value=metric.value,
+        quarters=list(metric.quarter_facts),
+        ok=metric.ok,
+        reason=metric.reason,
+        used_reconstruction=metric.used_reconstruction,
+        metric=metric,
     )
 
 
@@ -397,6 +427,7 @@ class DcfFreshnessPlanner:
                 retrieval_timestamp=self.retrieved_at, evidence_id=evidence_id,
                 freshness_status=(FreshnessStatus.CURRENT_QUARTER if is_quarterly
                                   else FreshnessStatus.CURRENT_ANNUAL),
+                concept=fact.concept,
                 derivation=(f"Reported on the {fact.form} balance sheet dated {fact.end} "
                             f"as {fact.concept}."
                             + (" This figure INCLUDES capitalized lease obligations, which "
@@ -411,32 +442,60 @@ class DcfFreshnessPlanner:
 
     # -- derived debt ------------------------------------------------------
 
-    def derive_total_debt(self, balance: Dict[str, SelectedValue]) -> SelectedValue:
-        """total_debt = short_term_debt + current portion of LTD + long-term debt.
+    def derive_total_debt(self, balance: Dict[str, SelectedValue]
+                          ) -> Tuple[SelectedValue, "nd.NetDebtComponents"]:
+        """total_debt = short_term_debt + current portion of LTD + long-term debt,
+        MINUS whichever of those is contained inside another.
 
         The SAME documented policy as finance/normalization.py::
         _derive_balance_sheet_aggregates — the sum of whichever components
         are actually reported, missing ones excluded rather than zero-filled,
-        finance/capital-lease obligations deliberately not included.
+        finance/capital-lease obligations deliberately not included — with
+        one Phase H.6 correction: the components must not OVERLAP.
+
+        NVDA is the case. `DebtCurrent` ($1,000M) and `LongTermDebtCurrent`
+        ($1,000M) are the same obligation — us-gaap defines `DebtCurrent` as
+        short-term debt AND the current portion of long-term debt — and
+        summing all three components gave $9,470M against a true $8,470M,
+        which NVDA reports directly as `LongTermDebt`. The overlap rule lives
+        in finance/net_debt.py so the same policy applies wherever net debt
+        is computed; this method just drives it and preserves the
+        `SelectedValue` shape the rest of the module reads.
         """
-        parts = ("short_term_debt", "current_portion_of_long_term_debt", "long_term_debt")
-        known = [(p, balance[p]) for p in parts
-                 if p in balance and balance[p].value is not None]
         evidence_id = _evidence_id("input", "debt.latest")
-        if not known:
-            return _unavailable("total_debt", evidence_id,
-                                "No debt component was reported on the current balance sheet.")
-        total = sum(sel.value for _p, sel in known)
-        anchor = known[0][1]
-        breakdown = ", ".join(f"{p}={sel.value:,.0f}" for p, sel in known)
+        combined = balance.get("total_debt_combined")
+        components = nd.collect_components(
+            balance,
+            reported_total_debt=getattr(combined, "value", None),
+            reported_total_debt_concept=getattr(combined, "concept", None),
+            as_of_date=self.balance_sheet_date())
+
+        if components.total_debt is None:
+            return _unavailable(
+                "total_debt", evidence_id,
+                "No debt component was reported on the current balance sheet."), components
+
+        included = [name for name in nd.DEBT_COMPONENT_FIELDS
+                    if getattr(components, name) is not None
+                    and name not in {e["field"] for e in components.excluded}]
+        anchor = next((balance[name] for name in included if name in balance), None)
+        breakdown = ", ".join(f"{name}={getattr(components, name):,.0f}" for name in included)
+        note = ""
+        if components.excluded:
+            note = " " + " ".join(e["reason"] for e in components.excluded)
         return SelectedValue(
-            field="total_debt", value=total, unit=anchor.unit, source="derived",
-            provider=self.provider, accession=anchor.accession, form=anchor.form,
-            fiscal_period=anchor.fiscal_period, as_of_date=anchor.as_of_date,
+            field="total_debt", value=components.total_debt,
+            unit=components.unit, source="derived",
+            provider=self.provider,
+            accession=getattr(anchor, "accession", None),
+            form=getattr(anchor, "form", None),
+            fiscal_period=getattr(anchor, "fiscal_period", None),
+            as_of_date=components.as_of_date,
             retrieval_timestamp=self.retrieved_at, evidence_id=evidence_id,
-            freshness_status=anchor.freshness_status,
-            derivation=f"Sum of reported debt components at {anchor.as_of_date}: {breakdown}.",
-            components=tuple(p for p, _sel in known))
+            freshness_status=getattr(anchor, "freshness_status", FreshnessStatus.MISSING),
+            derivation=(f"Sum of reported debt components at {components.as_of_date}: "
+                        f"{breakdown}." + note),
+            components=tuple(included)), components
 
     # -- flows -------------------------------------------------------------
 
@@ -463,33 +522,45 @@ class DcfFreshnessPlanner:
         completed fiscal year IS the freshest honest flow figure. What must
         never happen is using it while a valid TTM exists and not saying so;
         that is what `DCF_STALE_FLOW_INPUT` detects.
+
+        Phase H.6: the selection now carries the full `TtmMetric` record
+        (construction method, validation status, the exact periods that were
+        combined) so nothing downstream has to infer what "TTM" meant for
+        this particular field. A PARTIAL window — a real twelve months that
+        ends materially before the company's latest reported period — is
+        still used, but it is labelled as such and `_derive_free_cash_flow`
+        refuses to combine it with a window ending somewhere else.
         """
         evidence_id = _evidence_id("input", f"{field_name}_ttm")
-        ttm = build_ttm(self.company_facts, field_name)
+        ttm = build_ttm(self.company_facts, field_name, reference_end=reference_date)
         if ttm.ok and reference_date and ttm.period_end:
             lag = pf._span_days(ttm.period_end, reference_date)
             if lag is not None and lag > self._MAX_FLOW_LAG_DAYS:
                 ttm = TtmResult(reason=(
-                    f"The newest four quarters of {field_name} end {ttm.period_end}, "
+                    f"The newest twelve months of {field_name} end {ttm.period_end}, "
                     f"{lag} days before the current balance-sheet date {reference_date}; that "
                     "is not a trailing twelve months. This company appears to have stopped "
                     "reporting the line under the concept that resolved."))
         if ttm.ok:
-            last = ttm.quarters[-1]
+            metric = ttm.metric
             note = ""
             if ttm.used_reconstruction:
-                note = (" Some quarters were reconstructed by differencing consecutive "
+                note = (" Some periods were reconstructed by differencing consecutive "
                         "year-to-date figures, because this company reports the line "
                         "cumulatively rather than per quarter.")
+            if metric.validation_status == ttm_module.TtmValidation.PARTIAL and metric.reason:
+                note += " " + metric.reason
             return SelectedValue(
-                field=field_name, value=ttm.value, unit=last.unit, source="ttm_calculation",
-                provider=self.provider, accession=last.accession, form=last.form,
-                fiscal_period=last.fiscal_period, as_of_date=ttm.period_end,
+                field=field_name, value=ttm.value, unit=metric.unit, source="ttm_calculation",
+                provider=self.provider, accession=metric.latest_accession,
+                form=metric.latest_form,
+                fiscal_period=metric.latest_fiscal_period, as_of_date=ttm.period_end,
                 period_start=ttm.period_start, retrieval_timestamp=self.retrieved_at,
                 evidence_id=evidence_id, freshness_status=FreshnessStatus.TTM,
                 derivation=(f"Trailing twelve months {ttm.period_start}..{ttm.period_end}, "
-                            f"summed from 4 discrete quarters." + note),
-                components=tuple(f"{q.start}..{q.end}" for q in ttm.quarters))
+                            f"built by {metric.construction_method}." + note),
+                components=tuple(metric.quarters_included),
+                ttm=metric.to_dict())
 
         annual = pf.annual_periods(self.company_facts, field_name)
         if annual and reference_date:
@@ -558,6 +629,11 @@ class CurrentFinancialState:
     valuation_freshness: str
     findings: Tuple[dict, ...] = ()
     warnings: Tuple[str, ...] = ()
+    # Phase H.6 additions.
+    net_debt_detail: Optional[dict] = None
+    historical_comparability: Optional[dict] = None
+    post_balance_sheet_events: Tuple[dict, ...] = ()
+    freshness_audit: Optional[dict] = None
 
     def value(self, name: str) -> Optional[float]:
         """The plain number for a field, from whichever compartment holds it."""
@@ -600,6 +676,10 @@ class CurrentFinancialState:
             "valuation_freshness": self.valuation_freshness,
             "findings": [dict(f) for f in self.findings],
             "warnings": list(self.warnings),
+            "net_debt_detail": self.net_debt_detail,
+            "historical_comparability": self.historical_comparability,
+            "post_balance_sheet_events": [dict(e) for e in self.post_balance_sheet_events],
+            "freshness_audit": self.freshness_audit,
         }
 
 
@@ -620,20 +700,35 @@ def build_current_financial_state(company_facts: dict, symbol: str,
                                   guidance_considered: bool = True,
                                   valuation_date: Optional[str] = None,
                                   retrieval_timestamp: Optional[str] = None,
-                                  data_completeness: str = DataCompleteness.COMPLETE
+                                  data_completeness: str = DataCompleteness.COMPLETE,
+                                  submissions: Optional[dict] = None
                                   ) -> CurrentFinancialState:
-    """Run the planner and classify the result's freshness (sections 6, 12, 13)."""
+    """Run the planner and classify the result's freshness (sections 6, 12, 13).
+
+    `submissions` (Phase H.6) is the SEC submissions index. It is what makes
+    two things knowable that company facts alone cannot answer: whether the
+    reported history spans a structural break (finance/structural_breaks.py),
+    and whether anything material was filed AFTER the balance sheet the
+    equity bridge uses. Both are optional — the state is built without them,
+    with the corresponding fields reported as unknown rather than as clean.
+    """
     planner = DcfFreshnessPlanner(company_facts, symbol,
                                   retrieval_timestamp=retrieval_timestamp)
     valuation_date = valuation_date or datetime.datetime.now(
         datetime.timezone.utc).date().isoformat()
 
     balance, warnings = planner.select_balance_sheet()
-    total_debt = planner.derive_total_debt(balance)
+    total_debt, debt_components = planner.derive_total_debt(balance)
+    warnings.extend(exclusion["reason"] for exclusion in debt_components.excluded)
     # The balance-sheet date is the reference point for "is this flow
     # actually trailing?" -- see `DcfFreshnessPlanner._MAX_FLOW_LAG_DAYS`.
     reference_date = planner.balance_sheet_date()
-    flows = {name: planner.select_flow(name, reference_date=reference_date)
+    # Flows are measured against the company's latest REPORTED PERIOD, not
+    # against its balance-sheet date. They are usually the same; when they
+    # are not, the reported period is the honest yardstick for "is this
+    # twelve months current?".
+    flow_reference = ttm_module.latest_reported_period_end(company_facts) or reference_date
+    flows = {name: planner.select_flow(name, reference_date=flow_reference)
              for name in TTM_FLOW_FIELDS}
 
     # Free cash flow is DERIVED, never selected: OCF - capex, both on the SAME
@@ -691,12 +786,41 @@ def build_current_financial_state(company_facts: dict, symbol: str,
             "Current management guidance was retrieved but did not reach the forward-assumption "
             "builder.", fiscal_year=management_guidance.get("fiscal_year")))
 
-    net_debt = None
-    cash = balance.get("cash_and_cash_equivalents")
-    if total_debt.value is not None and cash is not None and cash.value is not None:
-        net_debt = total_debt.value - cash.value
+    # -- net debt, under a NAMED policy, from named components -------------
+    # Phase H.6: previously this was `total_debt - cash`, unconditionally,
+    # regardless of the configured policy — so a run configured for
+    # cash-and-marketable-securities reported one net debt here and a
+    # different one inside the DCF. NVDA made the gap $37B.
+    policy = config.dcf_net_debt_policy()
+    net_debt_result = nd.compute_net_debt(
+        debt_components, policy,
+        marketable_securities_eligible=config.dcf_short_term_investments_eligible())
+    net_debt = net_debt_result.value
+    findings.extend(net_debt_result.findings)
+
+    # -- section 13: is the reported history comparable with today? --------
+    comparability = sb.assess_historical_comparability(
+        company_facts, submissions,
+        history_years=config.dcf_assumption_history_max_years())
+
+    # -- section 18: material events after the balance-sheet date ----------
+    events = sb.find_post_balance_sheet_events(submissions, bs_date, valuation_date)
+    for event in events:
+        findings.append(_finding(
+            DCF_POST_BALANCE_SHEET_EVENT, "warning",
+            f"A {event.form} filed {event.filed} reports {event.description}, AFTER the "
+            f"{bs_date} balance sheet this valuation bridges to. The balance sheet is not "
+            "adjusted for it — no deterministic adjustment is available from a filing index — "
+            "but the equity bridge may no longer describe the company's current capital "
+            "structure.",
+            filed=event.filed, form=event.form, items=event.items,
+            accession=event.accession))
 
     freshness = _classify_valuation_freshness(findings, balance, flows, bs_date, annual_end)
+
+    audit = _build_freshness_audit(
+        symbol, valuation_date, flows, bs_date, annual_end, quarterly_end,
+        management_guidance, events, comparability, net_debt_result, findings)
 
     return CurrentFinancialState(
         symbol=symbol,
@@ -714,12 +838,81 @@ def build_current_financial_state(company_facts: dict, symbol: str,
         valuation_freshness=freshness,
         findings=tuple(findings),
         warnings=tuple(warnings),
+        net_debt_detail=net_debt_result.to_dict(),
+        historical_comparability=comparability.to_dict(),
+        post_balance_sheet_events=tuple(e.to_dict() for e in events),
+        freshness_audit=audit,
     )
+
+
+def _build_freshness_audit(symbol, valuation_date, flows, bs_date, annual_end, quarterly_end,
+                           management_guidance, events, comparability, net_debt_result,
+                           findings) -> dict:
+    """Section 23 — the compact internal audit built BEFORE the DCF runs.
+
+    One structure answering "what period is each side of this valuation
+    actually on?", so the answer stops being distributed across a dozen
+    fields nobody reads together. Deliberately NOT rendered into compact
+    reports (section 23's last line); the compact report shows the four
+    summary lines section 24 specifies and this is what they are derived from.
+    """
+    revenue = flows.get("revenue")
+    ttm_record = (revenue.ttm if revenue is not None else None) or {}
+    guidance_metrics = ((management_guidance or {}).get("metrics") or {})
+    return {
+        "symbol": symbol,
+        "valuation_date": valuation_date,
+        "flow_base": {
+            "type": ("TTM" if revenue is not None and revenue.source == "ttm_calculation"
+                     else "ANNUAL" if revenue is not None and revenue.value is not None
+                     else "UNAVAILABLE"),
+            "through": getattr(revenue, "as_of_date", None),
+            "from": getattr(revenue, "period_start", None),
+            "valid": bool(ttm_record.get("validation_status") in ("valid", "partial")),
+            "validation_status": ttm_record.get("validation_status"),
+            "construction_method": ttm_record.get("construction_method"),
+        },
+        "flow_periods": {
+            name: {"source": selection.source, "from": selection.period_start,
+                   "through": selection.as_of_date}
+            for name, selection in flows.items()
+        },
+        "balance_sheet": {
+            "as_of": bs_date,
+            "form": "10-Q" if quarterly_end else "10-K",
+            "latest_annual_period": annual_end,
+        },
+        "guidance": {
+            "available": bool(guidance_metrics),
+            "issued_at": (management_guidance or {}).get("filed"),
+            "metrics": sorted(guidance_metrics),
+            "periods": sorted({(entry or {}).get("fiscal_period")
+                               for entry in guidance_metrics.values()
+                               if isinstance(entry, dict) and entry.get("fiscal_period")}),
+        },
+        "net_debt": {
+            "policy": net_debt_result.policy,
+            "value": net_debt_result.value,
+            "reconciled": net_debt_result.reconciled,
+        },
+        "post_balance_sheet_events": [e.to_dict() for e in events],
+        "historical_comparability": comparability.status,
+        "warnings": [f["message"] for f in findings if f.get("severity") in ("warning", "error")],
+    }
 
 
 def _derive_free_cash_flow(ocf: Optional[SelectedValue], capex: Optional[SelectedValue],
                            retrieved_at: str) -> SelectedValue:
-    """FCF = operating cash flow - capital expenditure, on ONE basis."""
+    """FCF = operating cash flow - capital expenditure, over ONE period.
+
+    Phase H.6 — the period test, not just the basis test. Matching `source`
+    ("both are ttm_calculation") was never sufficient: live AT&T produced an
+    operating-cash-flow TTM ending 2025-12-31 (the concept it used stopped
+    being tagged after fiscal 2025) and a capital-expenditure TTM ending
+    2026-06-30. Both were `ttm_calculation`, so the old check passed, and the
+    difference was published as free cash flow "through 2026-06-30" — a
+    figure covering neither window and belonging to no period at all.
+    """
     evidence_id = _evidence_id("input", "free_cash_flow_ttm")
     if ocf is None or capex is None or ocf.value is None or capex.value is None:
         return _unavailable("free_cash_flow", evidence_id,
@@ -730,6 +923,18 @@ def _derive_free_cash_flow(ocf: Optional[SelectedValue], capex: Optional[Selecte
             f"Operating cash flow is on a {ocf.source} basis but capital expenditure is on a "
             f"{capex.source} basis; subtracting them would produce a figure belonging to no "
             "single period.")
+    if ocf.as_of_date != capex.as_of_date or ocf.period_start != capex.period_start:
+        return _unavailable(
+            "free_cash_flow", evidence_id,
+            f"Operating cash flow covers {ocf.period_start}..{ocf.as_of_date} but capital "
+            f"expenditure covers {capex.period_start}..{capex.as_of_date}. Subtracting one from "
+            "the other would produce a figure belonging to neither period, so no free cash flow "
+            "is reported for this company.")
+    if ocf.unit != capex.unit:
+        return _unavailable(
+            "free_cash_flow", evidence_id,
+            f"Operating cash flow is reported in {ocf.unit} and capital expenditure in "
+            f"{capex.unit}; they cannot be subtracted.")
     return SelectedValue(
         field="free_cash_flow", value=ocf.value - abs(capex.value), unit=ocf.unit,
         source=ocf.source, provider=ocf.provider, accession=ocf.accession, form=ocf.form,
@@ -794,6 +999,11 @@ def _classify_valuation_freshness(findings, balance, flows, bs_date, annual_end)
 
     quarterly_balance = bool(annual_end and bs_date and bs_date > annual_end)
     ttm_flows = any(sel.source == "ttm_calculation" for sel in flows.values())
+    if DCF_POST_BALANCE_SHEET_EVENT in codes:
+        # Section 18: the inputs are the freshest that exist and a material
+        # event has been filed since. Not a stale-input warning (nothing
+        # newer could have been used) and not CURRENT either.
+        return ValuationFreshness.MOSTLY_CURRENT_WITH_EVENT_WARNING
     if quarterly_balance and ttm_flows:
         return ValuationFreshness.CURRENT
     # An annual-only filer genuinely has nothing fresher, so this is not a

@@ -202,7 +202,9 @@ def test_ttm_refuses_across_a_gap_rather_than_skipping_a_quarter():
     ]})
     result = build_ttm(facts, "revenue")
     assert result.ok is False
-    assert "not contiguous" in result.reason
+    # Phase H.6 moved TTM construction into finance/ttm.py, which states the
+    # SIZE of the gap rather than just naming the property that failed.
+    assert "gap" in result.reason and "skip part of the year" in result.reason
 
 
 def test_ttm_offset_gives_the_prior_year_window_for_growth_comparison():
