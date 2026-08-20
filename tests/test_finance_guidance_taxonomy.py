@@ -128,10 +128,25 @@ def test_a_point_with_a_tolerance_is_accepted_as_guidance():
     assert (revenue.low, revenue.high) == pytest.approx((89.18, 92.82))
 
 
-def test_a_bare_point_with_no_tolerance_is_still_refused():
-    """The guard that keeps reported ACTUALS out of the guidance record."""
+def test_a_point_with_an_explicit_forward_qualifier_is_accepted():
+    """Phase H.9 narrowed this deliberately.
+
+    "revenue is EXPECTED TO BE $91.0 billion" is unambiguously a forward
+    statement, and refusing it dropped real full-year guidance from issuers
+    that state a single figure rather than a range. The guard that matters --
+    a BARE number with no forward qualifier at all -- is unchanged and is
+    tested below.
+    """
     release = _extract(
         "For fiscal 2027 revenue is expected to be $91.0 billion.",
+        filed="2026-05-20")
+    assert release.metrics["revenue"].midpoint == pytest.approx(91.0)
+
+
+def test_a_bare_point_with_no_qualifier_at_all_is_still_refused():
+    """The guard that keeps reported ACTUALS out of the guidance record."""
+    release = _extract(
+        "For fiscal 2027 the outlook section follows. Revenue was $91.0 billion.",
         filed="2026-05-20")
     assert "revenue" not in release.metrics
 

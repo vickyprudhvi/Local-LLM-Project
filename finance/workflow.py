@@ -33,6 +33,9 @@ from typing import Dict, List, Optional, Tuple
 
 import tools.config as config
 from finance.dcf import AssumptionSourceType, DcfValidationStatus, NetDebtPolicy
+from finance import canonical as canonical_module
+from finance import entity as entity_module
+from finance import suitability as suitability_module
 from finance.evidence import build_evidence_index
 from finance.freshness import (
     DCF_CURRENT_GUIDANCE_NOT_CONSIDERED,
@@ -45,6 +48,10 @@ from finance.freshness import (
 )
 from finance.forward_assumptions import (
     GROWTH_BOUNDS as FORWARD_GROWTH_BOUNDS,
+    build_tax_path,
+    detect_model_bound_conflict,
+    validate_guidance_against_assumption,
+    MARGIN_BOUNDS as FORWARD_MARGIN_BOUNDS,
     build_forward_assumptions,
 )
 from finance.metrics import (
@@ -947,6 +954,38 @@ def _reported_ratio_assumption(pairs, field_label, configured_default) -> dict:
     }
 
 
+def _normalized_historical_tax_rate(analysis_facts) -> Optional[float]:
+    """The issuer's own effective tax rate in ordinary years, or None.
+
+    The MEDIAN of the reported annual effective rates, so a single year
+    distorted by an acquisition, a settlement or a statutory change does not
+    set the forecast rate for the following four.
+    """
+    company_facts = (analysis_facts or {}).get("_sec_company_facts")
+    if not company_facts:
+        return None
+    from finance import period_facts as pf_module
+
+    pre_tax = {p.end: p.value for p in pf_module.annual_periods(
+        company_facts, "income_before_tax")}
+    expense = {p.end: p.value for p in pf_module.annual_periods(
+        company_facts, "income_tax_expense")}
+    rates = []
+    for end, base in sorted(pre_tax.items())[-5:]:
+        charge = expense.get(end)
+        if base and charge is not None and base > 0:
+            rate = charge / base
+            if 0.0 <= rate <= 0.60:
+                rates.append(rate)
+    if len(rates) < 2:
+        return None
+    rates.sort()
+    middle = len(rates) // 2
+    if len(rates) % 2:
+        return rates[middle]
+    return (rates[middle - 1] + rates[middle]) / 2.0
+
+
 def propose_assumptions(analysis_facts, forecast_years=None) -> List[dict]:
     """Derive base / bull / bear assumptions DETERMINISTICALLY from history.
 
@@ -1099,6 +1138,26 @@ def propose_assumptions(analysis_facts, forecast_years=None) -> List[dict]:
             forward_growth_path = scenario_paths["revenue_growth"]
             forward_margin_path = scenario_paths["operating_margin"]
 
+        # Sections 16-17. Built per scenario so each carries its own record,
+        # but the PATH itself does not vary by scenario: an unusual
+        # current-year tax effect is a fact about the year, not about how
+        # optimistic the scenario is.
+        tax_path_values, tax_provenance = build_tax_path(
+            state, forecast_years,
+            guidance=((state.management_guidance or {}).get("metrics") or {})
+            if state is not None else {},
+            historical_tax_rate=_normalized_historical_tax_rate(analysis_facts))
+        tax_source_type = (AssumptionSourceType.MANAGEMENT_GUIDANCE
+                           if str(tax_provenance.get("source", "")).startswith(
+                               "management_guidance")
+                           else AssumptionSourceType.CONFIGURED_DEFAULT)
+        tax_provenance_fields = {
+            "reported_tax_rate": tax_provenance.get("reported_tax_rate"),
+            "current_guided_tax_rate": tax_provenance.get("current_guided_tax_rate"),
+            "guided_tax_basis": tax_provenance.get("guided_tax_basis"),
+            "normalized_forward_tax_rate": tax_provenance.get("normalized_forward_tax_rate"),
+        }
+
         revenue_growth_value = (list(forward_growth_path.values) if forward_growth_path
                                 else round(max(-0.20, base_growth + growth_delta), 4))
         operating_margin_value = (list(forward_margin_path.values) if forward_margin_path
@@ -1174,10 +1233,16 @@ def propose_assumptions(analysis_facts, forecast_years=None) -> List[dict]:
                     + ", floored at 1%.", "ratio"),
             }),
             "tax_rate": {
-                "value": 0.21,
-                **provenance_entry(AssumptionSourceType.CONFIGURED_DEFAULT, [],
-                                   "Configured default statutory-adjacent tax rate; not "
-                                   "derived from this company's reported effective tax rate.",
+                "value": tax_path_values,
+                # Sections 16-17: the current-year rate is not the forecast
+                # rate. A live release guided a 35-36% effective tax rate
+                # against a 23.5-24.5% prior guide for the SAME year, moved
+                # by two acquisitions; applying 35% to all five forecast
+                # years would carry a one-off tax consequence through the
+                # whole horizon. `tax_provenance` records the reported rate,
+                # the guided rate, the normalized rate and which was used.
+                **tax_provenance_fields,
+                **provenance_entry(tax_source_type, [], tax_provenance["derivation"],
                                    "ratio"),
             },
             "depreciation_pct_revenue": {
@@ -1213,7 +1278,7 @@ def propose_assumptions(analysis_facts, forecast_years=None) -> List[dict]:
             "name": name,
             "revenue_growth": revenue_growth_value,
             "operating_margin": operating_margin_value,
-            "tax_rate": 0.21,
+            "tax_rate": tax_path_values,
             "depreciation_pct_revenue": round(depreciation_pct, 4),
             "capex_pct_revenue": round(capex_pct, 4),
             "working_capital_pct_revenue": round(working_capital_pct, 4),
@@ -1519,6 +1584,48 @@ def _dcf_inputs_from_facts(symbol, facts, forecast_years):
     if shares is None or shares <= 0:
         return None, "Diluted shares outstanding were not reported."
 
+    # -- Phase H.7, sections 17-21: PROVE the share basis ------------------
+    #
+    # A share count is not one number. Issued, treasury, current outstanding,
+    # weighted-average basic, weighted-average diluted and economic
+    # outstanding are six different quantities, and substituting one for
+    # another is invisible in the output while changing every per-share
+    # result. The precedence above picks one; this block CHECKS it against
+    # the one identity that uses a figure the system did not derive:
+    #
+    #     price x shares ~= reported market capitalisation
+    #
+    # On a live multi-class foreign issuer the selected count implied a
+    # market capitalisation 76% below the one the same provider reported in
+    # the same payload -- the count covered the listed class and the market
+    # cap covered all of them -- and the run published a modelled value per
+    # share four times too high with nothing flagged.
+    share_counts = entity_module.ShareCountSet()
+    share_counts.set(entity_module.ShareCountType.WEIGHTED_AVERAGE_DILUTED,
+                     shares if "diluted" in (shares_source or "") else None,
+                     shares_source or "sec", balance_sheet_as_of_hint(facts))
+    share_counts.set(entity_module.ShareCountType.CURRENT_OUTSTANDING,
+                     overview.get("shares_outstanding"), "provider_overview")
+    if state is not None:
+        sec_diluted, _adjust = split_adjusted_sec_share_count(facts)
+        share_counts.set(entity_module.ShareCountType.WEIGHTED_AVERAGE_DILUTED,
+                         sec_diluted, "sec_weighted_average_diluted")
+
+    security = _build_security_identity(symbol, facts)
+    share_reconciliation = entity_module.reconcile_share_basis(
+        share_counts, security,
+        price=(facts.get("quote") or {}).get("price"),
+        reported_market_cap=overview.get("market_capitalisation"))
+
+    # The reconciliation REPORTS; it does not re-select. Which count the
+    # equity bridge uses is documented project policy (SEC weighted-average
+    # diluted, established by the COR corrective patch and pinned by the
+    # per-ticker regressions), and having a reconciliation quietly swap it
+    # for whichever count happens to match a provider's market cap would be
+    # the same silent substitution this phase exists to stop -- just in the
+    # other direction. The mismatch flows into DCF suitability and research
+    # readiness instead, where a reader can see it.
+
     # -- the equity bridge, at the freshest coherent balance-sheet date --
     #
     # THIS is the AOS fix. The previous code read balance[0], the latest
@@ -1640,8 +1747,57 @@ def _dcf_inputs_from_facts(symbol, facts, forecast_years):
             "post_balance_sheet_events": (
                 [dict(e) for e in state.post_balance_sheet_events] if state is not None else []),
             "guidance_period": _guidance_period_label(state),
+            "guidance_issued_with": _guidance_issued_with_label(state),
+            "share_reconciliation": share_reconciliation.to_dict(),
+            "security_identity": security.to_dict(),
         },
     }, None
+
+
+def balance_sheet_as_of_hint(facts: dict) -> Optional[str]:
+    state = facts.get("_current_financial_state")
+    return getattr(state, "financial_as_of", None) if state is not None else None
+
+
+def _build_security_identity(symbol: str, facts: dict) -> "entity_module.SecurityIdentity":
+    """The security actually being analyzed, from filing + provider metadata.
+
+    Share classes come from the dei cover-page counts, which is the only
+    place companyfacts exposes a multi-class structure at all (the
+    dimensional axis naming each class is stripped). The depositary ratio is
+    left at 1.0 unless a provider states one -- guessing it would move every
+    per-share figure by the guessed factor.
+    """
+    company_facts = facts.get("_sec_company_facts") or {}
+    state = facts.get("_current_financial_state")
+    as_of = getattr(state, "financial_as_of", None) if state is not None else None
+    classes, note = entity_module.detect_share_classes(company_facts, as_of=as_of)
+    profile = facts.get("company") or {}
+    return entity_module.SecurityIdentity(
+        ticker=symbol,
+        entity_id=str(profile.get("cik") or symbol),
+        exchange=profile.get("exchange"),
+        currency=(profile.get("currency") or "USD"),
+        share_classes=tuple(classes),
+    )
+
+
+def _guidance_issued_with_label(state) -> Optional[str]:
+    """The reporting period the current guidance was PUBLISHED ALONGSIDE.
+
+    Section 10: not the period it applies to. Kept separate so the report can
+    say "FY2026 current guidance, issued with Q2 FY2026 results" rather than
+    collapsing the two into a single misleading label.
+    """
+    if state is None:
+        return None
+    metrics = ((state.management_guidance or {}).get("metrics") or {})
+    periods = {entry.get("issued_with_reporting_period")
+               for entry in metrics.values()
+               if isinstance(entry, dict) and entry.get("issued_with_reporting_period")}
+    if len(periods) != 1:
+        return None
+    return periods.pop()
 
 
 def _guidance_period_label(state) -> Optional[str]:
@@ -1756,6 +1912,24 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
                                else DataCompleteness.REDUCED))
         facts["current_financial_state"] = state.to_dict()
         facts["_current_financial_state"] = state
+        # Phase H.9, sections 1-8. One canonical set of CURRENT metrics in
+        # its own namespace, so the Snapshot renderer and every research role
+        # read the same figures. Before this, `fundamental_metrics` (computed
+        # from the ANNUAL statements) and the freshness planner's validated
+        # TTM values both existed under names like `operating_margin` and
+        # `free_cash_flow`, and which one a consumer got depended on the code
+        # path it happened to take.
+        canonical = canonical_module.build_canonical_evidence(
+            state,
+            historical_metrics={
+                name: entry for name, entry in
+                (facts.get("fundamental_metrics") or {}).items()
+                if isinstance(entry, dict)})
+        facts["canonical_evidence"] = canonical.to_dict()
+        facts["_canonical_evidence"] = canonical
+        for finding in canonical.findings:
+            warnings.append(f"{finding['code']}: {finding['message']}")
+        warnings.extend(canonical.warnings)
         facts["_sec_company_facts"] = company_facts
         facts["management_guidance"] = (sec_extras or {}).get("guidance")
         facts["superseded_guidance"] = (sec_extras or {}).get("superseded_guidance") or []
@@ -1847,6 +2021,21 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
     # research-stance section (see
     # FINANCE_REPORT_SYSTEM_INSTRUCTIONS) is grounded in these facts, not free
     # association.
+    # -- Phase H.7, section 35: is a DCF the right instrument here? --------
+    # Computed AFTER the valuation, because terminal-value dependence is one
+    # of the inputs, and kept strictly separate from DCF VALIDITY: a
+    # valuation can be arithmetically perfect and still describe a company
+    # the model cannot represent.
+    # Phase H.9, sections 13-19. Compare the DCF's year-1 assumption with the
+    # guidance that is actually comparable to it, and detect a configured
+    # bound that is constraining corroborated current evidence.
+    facts["assumption_conflicts"] = _detect_assumption_conflicts(facts)
+    facts["dcf_suitability"] = _assess_dcf_suitability(facts)
+    # Section 48: complete the immutable audit now that the share basis and
+    # the valuation are known. One object answers "what period, what basis,
+    # what policy, what warnings" without a reader assembling it from a dozen
+    # fields that were never designed to be read together.
+    _complete_dcf_input_audit(facts)
     facts["valuation_gap"] = _valuation_gap(facts)
     facts["dcf_scenario_spread"] = _scenario_spread(facts.get("dcf"))
     facts["research_readiness"] = _research_readiness(plan, facts)
@@ -2099,13 +2288,15 @@ def _research_readiness(plan: AnalysisPlan, facts: dict) -> dict:
     # analysis usable but materially more uncertain.
     blocking, limiting = _freshness_readiness_signals(facts)
     if blocking:
-        return {"status": ResearchReadiness.NOT_READY, "reasons": reasons + blocking}
+        return {"status": ResearchReadiness.NOT_READY,
+                "reasons": _rank_readiness_reasons(blocking + reasons)}
     for reason in limiting:
         limited = True
         reasons.append(reason)
 
     if limited:
-        return {"status": ResearchReadiness.LIMITED, "reasons": reasons}
+        return {"status": ResearchReadiness.LIMITED,
+                "reasons": _rank_readiness_reasons(reasons)}
     return {"status": ResearchReadiness.READY,
            "reasons": ["Required datasets are present, the DCF passed validation, and no "
                       "major cross-provider conflicts were found."]}
@@ -2121,6 +2312,212 @@ def _research_readiness(plan: AnalysisPlan, facts: dict) -> dict:
 # 0.90 default flags a range wider than the base value itself, which is a
 # defensible line for "the valuation cannot discriminate much", but it is a
 # starting point to tune as more tickers are observed, not a settled number.
+def _detect_assumption_conflicts(facts: dict) -> List[dict]:
+    """Sections 13-19: guidance-vs-assumption and model-bound conflicts."""
+    conflicts: List[dict] = []
+    state = facts.get("_current_financial_state")
+    dcf = facts.get("dcf") or {}
+    if state is None or not dcf.get("available"):
+        return conflicts
+
+    base = next((s for s in (dcf.get("scenarios") or [])
+                 if s.get("scenario") == "base"), None)
+    if base is None:
+        return conflicts
+    growth = (base.get("assumptions") or {}).get("revenue_growth")
+    year_one = growth[0] if isinstance(growth, list) else growth
+
+    provenance = ((base.get("assumptions") or {}).get("assumption_provenance") or {}).get(
+        "revenue_growth") or (dcf.get("shared_assumption_provenance") or {}).get(
+            "revenue_growth") or {}
+
+    from finance import forward_assumptions as fa
+
+    evidence = fa.collect_growth_evidence(
+        state, facts.get("_sec_company_facts"),
+        comparability=state.historical_comparability)
+    facts["_growth_evidence"] = evidence
+
+    consistency = fa.validate_guidance_against_assumption(
+        evidence, year_one, justification=provenance.get("derivation", ""))
+    facts["guidance_assumption_consistency"] = consistency
+    conflicts.extend(consistency.get("findings") or [])
+
+    bound_conflict = fa.detect_model_bound_conflict(
+        evidence, provenance.get("raw_value"), year_one, FORWARD_GROWTH_BOUNDS)
+    if bound_conflict:
+        conflicts.append(bound_conflict)
+    return conflicts
+
+
+def _complete_dcf_input_audit(facts: dict) -> None:
+    """Fill the audit fields that only exist after the valuation ran."""
+    state = facts.get("_current_financial_state")
+    audit = getattr(state, "freshness_audit", None) if state is not None else None
+    if not audit:
+        return
+    basis = facts.get("dcf_financial_basis") or {}
+    reconciliation = basis.get("share_reconciliation") or {}
+    audit["shares"] = {
+        "basis": facts.get("dcf_shares_outstanding_source"),
+        "reconciliation": reconciliation.get("status"),
+        "market_cap_gap": reconciliation.get("market_cap_gap"),
+    }
+    audit["net_debt"] = {
+        "policy": basis.get("net_debt_policy"),
+        "reconciliation": (basis.get("net_debt_reconciliation") or {}).get("reconciled"),
+    }
+    audit["dcf_suitability"] = (facts.get("dcf_suitability") or {}).get("dcf_suitability")
+    facts["dcf_input_audit"] = dict(audit)
+
+
+def _assess_dcf_suitability(facts: dict) -> dict:
+    """Section 35, from normalized facts only.
+
+    Every input is a figure the deterministic pipeline already selected --
+    the TTM margin, the TTM free cash flow, the model's own configured
+    bounds, the terminal-value share, the share reconciliation status. No
+    ticker, no sector, no company name enters here.
+    """
+    state = facts.get("_current_financial_state")
+    dcf = facts.get("dcf") or {}
+    basis = facts.get("dcf_financial_basis") or {}
+    if state is None:
+        return suitability_module.SuitabilityAssessment(
+            status=suitability_module.DcfSuitability.LIMITED,
+            summary=("No normalized financial state was built, so whether a discounted-cash-"
+                     "flow valuation suits this company could not be assessed.")).to_dict()
+
+    revenue = (state.flows.get("revenue") or None)
+    operating_income = (state.flows.get("operating_income") or None)
+    free_cash_flow = (state.flows.get("free_cash_flow") or None)
+    operating_cash_flow = (state.flows.get("operating_cash_flow") or None)
+
+    margin = None
+    if revenue is not None and operating_income is not None             and revenue.value and operating_income.value is not None:
+        margin = operating_income.value / revenue.value
+
+    # How persistent is the cash burn? Counted from the reported annual
+    # series rather than asserted, so "one weak year" and "this is what the
+    # company does" are distinguishable.
+    negative_periods = total_periods = None
+    company_facts = facts.get("_sec_company_facts")
+    if company_facts:
+        from finance import period_facts as pf_module
+        annual_ocf = pf_module.annual_periods(company_facts, "operating_cash_flow")
+        if annual_ocf:
+            recent = annual_ocf[-5:]
+            total_periods = len(recent)
+            negative_periods = sum(1 for p in recent if p.value is not None and p.value < 0)
+
+    runway = None
+    cash = state.value("cash_and_cash_equivalents")
+    securities = state.value("short_term_investments")
+    burn = free_cash_flow.value if free_cash_flow is not None else None
+    if burn is not None and burn < 0 and cash is not None:
+        liquidity = cash + (securities or 0.0)
+        runway = liquidity / abs(burn) if burn else None
+
+    primary = next((s for s in (dcf.get("scenarios") or [])
+                    if s.get("scenario") == dcf.get("primary_scenario")), None)
+    terminal_share = (primary or {}).get("terminal_value_share_of_enterprise_value")
+
+    growth_observed = None
+    evidence = facts.get("_growth_evidence")
+    if evidence is not None:
+        growth_observed = getattr(evidence, "ttm_yoy", None) or             getattr(evidence, "historical_cagr", None)
+
+    profitability = (state.profitability or {})
+    margin_provenance = {}
+    for scenario in (dcf.get("scenarios") or []):
+        if scenario.get("scenario") == "base":
+            margin_provenance = ((scenario.get("assumptions") or {})
+                                 .get("assumption_provenance") or {}).get(
+                                     "operating_margin") or {}
+    margin_provenance = margin_provenance or (
+        dcf.get("shared_assumption_provenance") or {}).get("operating_margin") or {}
+    margin_basis = ("configured_default"
+                    if margin_provenance.get("source_type") == "configured_default"
+                    else None)
+
+    equity_value = None
+    for scenario in (dcf.get("scenarios") or []):
+        if scenario.get("scenario") == "base":
+            equity_value = scenario.get("equity_value")
+
+    assessment = suitability_module.assess_dcf_suitability(
+        revenue=revenue.value if revenue is not None else None,
+        operating_margin=margin,
+        free_cash_flow=burn,
+        operating_cash_flow=(operating_cash_flow.value
+                             if operating_cash_flow is not None else None),
+        margin_bounds=FORWARD_MARGIN_BOUNDS,
+        growth_bounds=FORWARD_GROWTH_BOUNDS,
+        observed_growth=growth_observed,
+        terminal_value_share=terminal_share,
+        share_reconciliation_status=(basis.get("share_reconciliation") or {}).get("status"),
+        historical_comparability=basis.get("historical_comparability"),
+        negative_periods=negative_periods,
+        total_periods=total_periods,
+        cash_runway_years=runway,
+        profitability_findings=(profitability.get("findings") or []),
+        assumption_conflicts=facts.get("assumption_conflicts") or [],
+        base_period_aligned=(facts.get("canonical_evidence") or {}).get(
+            "base_period_aligned"),
+        margin_basis=margin_basis,
+        normalization_status=((profitability.get("normalized") or {}).get("status")),
+        modelled_equity_value=equity_value,
+        recurring_free_cash_flow=burn if (burn or 0) > 0 else None,
+    )
+    return assessment.to_dict()
+
+
+# Section 29. Materiality to the CURRENT valuation, most material first. A
+# reader shown one reason should be shown the one that most changes the
+# number, and a live run led with a historical structural-break note while a
+# current-period profitability default was driving the entire valuation.
+_READINESS_REASON_PRIORITY = (
+    # Phase H.9, section 22. A year-1 assumption that contradicts the
+    # company's own guidance, or a model bound that is setting the forecast,
+    # bears on the current valuation more than anything below it -- and a
+    # live run led with "scenario sensitivity is high" while exactly that was
+    # happening underneath.
+    "sits outside management's own guidance",
+    "constraining current evidence",
+    "representational range",
+    "model's configured bound",
+    "configured default operating margin",
+    "CONFIGURED DEFAULT",
+    "profitability",
+    "normaliz",
+    "share count",
+    "net debt",
+    "not a suitable instrument",
+    "trailing-twelve-month base period",
+    "balance sheet",
+    "guidance",
+    "structural break",
+    "Scenario sensitivity",
+)
+
+
+def _rank_readiness_reasons(reasons: List[str]) -> List[str]:
+    """Order readiness reasons by how much each bears on the current
+    valuation, keeping every one."""
+    def rank(reason: str) -> int:
+        lowered = reason.lower()
+        for index, marker in enumerate(_READINESS_REASON_PRIORITY):
+            if marker.lower() in lowered:
+                return index
+        return len(_READINESS_REASON_PRIORITY)
+    seen, ordered = set(), []
+    for reason in sorted(reasons, key=rank):
+        if reason not in seen:
+            seen.add(reason)
+            ordered.append(reason)
+    return ordered
+
+
 def _freshness_readiness_signals(facts: dict) -> Tuple[List[str], List[str]]:
     """Section 25 — (blocking, limiting) readiness reasons from freshness.
 
@@ -2146,6 +2543,49 @@ def _freshness_readiness_signals(facts: dict) -> Tuple[List[str], List[str]]:
     state = facts.get("current_financial_state") or {}
     if not state:
         return blocking, limiting
+
+    # -- Phase H.9, sections 15/18/22 --------------------------------------
+    for conflict in (facts.get("assumption_conflicts") or []):
+        if conflict.get("severity") == "error":
+            blocking.append(conflict.get("message", ""))
+
+    canonical = facts.get("canonical_evidence") or {}
+    if canonical.get("base_period_aligned") is False:
+        limiting.append(
+            "The metrics presented as one trailing-twelve-month financial base do not all "
+            "cover the same window; each carries its own period.")
+
+    # -- Phase H.7, section 49 --------------------------------------------
+    basis = facts.get("dcf_financial_basis") or {}
+    share = basis.get("share_reconciliation") or {}
+    if share.get("status") in ("MATERIAL_DIFFERENCE", "INCOMPATIBLE_BASIS"):
+        gap = share.get("market_cap_gap")
+        blocking.append(
+            "The share count underlying every per-share figure does not reconcile against "
+            "the reported market capitalisation"
+            + (f" ({gap:+.1%} apart)" if isinstance(gap, (int, float)) else "")
+            + ". A modelled value per share cannot be compared with the market price until "
+            "the share basis is resolved, so valuation-based conclusions are withheld.")
+
+    suitability_record = facts.get("dcf_suitability") or {}
+    status = suitability_record.get("dcf_suitability")
+    if status == suitability_module.DcfSuitability.NOT_SUITABLE:
+        blocking.append(
+            "A discounted-cash-flow valuation is not a suitable instrument for this company "
+            "as its figures currently stand, so a valuation-derived conclusion is withheld. "
+            + (suitability_record.get("summary") or ""))
+    elif status == suitability_module.DcfSuitability.LIMITED:
+        limiting.append(
+            "A discounted-cash-flow valuation fits this company only loosely. "
+            + (suitability_record.get("summary") or ""))
+    elif status == suitability_module.DcfSuitability.SUITABLE_WITH_HIGH_UNCERTAINTY:
+        limiting.append(
+            "A discounted-cash-flow valuation is usable here but carries high uncertainty. "
+            + (suitability_record.get("summary") or ""))
+
+    note = state.get("reporting_framework_note")
+    if note:
+        limiting.append(note)
 
     revenue = (state.get("flows") or {}).get("revenue") or {}
     ttm = revenue.get("ttm") or {}
@@ -2181,7 +2621,12 @@ def _freshness_readiness_signals(facts: dict) -> Tuple[List[str], List[str]]:
             "rate measures a different business from the one being valued. "
             + (comparability.get("summary") or ""))
 
-    events = state.get("post_balance_sheet_events") or []
+    # Phase H.9, sections 24-25: only events that change the ISSUER's capital
+    # structure bear on readiness. An insider selling existing shares moves
+    # no share count, no debt and no cash, and leading the readiness reason
+    # with it buried the conflicts that actually drive the valuation.
+    events = [e for e in (state.get("post_balance_sheet_events") or [])
+              if (e.get("impact") or {}).get("requires_reassessment")]
     if events:
         first = events[0]
         limiting.append(
@@ -3177,6 +3622,87 @@ def _compact_guidance(guidance):
     }
 
 
+def _compact_financial_basis(basis: Optional[dict]) -> Optional[dict]:
+    """The valuation basis, minus the provenance section 54 keeps out of
+    compact mode.
+
+    `share_reconciliation` carries every pairwise comparison and the full
+    security identity carries per-class detail with evidence ids. Both are
+    exactly what a reader needs when a mismatch is being investigated and
+    exactly what they do not need on a 1,000-word report -- and together they
+    pushed a real fixture's compact payload past its token budget. The
+    STATUS survives, because that is what the report renders and what
+    readiness reads; the detail stays in `facts` for full/debug mode.
+    """
+    if not basis:
+        return basis
+    compact = dict(basis)
+    reconciliation = compact.get("share_reconciliation") or {}
+    if reconciliation:
+        compact["share_reconciliation"] = {
+            "status": reconciliation.get("status"),
+            "selected_basis": reconciliation.get("selected_basis"),
+            "market_cap_gap": reconciliation.get("market_cap_gap"),
+        }
+    security = compact.get("security_identity") or {}
+    if security:
+        compact["security_identity"] = {
+            "ticker": security.get("ticker"),
+            "security_type": security.get("security_type"),
+            "depositary_ratio": security.get("depositary_ratio"),
+            "share_class_count": len(security.get("share_classes") or []),
+        }
+    # The net-debt reconciliation's component dump is the same story.
+    net_debt = compact.get("net_debt_reconciliation") or {}
+    if net_debt:
+        compact["net_debt_reconciliation"] = {
+            "policy": net_debt.get("policy"),
+            "reconciled": net_debt.get("reconciled"),
+            "code": net_debt.get("code"),
+        }
+    return compact
+
+
+def _compact_canonical_evidence(evidence: Optional[dict]) -> Optional[dict]:
+    """The canonical packet at compact size.
+
+    Keeps value, period and definition for every metric -- which is what
+    makes a figure identifiable -- and drops the per-metric source and
+    evidence ids, which section 54 keeps out of compact mode anyway.
+    """
+    if not evidence:
+        return None
+
+    # Only the metrics a section actually quotes. The full packet carries
+    # every selected flow, balance point and derived ratio with its source
+    # and evidence id; the compact report shows a dozen numbers, and the
+    # remainder is provenance that section 54 keeps out of compact mode
+    # anyway. The `period` survives on every one, because a value without its
+    # period is exactly the ambiguity this packet exists to remove.
+    quoted = ("revenue", "operating_income", "net_income", "operating_cash_flow",
+              "free_cash_flow", "operating_margin", "net_margin",
+              "free_cash_flow_margin", "revenue_growth", "net_debt", "total_debt",
+              "cash_and_cash_equivalents", "stockholders_equity")
+
+    def trim(bucket):
+        return {name: {"value": m.get("value"), "period": m.get("period"),
+                       "period_type": m.get("period_type")}
+                for name, m in (bucket or {}).items()
+                if name in quoted and m.get("value") is not None}
+
+    # Only the CURRENT bucket travels in the compact payload. The historical
+    # values are already present as `fundamental_metrics`, whose own entries
+    # name the fiscal periods they were computed from -- carrying them twice
+    # is duplication, and duplication is what pushed a real fixture past its
+    # token budget. The point of this packet is that a CURRENT value exists
+    # under an unambiguous name; the historical side needs no second copy.
+    return {
+        "current": trim(evidence.get("current")),
+        "base_period": evidence.get("base_period"),
+        "base_period_aligned": evidence.get("base_period_aligned"),
+    }
+
+
 def _compact_financial_state(state: Optional[dict]) -> Optional[dict]:
     """The selected values the compact report quotes, and nothing else.
 
@@ -3189,20 +3715,13 @@ def _compact_financial_state(state: Optional[dict]) -> Optional[dict]:
     """
     if not state:
         return None
-    flows = {}
-    for name, selection in (state.get("flows") or {}).items():
-        if not isinstance(selection, dict) or selection.get("value") is None:
-            continue
-        flows[name] = {
-            "value": selection.get("value"),
-            "source": selection.get("source"),
-            "period_start": selection.get("period_start"),
-            "as_of_date": selection.get("as_of_date"),
-            "validation_status": (selection.get("ttm") or {}).get("validation_status"),
-        }
+    # Phase H.9: the selected flows now travel once, in `canonical_evidence`,
+    # which carries the same values plus their namespace and the derived
+    # current ratios. Two copies of one set of numbers in one payload is the
+    # ambiguity this phase exists to remove -- and it pushed a real fixture
+    # past its token budget.
     comparability = state.get("historical_comparability") or {}
     compact = {
-        "flows": flows,
         "net_debt": state.get("net_debt"),
         "net_debt_policy": (state.get("net_debt_detail") or {}).get("net_debt_policy"),
         "net_debt_reconciled": (state.get("net_debt_detail") or {}).get("reconciled"),
@@ -3333,7 +3852,7 @@ def build_compact_synthesis_payload(result: AnalysisResult) -> dict:
         # `management_guidance` is compacted to the guidance VALUES plus
         # their provenance -- deliberately WITHOUT the source excerpts, which
         # are full sentences from the filing and belong in full/debug mode.
-        "dcf_financial_basis": facts.get("dcf_financial_basis"),
+        "dcf_financial_basis": _compact_financial_basis(facts.get("dcf_financial_basis")),
         "management_guidance": _compact_guidance(facts.get("management_guidance")),
         "guidance_releases_examined": facts.get("guidance_releases_examined"),
         "valuation_freshness": (facts.get("current_financial_state") or {}).get(
@@ -3352,7 +3871,13 @@ def build_compact_synthesis_payload(result: AnalysisResult) -> dict:
         # worth its size in the compact payload (section 23's last line).
         "current_financial_state": _compact_financial_state(
             facts.get("current_financial_state")),
+        # Section 1/4: the canonical packet, trimmed. Research roles read
+        # `current.*` and `historical.*` from here rather than reaching into
+        # provider-shaped structures where the same name means two things.
+        "canonical_evidence": _compact_canonical_evidence(
+            facts.get("canonical_evidence")),
         "research_readiness": facts.get("research_readiness"),
+        "dcf_suitability": facts.get("dcf_suitability"),
         "data_provenance": bounded_provenance,
         "plan": {
             "mode": result.plan.mode,
@@ -3788,6 +4313,11 @@ def _snapshot_rows(compact: dict) -> List[Tuple[str, str]]:
         entry = fundamental_metrics_.get(name)
         return entry if isinstance(entry, dict) else {}
 
+    # Phase H.9, sections 1-2: the canonical CURRENT metrics. Read once, at
+    # the top, so every row below draws on the same packet rather than on
+    # whichever provider-shaped structure its own code path reaches.
+    canonical_current = (compact.get("canonical_evidence") or {}).get("current") or {}
+
     rows: List[Tuple[str, str]] = []
 
     def add(label, formatted):
@@ -3808,12 +4338,11 @@ def _snapshot_rows(compact: dict) -> List[Tuple[str, str]]:
     #
     # The labels now name the period, so a reader can see which basis each
     # figure is on rather than assuming they share one.
-    state_flows = (compact.get("current_financial_state") or {}).get("flows") or {}
-
     def flow_row(field_name, fallback):
-        selection = state_flows.get(field_name)
+        selection = canonical_current.get(field_name)
         if isinstance(selection, dict) and selection.get("value") is not None:
-            suffix = " (TTM)" if selection.get("source") == "ttm_calculation" else " (FY)"
+            suffix = (" (TTM)" if selection.get("period_type") in ("TTM", "DERIVED")
+                      else " (FY)")
             return selection["value"], suffix
         return fallback, ""
 
@@ -3821,15 +4350,30 @@ def _snapshot_rows(compact: dict) -> List[Tuple[str, str]]:
     add("Market Cap", _fmt_currency(company.get("market_capitalisation"), currency))
     revenue_value, revenue_suffix = flow_row("revenue", latest_income_values.get("revenue"))
     add(f"Revenue{revenue_suffix}", _fmt_currency(revenue_value, currency))
-    add("Revenue Growth", _fmt_pct(fm("revenue_growth_yoy").get("value")))
+    growth_metric = canonical_current.get("revenue_growth") or {}
+    if growth_metric.get("value") is not None:
+        add("Revenue Growth (TTM)", _fmt_pct(growth_metric["value"]))
+    else:
+        add("Revenue Growth", _fmt_pct(fm("revenue_growth_yoy").get("value")))
     income_value, income_suffix = flow_row("net_income", latest_income_values.get("net_income"))
     add(f"Net Income{income_suffix}", _fmt_currency(income_value, currency))
     fcf_value, fcf_suffix = flow_row("free_cash_flow", fm("free_cash_flow").get("value"))
     add(f"FCF{fcf_suffix}", _fmt_currency(fcf_value, currency))
-    state_net_debt = (compact.get("current_financial_state") or {}).get("net_debt")
+    state_net_debt = ((canonical_current.get("net_debt") or {}).get("value")
+                      if canonical_current.get("net_debt")
+                      else (compact.get("current_financial_state") or {}).get("net_debt"))
     add("Net Debt", _fmt_currency(
         state_net_debt if state_net_debt is not None else fm("net_debt").get("value"), currency))
-    add("Operating Margin", _fmt_pct(fm("operating_margin").get("value")))
+    # Phase H.9: the DERIVED CURRENT margin, when one exists. Reading
+    # `fundamental_metrics` here rendered last fiscal year's margin under a
+    # heading that said trailing twelve months -- 10.66% against a current
+    # 15.71% on one live issuer, and nothing at all on another whose annual
+    # operating income is untagged.
+    operating_margin_metric = canonical_current.get("operating_margin") or {}
+    if operating_margin_metric.get("value") is not None:
+        add("Operating Margin (TTM)", _fmt_pct(operating_margin_metric["value"]))
+    else:
+        add("Operating Margin", _fmt_pct(fm("operating_margin").get("value")))
     add("Current Ratio", _fmt_ratio(fm("current_ratio").get("value")))
 
     for label, metric_name, formatter in (
@@ -3953,6 +4497,15 @@ def _valuation_basis_lines(compact: dict) -> List[str]:
         period = basis.get("guidance_period")
         if period:
             lines.append(f"Management guidance: {period} current guidance")
+            # Section 10/42. A company routinely issues FULL-YEAR guidance
+            # alongside its second-quarter results, and a live report called
+            # that "Q2 FY2026 guidance" -- naming the reporting quarter as
+            # the target and making a twelve-month outlook look like a
+            # three-month one. Both periods are stated, and they are labelled
+            # as the different things they are.
+            issued_with = basis.get("guidance_issued_with")
+            if issued_with and issued_with != period:
+                lines.append(f"  Issued with {issued_with} results")
         else:
             fiscal_year = guidance.get("fiscal_year")
             lines.append(f"Management guidance: FY{fiscal_year} current guidance"
@@ -3989,6 +4542,23 @@ def _valuation_basis_lines(compact: dict) -> List[str]:
     freshness = basis.get("valuation_freshness")
     if freshness and freshness != ValuationFreshness.CURRENT:
         lines.append(f"Valuation freshness: {freshness.replace('_', ' ').lower()}")
+
+    # Section 54: DCF suitability is shown WHEN MATERIAL. A SUITABLE verdict
+    # is the ordinary case and saying so on every report would be noise; the
+    # other three change how much weight the valuation can carry and belong
+    # on the page.
+    suitability = (compact.get("dcf_suitability") or {}).get("dcf_suitability")
+    if suitability and suitability != "SUITABLE":
+        lines.append(f"DCF suitability: {suitability.replace('_', ' ').lower()}")
+
+    share = basis.get("share_reconciliation") or {}
+    if share.get("status") in ("MATERIAL_DIFFERENCE", "INCOMPATIBLE_BASIS"):
+        gap = share.get("market_cap_gap")
+        lines.append(
+            "Share basis: UNRESOLVED"
+            + (f" — price x shares differs from reported market capitalisation by "
+               f"{gap:+.1%}" if isinstance(gap, (int, float)) else "")
+            + "; per-share figures are not comparable with the market price")
     return lines + [""] if lines else []
 
 
@@ -4026,6 +4596,26 @@ def _valuation_section(compact: dict) -> List[str]:
     spread = compact.get("dcf_scenario_spread") or {}
     gap = compact.get("valuation_gap") or {}
     dcf = compact.get("dcf") or {}
+
+    # Section 31/56: a precise price-vs-value comparison and a warning that
+    # the two are not on the same share basis cannot both be true. When the
+    # denominator under every per-share figure is unresolved, the comparison
+    # is WITHHELD rather than printed beside its own contradiction -- the
+    # same treatment the report already gives a DCF that failed validation.
+    share_basis = ((compact.get("dcf_financial_basis") or {})
+                   .get("share_reconciliation") or {})
+    share_basis_unresolved = share_basis.get("status") in (
+        "MATERIAL_DIFFERENCE", "INCOMPATIBLE_BASIS")
+
+    # Section 26: when the DCF is not economically reliable, a comparison
+    # rendered to one decimal place claims a precision the inputs do not
+    # support. A live run printed "Market-price premium: 75,588.5%" because a
+    # configured default margin had collapsed the modelled value to $0.20 --
+    # the figure was arithmetically correct and told the reader nothing
+    # except that something was broken. The raw numbers stay in the facts for
+    # full/debug mode; only the compact rendering is suppressed.
+    suitability_status = (compact.get("dcf_suitability") or {}).get("dcf_suitability")
+    valuation_not_meaningful = suitability_status in ("LIMITED", "NOT_SUITABLE")
 
     if quote.get("price") is not None:
         lines.append(f"Market price: {_fmt_price(quote['price'], currency)}")
@@ -4076,7 +4666,19 @@ def _valuation_section(compact: dict) -> List[str]:
         # return be") and is rendered as its own, separately labelled line.
         premium_pct = gap.get("market_price_premium_pct")
         return_pct = gap.get("modeled_return_to_value_pct")
-        if premium_pct is not None:
+        if share_basis_unresolved:
+            lines.append(
+                "Comparison with the market price is WITHHELD: the share count underlying "
+                "the modeled per-share values does not reconcile against the reported market "
+                "capitalisation, so the two figures are not on the same basis.")
+            lines.append("")
+        elif valuation_not_meaningful:
+            lines.append(
+                "Market-price comparison: not meaningful — DCF input normalization is "
+                "unresolved, so a percentage comparison against the modeled value would "
+                "state a precision the inputs do not support.")
+            lines.append("")
+        elif premium_pct is not None:
             if premium_pct < 0:
                 lines.append("Market-price discount to base modeled value: "
                              f"{abs(premium_pct):.1%}")
@@ -4085,9 +4687,10 @@ def _valuation_section(compact: dict) -> List[str]:
                              f"{abs(premium_pct):.1%}")
             else:
                 lines.append("Market price is approximately equal to the base modeled value.")
-        if return_pct is not None:
+        suppress = share_basis_unresolved or valuation_not_meaningful
+        if return_pct is not None and not suppress:
             lines.append(f"Modeled return from current price to base value: {return_pct:+.1%}")
-        if premium_pct is not None or return_pct is not None:
+        if not suppress and (premium_pct is not None or return_pct is not None):
             lines.append("")
 
     scenarios = dcf.get("scenarios") or []
@@ -4521,7 +5124,14 @@ def synthesize_report(result: AnalysisResult, ask_local_fn, report_detail=None) 
         # recommendation on a NOT_READY analysis.
         pipeline_result = run_research_pipeline(
             evidence_index, ask_local_fn,
-            readiness_status=(compact.get("research_readiness") or {}).get("status"))
+            readiness_status=(compact.get("research_readiness") or {}).get("status"),
+            # Phase H.9: the canonical CURRENT metrics and the current
+            # guidance, so the condition validators can distinguish a
+            # future development from a description of today.
+            current_metrics=((compact.get("canonical_evidence") or {})
+                             .get("current") or {}),
+            guidance_metrics=((compact.get("management_guidance") or {})
+                              .get("metrics") or {}))
         result.research_pipeline = pipeline_result.to_dict()
         result.instrumentation["research_pipeline_prompt_tokens"] = pipeline_result.total_prompt_tokens
         result.instrumentation["research_pipeline_completion_tokens"] = pipeline_result.total_completion_tokens

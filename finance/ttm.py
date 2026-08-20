@@ -53,7 +53,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from finance import period_facts as pf
-from finance.xbrl_mapping import CONCEPT_MAP
+from finance.period_facts import _concept_map
 
 # Deterministic guard code (section 3). Emitted as a structured status on the
 # result, never raised: an unconstructable TTM degrades a valuation to the
@@ -90,6 +90,16 @@ class TtmValidation:
     """Whether the constructed window is what its label claims."""
 
     VALID = "valid"
+
+    @classmethod
+    def worst_of(cls, *statuses) -> str:
+        """The weakest status among several, for a value derived from more
+        than one window. A figure built from a PARTIAL component is itself
+        no better than PARTIAL."""
+        rank = {cls.VALID: 0, cls.PARTIAL: 1, cls.INVALID: 2}
+        found = [s for s in statuses if s in rank]
+        return max(found, key=lambda s: rank[s]) if found else cls.INVALID
+
     # Constructed and arithmetically sound, but something a reader needs to
     # know is true of it — most often that it ends materially earlier than
     # the company's latest reported period.
@@ -290,9 +300,10 @@ def _ytd_facts_by_year(company_facts: dict, metric: str
     Facts sharing a start date are one fiscal year's YTD chain (Q1 ~90d,
     H1 ~181d, 9M ~273d), because year-to-date resets at the fiscal year start.
     """
-    if metric not in CONCEPT_MAP:
+    concept_map = _concept_map(company_facts)
+    if metric not in concept_map:
         return None, {}
-    is_instant, _ = CONCEPT_MAP[metric]
+    is_instant, _ = concept_map[metric]
     if is_instant:
         return None, {}
     concept, facts = pf._winning_concept_facts(company_facts, metric)  # noqa: SLF001
@@ -439,9 +450,10 @@ def build_ttm(company_facts: dict, metric: str, offset: int = 0,
     balance has no twelve-month sum, and averaging one would invent a figure
     no filing reported.
     """
-    if metric not in CONCEPT_MAP:
+    concept_map = _concept_map(company_facts)
+    if metric not in concept_map:
         return _invalid(metric, f"{metric!r} has no reviewed XBRL concept mapping")
-    is_instant, _ = CONCEPT_MAP[metric]
+    is_instant, _ = concept_map[metric]
     if is_instant:
         return _invalid(
             metric,

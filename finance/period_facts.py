@@ -42,6 +42,20 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from finance.xbrl_mapping import CONCEPT_MAP, _candidate_facts
 
+
+def _concept_map(company_facts: dict):
+    """The reviewed field -> concept mapping for THIS issuer's framework.
+
+    Phase H.7. Every function below used the module-level us-gaap
+    `CONCEPT_MAP` directly, which made a foreign private issuer's entire
+    history unreadable: an ifrs-full filer has no `RevenueFromContractWith-
+    CustomerExcludingAssessedTax`, so `revenue` resolved to nothing and the
+    pipeline reported the company as having published no financials.
+    """
+    from finance import taxonomy as taxonomy_module
+    return taxonomy_module.concept_map_for(
+        taxonomy_module.detect_taxonomy(company_facts))
+
 # A discrete quarter is ~13 weeks. 4-4-5 retail calendars and 52/53-week
 # fiscal years stretch this, so the window is generous on both sides but
 # nowhere near wide enough to admit a half-year (180d) or a year (364d) —
@@ -56,6 +70,97 @@ ANNUAL_DAYS = (300, 400)
 # Fiscal quarter index by YTD length. A YTD fact ending N days after the
 # fiscal year began is the Nth quarter cumulative.
 _YTD_QUARTER_BOUNDS = ((0, 115, 1), (116, 210, 2), (211, 300, 3))
+
+
+class DurationType:
+    """What KIND of period a fact covers (section 1).
+
+    The distinction that matters is not "quarterly vs annual" but whether two
+    facts may be COMPARED OR SUMMED at all. A 6-month year-to-date column and
+    a discrete quarter are both "interim" and adding them double-counts three
+    months; a trailing twelve months and a fiscal year are both twelve months
+    and are still not the same period.
+
+    `OTHER` is deliberate and load-bearing: an issuer that tags an
+    11-month transition period, or a 45-day stub after a reorganization,
+    produces a real fact that no rule here should silently treat as a quarter.
+    """
+
+    INSTANT = "INSTANT"
+    QUARTER = "QUARTER"
+    YTD_6M = "YTD_6M"
+    YTD_9M = "YTD_9M"
+    HALF_YEAR = "HALF_YEAR"
+    ANNUAL = "ANNUAL"
+    TTM = "TTM"
+    OTHER = "OTHER"
+    ALL = (INSTANT, QUARTER, YTD_6M, YTD_9M, HALF_YEAR, ANNUAL, TTM, OTHER)
+
+    # Types that are cumulative from a fiscal-year start. Summing two of
+    # these, or a cumulative one with a discrete one, double-counts.
+    CUMULATIVE = frozenset({YTD_6M, YTD_9M, HALF_YEAR})
+    # Types that measure one non-overlapping slice of time.
+    DISCRETE = frozenset({QUARTER})
+    # Types that already span twelve months.
+    FULL_YEAR = frozenset({ANNUAL, TTM})
+
+
+# Day-span windows for each duration type. Generous on both sides because
+# 52/53-week and 4-4-5 fiscal calendars stretch every boundary, but never
+# wide enough for two adjacent types to overlap -- that is the only property
+# these windows must guarantee.
+_DURATION_WINDOWS = (
+    (75, 115, DurationType.QUARTER),
+    (150, 210, DurationType.HALF_YEAR),
+    (240, 300, DurationType.YTD_9M),
+    (300, 400, DurationType.ANNUAL),
+)
+
+
+def classify_duration(start: Optional[str], end: Optional[str],
+                      fiscal_year_start: Optional[str] = None) -> str:
+    """The duration type of one fact, from its actual dates.
+
+    `fiscal_year_start` disambiguates the one genuinely ambiguous case: a
+    ~181-day span is a HALF_YEAR if it stands alone and a YTD_6M if it starts
+    at the fiscal year start, and only the caller knows which. Without it the
+    span is reported as HALF_YEAR, which is the weaker claim.
+    """
+    if start is None:
+        return DurationType.INSTANT if end else DurationType.OTHER
+    span = _span_days(start, end)
+    if span is None:
+        return DurationType.OTHER
+    for low, high, kind in _DURATION_WINDOWS:
+        if low <= span <= high:
+            if kind == DurationType.HALF_YEAR and fiscal_year_start                     and start == fiscal_year_start:
+                return DurationType.YTD_6M
+            if kind == DurationType.YTD_9M and fiscal_year_start                     and start != fiscal_year_start:
+                return DurationType.OTHER
+            return kind
+    return DurationType.OTHER
+
+
+def periods_are_summable(left: "PeriodFact", right: "PeriodFact") -> Tuple[bool, str]:
+    """May these two facts be added? (ok, reason)
+
+    Section 1's "do not compare or sum periods without validating
+    compatibility", as one function. Every caller that combines two facts
+    goes through here rather than re-deriving the rule.
+    """
+    if left.unit != right.unit:
+        return False, f"units differ ({left.unit} vs {right.unit})"
+    if left.currency != right.currency:
+        return False, f"currencies differ ({left.currency} vs {right.currency})"
+    if left.duration_type == DurationType.INSTANT or             right.duration_type == DurationType.INSTANT:
+        return False, "a point-in-time balance cannot be summed with a period"
+    if left.duration_type in DurationType.CUMULATIVE or             right.duration_type in DurationType.CUMULATIVE:
+        return False, ("a cumulative year-to-date figure cannot be summed; difference "
+                       "consecutive year-to-date facts instead")
+    if left.start and right.start and left.end and right.end:
+        if left.start < right.end and right.start < left.end:
+            return False, f"periods overlap ({left.start}..{left.end}, {right.start}..{right.end})"
+    return True, ""
 
 
 @dataclass(frozen=True)
@@ -80,6 +185,20 @@ class PeriodFact:
     start: Optional[str]
     end: Optional[str]
     reconstructed_from: Tuple[str, ...] = ()
+    # Section 1. `currency` is separate from `unit` because a fact can be
+    # USD-denominated shares or a pure ratio; `amended` records that the
+    # value arrived on an amending form (10-K/A, 10-Q/A, 20-F/A), which is
+    # why it supersedes an earlier value for the same period; `taxonomy`
+    # records which reporting framework produced it, so a us-gaap figure is
+    # never silently combined with an ifrs-full one.
+    currency: str = "USD"
+    amended: bool = False
+    taxonomy: str = "us-gaap"
+    entity_id: Optional[str] = None
+
+    @property
+    def duration_type(self) -> str:
+        return classify_duration(self.start, self.end)
 
     @property
     def is_instant(self) -> bool:
@@ -110,6 +229,11 @@ class PeriodFact:
             "end": self.end,
             "as_of_date": self.as_of_date,
             "duration_days": self.duration_days,
+            "duration_type": self.duration_type,
+            "currency": self.currency,
+            "amended": self.amended,
+            "taxonomy": self.taxonomy,
+            "entity_id": self.entity_id,
             "reconstructed_from": list(self.reconstructed_from),
         }
 
@@ -138,6 +262,13 @@ def _to_fact(field_name: str, raw: dict, concept: str,
         start=raw.get("start"),
         end=raw.get("end"),
         reconstructed_from=tuple(reconstructed_from),
+        currency=raw.get("_currency", "USD"),
+        # An amending form supersedes the original for the same period. This
+        # is already handled by latest-filed-wins in `_dedupe_by_period`; the
+        # flag exists so a report can SAY the figure was restated rather than
+        # leaving a reader to compare accession numbers.
+        amended=str(raw.get("form", "")).endswith("/A"),
+        taxonomy=raw.get("_taxonomy", "us-gaap"),
     )
 
 
@@ -159,9 +290,10 @@ def _winning_concept_facts(company_facts: dict, field_name: str) -> Tuple[Option
     periods would mean differencing two year-to-date facts that came from
     different tags, which is not a defensible reconstruction.
     """
-    if field_name not in CONCEPT_MAP:
+    concept_map = _concept_map(company_facts)
+    if field_name not in concept_map:
         return None, []
-    _is_instant, candidates = CONCEPT_MAP[field_name]
+    _is_instant, candidates = concept_map[field_name]
     best = None
     for order, concept in enumerate(candidates):
         facts = _candidate_facts(company_facts, concept)
@@ -300,9 +432,10 @@ def latest_instant(company_facts: dict, field_name: str,
 
     Ties on `end` are broken by filing date so a restatement wins.
     """
-    if field_name not in CONCEPT_MAP:
+    concept_map = _concept_map(company_facts)
+    if field_name not in concept_map:
         return None
-    is_instant, _candidates = CONCEPT_MAP[field_name]
+    is_instant, _candidates = concept_map[field_name]
     if not is_instant:
         return None
     concept, facts = _winning_concept_facts(company_facts, field_name)
@@ -366,9 +499,10 @@ def latest_balance_sheet_date(company_facts: dict) -> Optional[str]:
 
 def annual_periods(company_facts: dict, field_name: str) -> List[PeriodFact]:
     """Every distinct full-year duration fact, oldest first."""
-    if field_name not in CONCEPT_MAP:
+    concept_map = _concept_map(company_facts)
+    if field_name not in concept_map:
         return []
-    is_instant, _ = CONCEPT_MAP[field_name]
+    is_instant, _ = concept_map[field_name]
     if is_instant:
         return []
     concept, facts = _winning_concept_facts(company_facts, field_name)
@@ -452,10 +586,11 @@ def discrete_quarters(company_facts: dict, field_name: str,
     series, never an interpolated quarter.
     """
     series = QuarterSeries(field=field_name)
-    if field_name not in CONCEPT_MAP:
+    concept_map = _concept_map(company_facts)
+    if field_name not in concept_map:
         series.warnings.append(f"{field_name!r} has no reviewed XBRL concept mapping.")
         return series
-    is_instant, _ = CONCEPT_MAP[field_name]
+    is_instant, _ = concept_map[field_name]
     if is_instant:
         series.warnings.append(
             f"{field_name!r} is a point-in-time balance, not a flow; it has no discrete quarters.")

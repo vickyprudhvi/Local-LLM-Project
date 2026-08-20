@@ -87,9 +87,23 @@ SHARE_COUNT_GAP_PCT = abs(SEC_WEIGHTED_AVG_DILUTED_SHARES - YAHOO_SHARES_OUTSTAN
 # same fix). COR's corrected working-capital ratio is also negative
 # (releases cash as revenue grows), so every scenario's modeled value is
 # higher than under the old, incorrect positive-ratio assumption.
-EXPECTED_BASE_VALUE_PER_SHARE = 238.913472
-EXPECTED_BULL_VALUE_PER_SHARE = 974.62949
-EXPECTED_BEAR_VALUE_PER_SHARE = 127.471426
+# Phase H.7 re-derivation. Two documented policy changes moved these:
+#
+#   1. The operating-margin lower bound was +1%, which silently FLOORED any
+#      scenario margin below it. A bound must limit an input, not replace it
+#      (section 36), so the floor was widened to permit a modelled loss.
+#   2. A scenario's absolute margin delta is now applied PROPORTIONALLY when
+#      it is larger than the company's own margin (section 46). A +/-2
+#      percentage-point shift is a sensible perturbation of a 10%-margin
+#      business and a sign flip on a thin-margin one, and a bear case that
+#      turns a profitable company loss-making by arithmetic alone is not an
+#      internally coherent scenario.
+#
+# Both effects are visible here because this issuer's operating margin is
+# below the old floor, so every scenario was previously pinned to it.
+EXPECTED_BASE_VALUE_PER_SHARE = 219.563338
+EXPECTED_BULL_VALUE_PER_SHARE = 395.773295
+EXPECTED_BEAR_VALUE_PER_SHARE = 76.124542
 EXPECTED_NET_DEBT = 8_907_950_000.0  # POSITIVE -- a net-debt position, unlike COST
 EXPECTED_DEBT_TO_EQUITY = 5.080024190676642  # Phase 9's motivating example
 
@@ -206,7 +220,7 @@ _BULL_COR = json.dumps({
          "assumptions": [], "confidence": 0.7},
         {"claim_id": "bull-2",
          "claim": "Free cash flow is positive, which may provide some financial flexibility.",
-         "evidence_ids": ["fundamental.free_cash_flow"], "claim_type": "risk_offset",
+         "evidence_ids": ["current.free_cash_flow"], "claim_type": "risk_offset",
          "assumptions": [], "confidence": 0.6},
         {"claim_id": "bull-3", "claim": "The market price is below the modeled base scenario value.",
          "evidence_ids": ["valuation_gap.direction", "valuation_gap.difference_pct"],
@@ -239,8 +253,8 @@ _BEAR_COR = json.dumps({
          "evidence_ids": ["fundamental.current_ratio"], "claim_type": "fact_interpretation",
          "assumptions": [], "confidence": 0.7},
         {"claim_id": "bear-3",
-         "claim": "The operating margin is approximately 0.8%, a thin margin relative to revenue.",
-         "evidence_ids": ["fundamental.operating_margin"], "claim_type": "fact_interpretation",
+         "claim": "The operating margin is approximately 0.9%, a thin margin relative to revenue.",
+         "evidence_ids": ["current.operating_margin"], "claim_type": "fact_interpretation",
          "assumptions": [], "confidence": 0.6},
         {"claim_id": "bear-4",
          "claim": ("The bear scenario produces a modeled value of approximately $208.09 per "
@@ -286,18 +300,18 @@ _RESEARCH_MANAGER_COR = json.dumps({
 _RISK_COR = json.dumps({
     "key_risks": [
         {"risk": ("Balance-sheet leverage is elevated relative to the equity base; net debt is "
-                 "approximately $3.30 billion, and total debt is approximately 2.4 times free "
+                 "approximately $8.91 billion, and total debt is approximately 2.4 times free "
                  "cash flow."),
          "severity": "medium",
-         "evidence_cited": ["fundamental.debt_to_equity", "fundamental.net_debt", "fundamental.debt_to_fcf"]},
+         "evidence_cited": ["fundamental.debt_to_equity", "current.net_debt", "fundamental.debt_to_fcf"]},
         {"risk": "The current ratio is below 1.0, indicating comparatively tight short-term liquidity.",
          "severity": "medium", "evidence_cited": ["fundamental.current_ratio"]},
         {"risk": "Operating margins are thin relative to revenue.",
-         "severity": "low", "evidence_cited": ["fundamental.operating_margin"]},
+         "severity": "low", "evidence_cited": ["current.operating_margin"]},
     ],
     "data_quality_concerns": [("Earnings history is unavailable this cycle.")],
-    "evidence_cited": ["fundamental.debt_to_equity", "fundamental.net_debt", "fundamental.debt_to_fcf",
-                       "fundamental.current_ratio", "fundamental.operating_margin"],
+    "evidence_cited": ["fundamental.debt_to_equity", "current.net_debt", "fundamental.debt_to_fcf",
+                       "fundamental.current_ratio", "current.operating_margin"],
 })
 
 _FINAL_COR = json.dumps({

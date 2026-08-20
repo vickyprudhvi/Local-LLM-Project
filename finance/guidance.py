@@ -100,6 +100,7 @@ class GuidanceUnit:
     RATIO = "ratio"                # growth rates, margins: stored as decimals
     CURRENCY = "currency"          # absolute amounts, in the document's scale
     CURRENCY_PER_SHARE = "currency_per_share"
+    SHARES = "shares"
 
 
 class GuidanceStatus:
@@ -117,6 +118,68 @@ class GuidancePeriodType:
     QUARTER = "quarter"
     MULTI_YEAR = "multi_year"
     ALL = (ANNUAL, QUARTER, MULTI_YEAR)
+
+
+class GuidanceTargetType:
+    """Section 11. WHICH FUTURE PERIOD the guidance is about.
+
+    Distinct from the period the guidance was ISSUED WITH, which is the
+    quarter whose results the release reports. A live analysis rendered
+    "Q2 FY2026 guidance" for a company that had issued FULL-YEAR 2026
+    guidance alongside its second-quarter results -- the report named the
+    reporting quarter and called it the target.
+    """
+
+    NEXT_QUARTER = "NEXT_QUARTER"
+    CURRENT_FISCAL_YEAR = "CURRENT_FISCAL_YEAR"
+    NEXT_FISCAL_YEAR = "NEXT_FISCAL_YEAR"
+    MULTI_YEAR = "MULTI_YEAR"
+    OTHER = "OTHER"
+    ALL = (NEXT_QUARTER, CURRENT_FISCAL_YEAR, NEXT_FISCAL_YEAR, MULTI_YEAR, OTHER)
+
+
+# A release's own reporting period -- "Second-Quarter 2026 results", "Q2
+# 2026". This is what the guidance was ISSUED WITH, never what it targets.
+_REPORTING_PERIOD_RE = re.compile(
+    r"(?i)\b(first|second|third|fourth)[\s-]quarter\s+(20\d{2})\b"
+    r"|\bQ([1-4])\s+(20\d{2})\s+(?:results|earnings)\b"
+    r"|\b(20\d{2})\s+(first|second|third|fourth)[\s-]quarter\b")
+
+_QUARTER_ORDINALS = {"first": 1, "second": 2, "third": 3, "fourth": 4}
+
+
+def detect_reporting_period(text: str) -> Optional[str]:
+    """The fiscal quarter whose results this release reports (section 10)."""
+    match = _REPORTING_PERIOD_RE.search(text or "")
+    if not match:
+        return None
+    groups = match.groups()
+    if groups[0] and groups[1]:
+        return f"Q{_QUARTER_ORDINALS[groups[0].lower()]} FY{groups[1]}"
+    if groups[2] and groups[3]:
+        return f"Q{groups[2]} FY{groups[3]}"
+    if groups[4] and groups[5]:
+        return f"Q{_QUARTER_ORDINALS[groups[5].lower()]} FY{groups[4]}"
+    return None
+
+
+def classify_target_type(period: "GuidancePeriod",
+                         reporting_period: Optional[str]) -> str:
+    """Which kind of future period a guidance figure targets (section 11)."""
+    if period is None:
+        return GuidanceTargetType.OTHER
+    if period.period_type == GuidancePeriodType.MULTI_YEAR:
+        return GuidanceTargetType.MULTI_YEAR
+    if period.period_type == GuidancePeriodType.QUARTER:
+        return GuidanceTargetType.NEXT_QUARTER
+    if reporting_period and reporting_period.startswith("Q"):
+        try:
+            reporting_year = int(reporting_period.split("FY")[-1])
+        except (ValueError, IndexError):
+            return GuidanceTargetType.CURRENT_FISCAL_YEAR
+        if period.fiscal_year > reporting_year:
+            return GuidanceTargetType.NEXT_FISCAL_YEAR
+    return GuidanceTargetType.CURRENT_FISCAL_YEAR
 
 
 class GuidanceBound:
@@ -196,6 +259,8 @@ class GuidanceMetricName:
     # its employee benefit plans...". Both are real guided quantities and
     # both are boundaries — the same mechanism that stops EBITDA growth from
     # being read as revenue growth.
+    SHARE_COUNT = "share_count"
+    OTHER_INCOME_EXPENSE = "other_income_expense"
     CASH_TAXES = "cash_taxes"
     PENSION_CONTRIBUTIONS = "pension_contributions"
 
@@ -233,6 +298,7 @@ NON_REVENUE_METRICS = frozenset({
     GuidanceMetricName.FREE_CASH_FLOW, GuidanceMetricName.SHARE_REPURCHASES,
     GuidanceMetricName.NET_LEVERAGE_TARGET, GuidanceMetricName.TAX_RATE,
     GuidanceMetricName.CASH_TAXES, GuidanceMetricName.PENSION_CONTRIBUTIONS,
+    GuidanceMetricName.SHARE_COUNT, GuidanceMetricName.OTHER_INCOME_EXPENSE,
 })
 
 
@@ -272,8 +338,14 @@ class GuidanceMetric:
     # Phase H.6 additions (section 5).
     guidance_id: str = ""
     issued_at: Optional[str] = None
-    fiscal_period: Optional[str] = None       # "FY2026", "Q2 FY2027"
+    fiscal_period: Optional[str] = None       # the TARGET period: "FY2026", "Q2 FY2027"
     period_type: str = GuidancePeriodType.ANNUAL
+    # Section 10. The reporting period this guidance was PUBLISHED ALONGSIDE,
+    # which is not what it applies to. A company routinely issues full-year
+    # guidance with its second-quarter results; naming the quarter as the
+    # target overstates how near-term the outlook is.
+    issued_with_reporting_period: Optional[str] = None
+    target_period_type: str = GuidanceTargetType.OTHER
     scope: str = "consolidated"               # consolidated | service | product | segment
     source_accession: Optional[str] = None
     source_evidence_ids: Tuple[str, ...] = ()
@@ -293,7 +365,10 @@ class GuidanceMetric:
             "guidance_id": self.guidance_id,
             "issued_at": self.issued_at,
             "fiscal_period": self.fiscal_period,
+            "target_period": self.fiscal_period,
             "period_type": self.period_type,
+            "issued_with_reporting_period": self.issued_with_reporting_period,
+            "target_period_type": self.target_period_type,
             "midpoint": self.midpoint,
             "units": self.unit,
             "scope": self.scope,
@@ -502,6 +577,27 @@ _FLOOR_PATTERN = re.compile(
 # the", "at least" — a connector, not a clause.
 _FLOOR_ADJACENCY = 25
 
+# An explicitly APPROXIMATE point -- "Approximately 81%", "About $1.4 billion",
+# "Approximately 2.48 billion". A real outlook table states several of its
+# rows this way, and requiring a two-ended range dropped them all: one live
+# release guided seven metrics and only two were extracted, because the other
+# five were approximate points or sat too far from a forward-looking word.
+#
+# This is still not a BARE point. The word "approximately" is itself the
+# forward-looking marker -- a company does not describe a reported actual as
+# approximate -- which is what keeps the range requirement's precision.
+# Phase H.9: "estimated" and "expected" join the approximate qualifiers, and
+# a couple of intervening words are allowed between the qualifier and the
+# figure. A live release guides "increasing 2026 guidance with ESTIMATED
+# reported sales OF $101.1 Billion" -- the qualifier, an adjective and a
+# preposition all sit between the marker and the number, and requiring
+# adjacency dropped the company's headline full-year revenue guidance
+# entirely.
+_APPROXIMATE_PATTERN = re.compile(
+    rf"(?i)\b(?:approximately|about|around|roughly|estimated|expected)\s+"
+    rf"(?:[a-z]+\s+){{0,2}}?(?:of\s+)?\$?\s*({_NUM})\s*(%?)\s*"
+    rf"(billion|million|bn|mm)?")
+
 _BASIS_POINTS_PER_PERCENT = 100.0
 
 
@@ -553,11 +649,24 @@ _METRIC_PATTERNS = (
                 r"\brevenues?\s+(?:is|are)\s+expected\s+to\s+grow\b")),
     (GuidanceMetricName.CONSOLIDATED_REVENUE, GuidanceUnit.CURRENCY, False,
      _SCOPE_CONSOLIDATED, None,
-     # Bare "Revenue" is accepted here (NVDA's outlook says exactly that),
-     # which is only safe because a value still has to be a range or a
-     # point-with-tolerance inside a forward-looking clause.
-     re.compile(r"(?i)\b(?:consolidated\s+|total\s+)?net\s+sales\b|"
-                r"\b(?:consolidated\s+|total\s+)?revenues?\b")),
+     # Bare "Revenue" and bare "Sales" are both accepted here -- one live
+     # outlook table's row label is literally "Sales" and another's is
+     # "Revenue" -- which is only safe because a value still has to be a
+     # range, a point-with-tolerance or an explicitly approximate figure
+     # inside a forward-looking block.
+     re.compile(r"(?i)\b(?:consolidated\s+|total\s+|worldwide\s+)?net\s+sales\b|"
+                r"\b(?:consolidated\s+|total\s+|worldwide\s+)?revenues?\b|"
+                r"\b(?:consolidated\s+|total\s+|worldwide\s+)?sales\b")),
+    # Section 7: a guided share count changes every per-share figure derived
+    # from guided earnings, so it is a material guided metric in its own
+    # right rather than a footnote.
+    (GuidanceMetricName.SHARE_COUNT, GuidanceUnit.SHARES, False,
+     _SCOPE_CONSOLIDATED, None,
+     re.compile(r"(?i)\bshare\s+count\b|\bdiluted\s+shares\s+outstanding\b|"
+                r"\bweighted[\s-]average\s+shares\b")),
+    (GuidanceMetricName.OTHER_INCOME_EXPENSE, GuidanceUnit.CURRENCY, False,
+     _SCOPE_CONSOLIDATED, None,
+     re.compile(r"(?i)\bother\s*\(?income\)?\s*\(?expense\)?,?\s*net\b")),
 
     # -- EBITDA. The metric whose absence caused the AT&T mis-mapping. -----
     (GuidanceMetricName.ADJUSTED_EBITDA_GROWTH, GuidanceUnit.RATIO, True,
@@ -697,6 +806,15 @@ _QUARTER_PERIOD_RE = re.compile(
     r"|\b(?:fiscal\s+)?Q([1-4])\s*(?:of\s+)?(?:fiscal\s+(?:year\s+)?)?(20\d{2})\b"
     r"|\bQ([1-4])\s*FY\s*(20\d{2}|\d{2})\b")
 
+# A bare year immediately attached to a guidance/outlook word names the
+# TARGET fiscal year: "increasing 2026 guidance with estimated reported sales
+# of $101.1 Billion" is full-year 2026 guidance issued with Q2 results. Read
+# without this, the nearest period declaration was the reporting quarter and
+# the company's full-year outlook was labelled next-quarter guidance.
+_YEAR_GUIDANCE_RE = re.compile(
+    r"(?i)\b(20\d{2})\s+(?:full[\s-]year\s+)?(?:guidance|outlook|target)\b"
+    r"|\b(?:guidance|outlook|target)\s+for\s+(?:full[\s-]year\s+)?(20\d{2})\b")
+
 _ANNUAL_PERIOD_RE = re.compile(
     r"(?i)\b(?:full[\s-]year|fiscal\s+year|fiscal|full\s+fiscal\s+year|"
     r"for\s+the\s+year|calendar\s+year)\s+(?:of\s+)?(20\d{2})\b"
@@ -797,7 +915,13 @@ _OUTLOOK_HEADER_RE = re.compile(
 # How far back a preceding outlook header may sit and still govern a figure.
 # Generous enough to span the three or four sentences an outlook block runs
 # to, far too tight to reach the previous quarter's block.
-_HEADER_REACH = 700
+_HEADER_REACH = 900
+
+# How close an outlook/guidance word must sit to a period phrase for that
+# phrase to be a TABLE TITLE rather than a passing mention.
+_TITLE_ADJACENCY = 40
+_OUTLOOK_TITLE_WORD = re.compile(
+    r"(?i)\b(outlook|guidance|forecast|expects?|expectations?|anticipat\w*)\b")
 
 # A bare year inside the figure's OWN clause ("in the 3% to 4% range in 2026,
 # improving to 5% or better in 2028") is the strongest signal there is: it
@@ -807,7 +931,22 @@ _CLAUSE_YEAR_REACH = 90
 
 
 def _period_declarations(text: str) -> List[Tuple[int, GuidancePeriod]]:
-    """Every outlook-header period declaration, with its position."""
+    """Every period declaration in the document, with its position.
+
+    Two sources, because real releases state a period in two shapes and the
+    header form alone misses the one that matters most:
+
+    1. An outlook HEADER -- "NVIDIA's outlook for the second quarter of
+       fiscal 2027 is as follows:".
+    2. Any standalone period phrase -- "Full-Year 2026 Financial Outlook",
+       "Full Year 2026", "fiscal 2027". A guidance TABLE is titled this way
+       and then lists its rows, and the rows themselves name no period at
+       all. Recognising only the header form meant a live release's sales,
+       gross-margin, operating-expense, other-income and share-count rows
+       were all rejected for having "no fiscal period", while the two rows
+       that happened to sit near prose survived -- so a seven-metric outlook
+       was reported as two.
+    """
     declarations: List[Tuple[int, GuidancePeriod]] = []
     for match in _OUTLOOK_HEADER_RE.finditer(text):
         phrase = next((g for g in match.groups() if g), None)
@@ -816,6 +955,28 @@ def _period_declarations(text: str) -> List[Tuple[int, GuidancePeriod]]:
         period = parse_guidance_period(phrase, "")
         if period is not None:
             declarations.append((match.end(), period))
+    # A bare period phrase counts as a DECLARATION only when it sits next to
+    # an outlook/guidance word -- "Full-Year 2026 Financial Outlook" is a
+    # table title, "second-quarter 2026 results" is a heading over reported
+    # actuals. Without that restriction the results section's own quarter
+    # phrase becomes the nearest preceding declaration for the guidance table
+    # below it, and a company's FULL-YEAR outlook is relabelled as quarterly.
+    for match in _YEAR_GUIDANCE_RE.finditer(text):
+        year = next((g for g in match.groups() if g), None)
+        if year:
+            declarations.append((match.end(), GuidancePeriod(
+                label=f"FY{year}", period_type=GuidancePeriodType.ANNUAL,
+                fiscal_year=int(year))))
+    for pattern in (_QUARTER_PERIOD_RE, _ANNUAL_PERIOD_RE):
+        for match in pattern.finditer(text):
+            neighbourhood = text[max(0, match.start() - _TITLE_ADJACENCY):
+                                 match.end() + _TITLE_ADJACENCY]
+            if not _OUTLOOK_TITLE_WORD.search(neighbourhood):
+                continue
+            period = parse_guidance_period(match.group(0), "")
+            if period is not None:
+                declarations.append((match.end(), period))
+    declarations.sort(key=lambda pair: pair[0])
     return declarations
 
 
@@ -856,6 +1017,17 @@ def resolve_guidance_period(text: str, keyword_start: int, value_start: int, val
     Returns None when none of the four identifies a period — a rejection
     (section 11), never a default.
     """
+    # A guidance-year phrase in the statement or its immediate lookbehind
+    # names the target directly and outranks everything else.
+    around = text[max(0, keyword_start - _QUALIFIER_LOOKBEHIND):value_end]
+    year_guidance = _YEAR_GUIDANCE_RE.search(around)
+    if year_guidance:
+        year = next((g for g in year_guidance.groups() if g), None)
+        if year:
+            return GuidancePeriod(label=f"FY{year}",
+                                  period_type=GuidancePeriodType.ANNUAL,
+                                  fiscal_year=int(year))
+
     statement = text[keyword_start:value_end] + _clause_after(text, value_end)
     if _QUARTER_PERIOD_RE.search(statement):
         parsed = parse_guidance_period(statement, filed)
@@ -949,7 +1121,86 @@ def _metric_keyword_hits(text: str) -> List[Tuple[int, int, tuple]]:
     return kept
 
 
-def _find_range(window: str, require_percent: bool
+# Words that turn a following "A to B" into a CHANGE plus a LEVEL rather than
+# a range: "increasing adjusted EPS guidance by $0.13 to $11.68" raises
+# guidance BY $0.13, arriving AT $11.68. Reading it as a $0.13-$11.68 range
+# produced a guidance record spanning two orders of magnitude.
+_INCREMENT_MARKERS = re.compile(
+    r"(?i)\b(?:by|up\s+by|down\s+by|increas\w*\s+by|decreas\w*\s+by|rais\w*\s+by|"
+    r"lower\w*\s+by|reduc\w*\s+by)\s*\$?\s*$")
+_INCREMENT_LOOKBEHIND = 30
+
+
+def _is_increment_phrase(window: str, position: int) -> bool:
+    """Is this "A to B" an increment arriving at a level, not a range?"""
+    prefix = window[max(0, position - _INCREMENT_LOOKBEHIND):position]
+    return bool(_INCREMENT_MARKERS.search(prefix))
+
+
+# "…or 7.3% at the midpoint" — a company stating a single guided figure and
+# then its implied rate. The rate IS the guidance; it is simply not written
+# as a range.
+_MIDPOINT_PATTERN = re.compile(
+    rf"(?i)\bor\s+\$?\s*({_NUM})\s*(%?)\s*(billion|million)?\s+at\s+the\s+midpoint")
+
+
+# A forward qualifier can sit before the METRIC NAME rather than before the
+# number -- "increasing 2026 guidance with ESTIMATED reported sales of $101.1
+# Billion". The qualifier, an adjective and a preposition separate it from the
+# figure, so a pattern anchored on the number alone cannot see it, and the
+# company's headline full-year revenue guidance was dropped.
+#
+# When such a qualifier is present immediately before the keyword, a bare
+# figure sitting immediately after it is accepted as an approximate point.
+# Both distances are short on purpose: this widens what counts as a forward
+# statement, not what counts as a nearby number.
+_QUALIFIER_LOOKBEHIND = 40
+_BARE_FIGURE_ADJACENCY = 25
+_FORWARD_QUALIFIER = re.compile(
+    r"(?i)\b(?:estimated|expected|approximately|about|around|roughly|guidance|"
+    r"outlook|forecast|projected|anticipated)\b")
+_BARE_FIGURE_PATTERN = re.compile(
+    rf"(?i)^[^0-9%$]{{0,{_BARE_FIGURE_ADJACENCY}}}?\$?\s*({_NUM})\s*(%?)\s*"
+    rf"(billion|million|bn|mm)?")
+
+
+# Words that mark a figure as a REPORTED ACTUAL. A live release says
+# "2026 Second-Quarter REPORTED sales growth of 6.6%", and the preceding
+# sentence ends with the word "outlook" -- so a lookbehind that crosses the
+# sentence boundary sees a forward qualifier and accepts last quarter's
+# actual as guidance. Both guards below exist for that one sentence pair.
+_REPORTED_ACTUAL_MARKERS = re.compile(
+    r"(?i)\b(?:results|delivered|achieved|posted|recorded|were|was|surpassing|"
+    r"quarter\s+reported)\b")
+
+
+def _same_statement_lookbehind(lookbehind: str) -> str:
+    """Only the part of the lookbehind inside the CURRENT statement."""
+    boundary = None
+    for match in _CLAUSE_BOUNDARY.finditer(lookbehind):
+        boundary = match.end()
+    return lookbehind[boundary:] if boundary is not None else lookbehind
+
+
+def _qualified_bare_figure(window: str, lookbehind: str, require_percent: bool):
+    """A bare figure that a preceding qualifier makes forward-looking."""
+    lookbehind = _same_statement_lookbehind(lookbehind or "")
+    if not lookbehind or not _FORWARD_QUALIFIER.search(lookbehind):
+        return None
+    if _REPORTED_ACTUAL_MARKERS.search(lookbehind):
+        return None
+    match = _BARE_FIGURE_PATTERN.match(window)
+    if match is None:
+        return None
+    value = _to_number(match.group(1))
+    is_percent = bool(match.group(2))
+    if value is None or require_percent != is_percent:
+        return None
+    return (value, value, is_percent, match.group(0).strip(),
+            GuidanceBound.APPROXIMATELY)
+
+
+def _find_range(window: str, require_percent: bool, lookbehind: str = ""
                 ) -> Optional[Tuple[float, float, bool, str, str]]:
     """(low, high, was_percent, matched_text, bound_type) for the first usable value.
 
@@ -978,13 +1229,24 @@ def _find_range(window: str, require_percent: bool
             high = _to_number(match.group(3))
             if low is None or high is None:
                 continue
-            is_percent = bool(match.group(2) or match.group(4))
-            if require_percent and not is_percent:
+            left_percent = bool(match.group(2))
+            right_percent = bool(match.group(4))
+            # Phase H.9 -- BOTH ENDS MUST CARRY THE SAME UNIT.
+            #
+            # A live release says "Second-Quarter reported sales growth of
+            # 6.6% to $25.3 Billion". The two numbers are a growth RATE and a
+            # sales LEVEL joined by the word "to", and reading them as a
+            # 6.6%-25.3% range produced a fabricated revenue-growth guidance
+            # that then anchored the DCF's year-1 assumption. A range whose
+            # ends disagree about their unit is not a range.
+            if left_percent != right_percent:
                 continue
-            if not require_percent and is_percent:
-                # A percent range cannot be a per-share or currency figure.
+            is_percent = left_percent
+            if require_percent != is_percent:
                 continue
             if high < low or low == high:
+                continue
+            if _is_increment_phrase(window, match.start()):
                 continue
             return low, high, is_percent, match.group(0).strip(), GuidanceBound.RANGE
 
@@ -996,12 +1258,35 @@ def _find_range(window: str, require_percent: bool
     # is a preposition or two. Without this bound, AT&T's capital-return plan
     # ($45 billion+ to shareholders) was captured as free-cash-flow guidance,
     # and a SEGMENT's "expected growth of 6%+" as consolidated EBITDA growth.
+    midpoint = _MIDPOINT_PATTERN.search(window)
+    if midpoint is not None:
+        value = _to_number(midpoint.group(1))
+        is_percent = bool(midpoint.group(2))
+        if value is not None and require_percent == is_percent:
+            return (value, value, is_percent, midpoint.group(0).strip(),
+                    GuidanceBound.APPROXIMATELY)
+
+    approximate = _APPROXIMATE_PATTERN.search(window)
+    if approximate is not None and approximate.start() <= _FLOOR_ADJACENCY:
+        value = _to_number(approximate.group(1))
+        is_percent = bool(approximate.group(2))
+        if value is not None and require_percent == is_percent:
+            return (value, value, is_percent, approximate.group(0).strip(),
+                    GuidanceBound.APPROXIMATELY)
+
     floor = _FLOOR_PATTERN.search(window)
     if floor is not None and floor.start() <= _FLOOR_ADJACENCY:
         value = _to_number(floor.group(1) or floor.group(4))
         is_percent = bool(floor.group(2) or floor.group(5))
         if value is not None and require_percent == is_percent:
             return value, value, is_percent, floor.group(0).strip(), GuidanceBound.AT_LEAST
+
+    # Last: a bare figure that a qualifier immediately before the metric name
+    # makes forward-looking. Ranked below every explicit form so a stated
+    # range, tolerance or floor always keeps its own bound type.
+    qualified = _qualified_bare_figure(window, lookbehind, require_percent)
+    if qualified is not None:
+        return qualified
     return None
 
 
@@ -1009,6 +1294,29 @@ def _guidance_id(symbol: str, accession: str, name: str, period_label: str) -> s
     digest = hashlib.sha256(
         f"{symbol}|{accession}|{name}|{period_label}".encode("utf-8")).hexdigest()[:12]
     return f"gd_{digest}"
+
+
+
+# How far an outlook block's influence extends past its header. Long enough
+# for a full guidance table (a live one runs about 700 characters across
+# seven rows), short enough not to reach the next section of the release.
+_OUTLOOK_BLOCK_REACH = 900
+
+_OUTLOOK_BLOCK_RE = re.compile(
+    r"(?i)\b(?:financial\s+outlook|full[\s-]year\s+outlook|guidance\s+summary|"
+    r"outlook\s+for|financial\s+guidance|updated\s+guidance|"
+    r"summarizes\s+the\s+[^.]{0,40}?outlook)\b")
+
+
+def _outlook_block_spans(text):
+    """(start, end) spans a guidance table's header governs."""
+    return [(m.end(), m.end() + _OUTLOOK_BLOCK_REACH)
+            for m in _OUTLOOK_BLOCK_RE.finditer(text)]
+
+
+def _inside_outlook_block(position, declarations, blocks):
+    """Is this metric keyword inside a declared outlook block?"""
+    return any(start <= position <= end for start, end in blocks)
 
 
 def extract_guidance_from_text(text: str, symbol: str, accession: str, document: str,
@@ -1037,6 +1345,8 @@ def extract_guidance_from_text(text: str, symbol: str, accession: str, document:
     hits = _metric_keyword_hits(text)
     boundaries = [start for start, _end, _entry in hits]
     declarations = _period_declarations(text)
+    outlook_blocks = _outlook_block_spans(text)
+    reporting_period = detect_reporting_period(text)
 
     for index, (start, end, entry) in enumerate(hits):
         name, unit, require_percent, scope, forced_basis, _regex = entry
@@ -1054,10 +1364,20 @@ def extract_guidance_from_text(text: str, symbol: str, accession: str, document:
         window = _clause_window(text, end, limit)
         context = text[max(0, start - _WINDOW):end + _WINDOW]
 
-        if not _FORWARD_MARKERS.search(context):
+        # A row inside an OUTLOOK TABLE is forward-looking even when no
+        # forward-looking word sits within reach of it. Live outlook tables
+        # put the header once and then list seven metrics; requiring a marker
+        # within 110 characters of each row silently dropped the rows in the
+        # middle -- one release guided sales, gross margin, operating
+        # expenses, other income, tax rate, EPS and share count, and only tax
+        # rate and EPS survived. The block header is the marker for its own
+        # rows, exactly as it is for their period.
+        if not _FORWARD_MARKERS.search(context) and not _inside_outlook_block(
+                start, declarations, outlook_blocks):
             continue
 
-        found = _find_range(window, require_percent)
+        found = _find_range(window, require_percent,
+                            lookbehind=text[max(0, start - _QUALIFIER_LOOKBEHIND):start])
         if found is None:
             found = _dual_basis_value(text, end, name, require_percent)
             if found is None:
@@ -1130,6 +1450,8 @@ def extract_guidance_from_text(text: str, symbol: str, accession: str, document:
             issued_at=filed,
             fiscal_period=period.label,
             period_type=period.period_type,
+            issued_with_reporting_period=reporting_period,
+            target_period_type=classify_target_type(period, reporting_period),
             scope=scope,
             source_accession=accession,
             source_evidence_ids=(evidence_id,),
@@ -1310,7 +1632,7 @@ def validate_guidance_metric(metric: GuidanceMetric) -> List[str]:
     if not metric.fiscal_period:
         problems.append("no fiscal period")
     if metric.unit not in (GuidanceUnit.RATIO, GuidanceUnit.CURRENCY,
-                           GuidanceUnit.CURRENCY_PER_SHARE):
+                           GuidanceUnit.CURRENCY_PER_SHARE, GuidanceUnit.SHARES):
         problems.append(f"unrecognized units {metric.unit!r}")
     if metric.basis not in (BASIS_GAAP, BASIS_ADJUSTED, BASIS_COMPANY_DEFINED, BASIS_NONE):
         problems.append(f"unrecognized basis {metric.basis!r}")
@@ -1325,3 +1647,80 @@ def validate_guidance_metric(metric: GuidanceMetric) -> List[str]:
         problems.append(f"units {metric.unit!r} do not match the {metric.name!r} taxonomy "
                         f"entry ({expected_unit!r})")
     return problems
+
+
+# ---------------------------------------------------------------------------
+# Section 8 — guidance COVERAGE, not merely guidance presence
+# ---------------------------------------------------------------------------
+
+
+class GuidanceCoverage:
+    """How much of what a valuation needs the guidance actually supplies.
+
+    "Some guidance was extracted" and "guidance is covered" are different
+    claims, and only the first was ever being made. A live release guided
+    seven metrics -- sales, gross margin, operating expenses, other income,
+    tax rate, EPS and share count -- of which two were extracted, and the
+    report said guidance was available without qualification. A reader had no
+    way to tell that the two most valuation-relevant rows were missing.
+    """
+
+    COMPLETE_FOR_RELEVANT_METRICS = "COMPLETE_FOR_RELEVANT_METRICS"
+    PARTIAL = "PARTIAL"
+    MINIMAL = "MINIMAL"
+    UNAVAILABLE = "UNAVAILABLE"
+    ALL = (COMPLETE_FOR_RELEVANT_METRICS, PARTIAL, MINIMAL, UNAVAILABLE)
+
+
+# The metrics a DCF actually consumes. Coverage is scored against THESE
+# rather than against everything a company might guide: a buyback target is
+# real guidance and contributes nothing to a forecast of operating cash flow.
+VALUATION_RELEVANT_METRICS = (
+    (GuidanceMetricName.CONSOLIDATED_REVENUE, GuidanceMetricName.CONSOLIDATED_REVENUE_GROWTH,
+     GuidanceMetricName.SERVICE_REVENUE_GROWTH, GuidanceMetricName.PRODUCT_REVENUE_GROWTH),
+    (GuidanceMetricName.OPERATING_MARGIN, GuidanceMetricName.ADJUSTED_OPERATING_MARGIN,
+     GuidanceMetricName.GROSS_MARGIN, GuidanceMetricName.ADJUSTED_GROSS_MARGIN,
+     GuidanceMetricName.ADJUSTED_EBITDA_GROWTH, GuidanceMetricName.EBITDA_GROWTH),
+    (GuidanceMetricName.OPERATING_EXPENSES, GuidanceMetricName.ADJUSTED_OPERATING_EXPENSES),
+    (GuidanceMetricName.EPS, GuidanceMetricName.ADJUSTED_EPS),
+    (GuidanceMetricName.TAX_RATE,),
+    (GuidanceMetricName.CAPEX, GuidanceMetricName.FREE_CASH_FLOW,
+     GuidanceMetricName.OPERATING_CASH_FLOW),
+)
+
+# Groups whose absence most changes a forecast. Revenue and profitability are
+# the two the DCF cannot proceed without some view of.
+_CORE_GROUP_INDEXES = (0, 1)
+
+
+def assess_guidance_coverage(metrics) -> dict:
+    """Section 8. Which valuation-relevant metric groups the guidance covers."""
+    names = set(metrics or {})
+    covered, missing = [], []
+    for index, group in enumerate(VALUATION_RELEVANT_METRICS):
+        present = sorted(names & set(group))
+        if present:
+            covered.append({"group": group[0], "present": present})
+        else:
+            missing.append(group[0])
+
+    if not names:
+        status = GuidanceCoverage.UNAVAILABLE
+    elif not missing:
+        status = GuidanceCoverage.COMPLETE_FOR_RELEVANT_METRICS
+    else:
+        core_covered = sum(
+            1 for index in _CORE_GROUP_INDEXES
+            if names & set(VALUATION_RELEVANT_METRICS[index]))
+        if core_covered == len(_CORE_GROUP_INDEXES):
+            status = GuidanceCoverage.PARTIAL
+        elif core_covered:
+            status = GuidanceCoverage.PARTIAL
+        else:
+            status = GuidanceCoverage.MINIMAL
+    return {
+        "guidance_coverage_status": status,
+        "covered_groups": covered,
+        "missing_groups": missing,
+        "extracted_metrics": sorted(names),
+    }

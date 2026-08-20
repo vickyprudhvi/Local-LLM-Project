@@ -246,10 +246,57 @@ def build_evidence_index(compact_payload: dict) -> Dict[str, EvidenceItem]:
     for field in _QUOTE_FIELDS:
         _add(index, f"quote.{field}", f"Quote {field.replace('_', ' ')}", quote.get(field))
 
+    # -- Phase H.9, sections 1-5: the CURRENT bucket is citable ------------
+    #
+    # Before this, the only citable free cash flow was `fundamental.
+    # free_cash_flow`, computed from the ANNUAL statements. A live analysis
+    # therefore printed a trailing-twelve-month figure in the Snapshot and a
+    # last-fiscal-year figure in the Bull Case, both correct, both cited,
+    # and irreconcilable to a reader. A role cannot quote a current value it
+    # has no id for, so the current values get ids -- each carrying the
+    # period it covers, because a figure without its period is exactly the
+    # ambiguity this phase exists to remove.
+    canonical = compact_payload.get("canonical_evidence") or {}
+    for name, metric in (canonical.get("current") or {}).items():
+        if not isinstance(metric, dict) or metric.get("value") is None:
+            continue
+        period = metric.get("period")
+        index[f"current.{name}"] = EvidenceItem(
+            evidence_id=f"current.{name}",
+            label=f"Current {name.replace('_', ' ')} ({period})",
+            value=metric["value"],
+            evidence_type="canonical_current",
+            source_type="canonical_current",
+            source_periods=[period] if period else None,
+            derivation=(
+                f"The current value, covering {period} on a "
+                f"{(metric.get('period_type') or 'reported').lower()} basis. This is "
+                "the figure the Snapshot shows; cite it, not the `fundamental.*` "
+                "entry of the same name, whenever a claim is about the company "
+                "today."),
+        )
+
     for name, metric in (compact_payload.get("fundamental_metrics") or {}).items():
         if isinstance(metric, dict) and metric.get("value") is not None:
-            _add(index, f"fundamental.{name}", f"Fundamental: {name.replace('_', ' ')}",
-                 metric["value"])
+            # Section 2: history keeps its own namespace and says so. The
+            # label names the fiscal periods the value was computed from, so
+            # a role reading the index can see at a glance that
+            # `fundamental.free_cash_flow` and `current.free_cash_flow` are
+            # two different periods rather than two versions of one number.
+            periods = [p for p in (metric.get("inputs") or []) if p]
+            span = f" (fiscal {', '.join(periods)})" if periods else ""
+            index[f"fundamental.{name}"] = EvidenceItem(
+                evidence_id=f"fundamental.{name}",
+                label=f"Fundamental: {name.replace('_', ' ')}{span}",
+                value=metric["value"],
+                source_type="reported_historical",
+                source_periods=periods or None,
+                derivation=(
+                    "Computed from the annual statements"
+                    + (f" for {', '.join(periods)}" if periods else "")
+                    + ". This is reported history, not the current period."
+                ) if periods else None,
+            )
 
     for name, metric in (compact_payload.get("technical_metrics") or {}).items():
         if isinstance(metric, dict) and metric.get("value") is not None:
@@ -362,11 +409,37 @@ def build_evidence_index(compact_payload: dict) -> Dict[str, EvidenceItem]:
                         "projection by the company, not a reported historical fact."),
         )
 
+    # Phase H.9, section 22, made structural. The compact report already
+    # refuses to print a price-vs-value percentage when the DCF is not
+    # economically suitable or the per-share basis does not reconcile -- but
+    # the gap fields stayed citable, so a live report carried "Market-price
+    # comparison: not meaningful" in one section and a precise percentage
+    # premium in the next, both true, both cited. A percentage the report
+    # will not state is not evidence a research role may state either, so it
+    # is WITHHELD from the index rather than merely discouraged, exactly as
+    # a failed DCF's scenario values are.
+    suitability = (compact_payload.get("dcf_suitability") or {}).get("dcf_suitability")
+    share_basis = ((compact_payload.get("dcf_financial_basis") or {})
+                   .get("share_reconciliation") or {})
+    comparison_withheld = (
+        suitability in ("LIMITED", "NOT_SUITABLE")
+        or share_basis.get("status") in ("MATERIAL_DIFFERENCE", "INCOMPATIBLE_BASIS"))
+
     gap = compact_payload.get("valuation_gap") or {}
-    if gap.get("available"):
+    if gap.get("available") and not comparison_withheld:
         for field in _VALUATION_GAP_FIELDS:
             _add(index, f"valuation_gap.{field}", f"Valuation gap: {field.replace('_', ' ')}",
                  gap.get(field))
+    elif gap.get("available"):
+        # The direction survives -- "the price is above the modeled value" is
+        # a statement the inputs do support. Only the magnitude goes.
+        _add(index, "valuation_gap.direction", "Valuation gap: direction",
+             gap.get("direction"))
+        _add(index, "valuation_gap.comparison_withheld",
+             "Why the price-vs-value percentage is unavailable",
+             ("The DCF inputs do not support a percentage comparison against the market "
+              "price. State the direction only; do not quote or estimate a percentage "
+              "premium, discount, or implied return."))
 
     spread = compact_payload.get("dcf_scenario_spread") or {}
     if spread.get("available"):

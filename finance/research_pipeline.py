@@ -83,6 +83,7 @@ _FINDINGS_KEY = "__findings__"
 from typing import Dict, List, Optional, Tuple
 
 import tools.config as config
+from finance.canonical import conflicting_historical_citations
 from finance.evidence import EvidenceItem, render_evidence_index, validate_evidence_citations
 
 PIPELINE_VERSION = "research_pipeline_v1"
@@ -261,6 +262,14 @@ _SHARED_GUARDRAILS = (
     "for the model, not observations. An assumption whose source_type is "
     "'configured_default' came from configuration, NOT from this company's data; say so "
     "when it matters to the conclusion.\n"
+    "- A metric that exists BOTH as 'current.<name>' and as 'fundamental.<name>' is the "
+    "same quantity measured over two DIFFERENT periods: 'current.*' covers the company's "
+    "latest period (its label names the dates), 'fundamental.*' covers a completed fiscal "
+    "year. For any claim about the company TODAY, cite 'current.<name>'. Cite "
+    "'fundamental.<name>' only when the claim is explicitly about that fiscal year, and "
+    "say which year. Citing the fiscal-year figure for a present-tense claim is a "
+    "validation failure, because it puts two different numbers for one metric into one "
+    "report.\n"
     "- When a historical rate and current guidance both exist and differ, state BOTH and "
     "say which one your reasoning relies on. 'Historical revenue CAGR was 7.2%, while "
     "current management guidance implies 2-3% near-term sales growth' is the right shape. "
@@ -368,6 +377,23 @@ def _evidence_list(d, key, index, min_items=1, max_items=15):
     ok, unknown = validate_evidence_citations(v, index)
     if not ok:
         raise _Invalid(f"'{key}' cites unknown evidence ID(s): {unknown}")
+    # Phase H.9, section 5. Citing last fiscal year's figure when a current
+    # one exists under `current.<name>` is what let one live report state two
+    # different free cash flows, in two sections, both cited. The repair
+    # prompt gets the exact id to use instead, so this is correctable rather
+    # than merely rejected.
+    stale = conflicting_historical_citations(v, index)
+    if stale:
+        detail = "; ".join(
+            f"'fundamental.{name}' is {old_value:,.4g} for a completed fiscal period while "
+            f"'current.{name}' is {new_value:,.4g} for the current one"
+            for name, old_value, new_value in stale)
+        raise _Invalid(
+            f"'{key}' cites a superseded historical figure where a current one exists: "
+            f"{detail}. Cite "
+            + ", ".join(f"'current.{name}'" for name, _, _ in stale)
+            + " for claims about the company today, and cite the 'fundamental.*' id only "
+              "when the claim is explicitly about that completed fiscal period.")
     return v
 
 
@@ -1561,7 +1587,7 @@ _BIDIRECTIONAL_MARKERS = (
 # `_SUBJECT_AWARE` below supplies the missing subject, so those words are now
 # usable — but only THROUGH it. This list stays subject-independent.
 _FAVOURABLE_MARKERS = (
-    "improve", "improving", "expand", "expanding", "accelerat", "strengthen",
+    "improve", "improving", "expand", "expanding", "strengthen",
     "strengthening", "outperform", "recover", "beat", "exceed", "sustain",
 )
 _UNFAVOURABLE_MARKERS = (
@@ -1593,6 +1619,7 @@ _HIGHER_IS_BETTER = (
     "free cash flow", "fcf", "cash flow", "growth", "roe", "roic", "roa",
     "return on", "subscriber", "customer", "backlog", "bookings", "market share",
     "arpu", "utilization", "throughput", "dividend", "buyback", "coverage",
+    "equity", "book value", "liquidity", "runway", "cash balance", "cash position",
 )
 # Metrics where LESS is better. "net debt / fcf" and "net debt / ebitda" are
 # listed explicitly and BEFORE the bare "fcf"/"ebitda" tokens can match, so a
@@ -1603,11 +1630,25 @@ _LOWER_IS_BETTER = (
     "leverage", "net debt", "total debt", "gross debt", "debt load", "borrowing",
     "churn", "cost", "expense", "capex intensity", "dilution", "payout ratio",
     "interest expense", "days sales outstanding", "inventory days", "attrition",
+    # Phase H.7. A live loss-making run filed "cash burn accelerates while
+    # shareholder equity declines" as an UPGRADE condition, because neither
+    # "burn" nor "equity" was a known subject and the fallback vocabulary
+    # scored the bare word "accelerates" as favourable. The compound
+    # spellings come first so longest-match keeps "free cash flow burn" a
+    # BURN measure rather than the cash-flow metric inside its name.
+    "free cash flow burn", "cash flow burn", "cash burn", "burn rate", "burn",
+    "net loss", "operating loss", "deficit", "cash consumption",
+    "capital requirement", "capital need", "share count",
 )
 
 _INCREASE_WORDS = ("increase", "increasing", "rise", "rises", "rising", "grow",
                    "grows", "growing", "climb", "higher", "above", "exceeds",
-                   "expands", "expanding", "up to", "widen", "widening")
+                   "expands", "expanding", "up to", "widen", "widening",
+                   # "accelerates" is a DIRECTION, not a verdict. Accelerating
+                   # revenue is good and accelerating cash burn is not, and
+                   # scoring it as unconditionally favourable is what filed a
+                   # worsening burn under upgrade conditions.
+                   "accelerat", "extend", "lengthen", "improves to")
 _DECREASE_WORDS = ("decrease", "decreasing", "decline", "declines", "declining",
                    "fall", "falls", "falling", "drop", "drops", "dropping",
                    "lower", "below", "under ", "contract", "contracts",
@@ -1674,6 +1715,15 @@ def _subject_aware_direction(text: str) -> Optional[str]:
     for clause in _CLAUSE_SPLIT.split(text):
         movement, position = _direction_of_change(clause)
         polarity = _subject_polarity(clause, before=position)
+        if polarity is None:
+            # English puts the subject after the verb often enough --
+            # "lower leverage", "rising costs" -- that requiring it BEFORE
+            # would silently unclassify half of all real conditions. The
+            # before-the-verb rule exists to disambiguate a clause naming TWO
+            # metrics ("costs increase faster than revenue"); when nothing
+            # precedes the verb there is nothing to disambiguate, so the
+            # whole clause is searched.
+            polarity = _subject_polarity(clause)
         if polarity is None or movement is None:
             continue
         good = (polarity == "higher" and movement == "up") or \
@@ -1686,6 +1736,51 @@ CONDITION_FAVOURABLE = "FAVORABLE"
 CONDITION_UNFAVOURABLE = "UNFAVORABLE"
 CONDITION_BIDIRECTIONAL = "BIDIRECTIONAL"
 CONDITION_UNCLASSIFIED = "UNCLASSIFIED"
+
+
+# ---------------------------------------------------------------------------
+# Phase H.7, section 53 — a price move is not evidence about the business
+# ---------------------------------------------------------------------------
+#
+# "the bear thesis becomes more likely if the price falls toward the bear
+# value" is circular: the condition is satisfied by the very move it claims
+# to predict, so it can never be wrong and carries no information. A
+# fundamental thesis is confirmed or broken by OPERATING DRIVERS -- revenue,
+# margins, cash flow, leverage, dilution, guidance, capital needs -- and
+# price movement changes only how attractive the valuation is, which is a
+# different statement.
+#
+# The test is deliberately narrow: a condition is circular only when it
+# refers to price/valuation AND to nothing else. "the price falls below $20
+# while free cash flow stays negative" names an operating driver and is kept.
+_PRICE_TERMS = (
+    "price", "share price", "stock price", "trades at", "trading at",
+    "valuation gap", "modeled value", "modelled value", "fair value",
+    "market cap", "multiple", "re-rate", "rerate", "discount to", "premium to",
+)
+_OPERATING_TERMS = (
+    "revenue", "sales", "margin", "cash flow", "fcf", "earnings", "eps",
+    "leverage", "debt", "dilution", "guidance", "capex", "capital", "backlog",
+    "subscriber", "customer", "volume", "order", "utilization", "churn",
+    "inventory", "share count", "buyback", "cost", "expense", "profit",
+)
+
+CONDITION_CIRCULAR = "CIRCULAR_PRICE_CONDITION"
+
+
+def is_circular_price_condition(text: str) -> bool:
+    """Does this condition validate a thesis using only a price move?
+
+    Returns True only when price/valuation language is present and no
+    operating driver is mentioned at all. A condition that pairs a price
+    level with a fundamental one is legitimate and is not flagged.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return False
+    lowered = text.lower()
+    if not any(term in lowered for term in _PRICE_TERMS):
+        return False
+    return not any(term in lowered for term in _OPERATING_TERMS)
 
 
 def classify_condition_direction(text: str) -> str:
@@ -1732,7 +1827,255 @@ _CONDITION_BUCKETS = {
 _CONDITION_BUCKET_CAP = 2
 
 
-def _route_conditions_by_direction(validated: dict) -> dict:
+# ---------------------------------------------------------------------------
+# Phase H.8, section 32 — a limiting factor must actually be a limitation
+# ---------------------------------------------------------------------------
+#
+# A live run listed "Strong operational fundamentals including 19.01% free
+# cash flow margin and 34.70% ROE support business quality" under LIMITING
+# FACTORS. It is a true statement and it is not a limitation; putting it
+# there tells a reader that the analysis is constrained by the company being
+# good, which is not what the section means.
+#
+# The test is deliberately narrow. A factor is dropped ONLY when it scores
+# clearly favourable AND carries no uncertainty vocabulary at all -- because
+# "strong cash flow, but it depends on one product" IS a limitation, and so
+# is anything phrased as a conflict, a dependency or a doubt.
+
+_UNCERTAINTY_MARKERS = (
+    "uncertain", "unresolved", "conflict", "depends", "dependent", "reliance",
+    "relies", "rely", "assumption", "default", "unclear", "unknown", "cannot",
+    "not available", "unavailable", "missing", "limited", "risk", "if ", "may ",
+    "despite", "however", "although", "but ", "spread", "sensitivity", "range",
+    "would need", "requires", "questionable", "no company-specific",
+)
+
+
+# Vocabulary a strength is described in. Present with NO uncertainty word
+# anywhere in the same factor, these mark an entry that belongs in
+# `supporting_factors` rather than in `limiting_factors`.
+_STRENGTH_MARKERS = (
+    "strong", "robust", "healthy", "solid", "substantial", "ample", "resilient",
+    "attractive", "impressive", "excellent", "well-capitalized", "well capitalized",
+    "supports business quality", "support business quality", "high margin",
+    "high growth", "high revenue growth", "net cash position",
+)
+
+
+def is_genuine_limiting_factor(text: str) -> bool:
+    """Does this read as a limitation rather than a strength? (section 32)"""
+    if not isinstance(text, str) or not text.strip():
+        return False
+    lowered = text.lower()
+    if any(marker in lowered for marker in _UNCERTAINTY_MARKERS):
+        return True
+    # No uncertainty vocabulary at all. Drop it only when it positively reads
+    # as a STRENGTH -- either by direction ("margins expand") or by the
+    # vocabulary companies' strengths are described in. Anything else is kept:
+    # the filter exists to catch a clear miscategorisation, not to adjudicate
+    # every phrasing.
+    if any(marker in lowered for marker in _STRENGTH_MARKERS):
+        return False
+    return classify_condition_direction(text) != CONDITION_FAVOURABLE
+
+
+def _filter_limiting_factors(validated: dict) -> dict:
+    """Drop limiting factors that are purely favourable statements.
+
+    Dropped rather than moved: there is no other list a strength belongs in
+    on this schema, and `supporting_factors` is the model's own to populate.
+    At least one factor is always retained -- an empty section would be a
+    bigger loss of information than one loosely-worded entry.
+    """
+    factors = validated.get("limiting_factors") or []
+    if len(factors) <= 1:
+        return validated
+    kept = [f for f in factors if is_genuine_limiting_factor(f)]
+    if not kept:
+        return validated
+    validated = dict(validated)
+    validated["limiting_factors"] = kept
+    return validated
+
+
+# ---------------------------------------------------------------------------
+# Phase H.9, sections 32-38 — a condition must describe a FUTURE development
+# ---------------------------------------------------------------------------
+
+CONDITION_ALREADY_SATISFIED = "CONDITION_ALREADY_SATISFIED"
+CONDITION_USES_MODEL_THRESHOLD = "CONDITION_USES_MODEL_THRESHOLD"
+
+# Numbers that exist only inside this software. A condition built on one of
+# them is not an investment thesis: "revenue growth falls below the 25% model
+# cap" describes a clamp in finance/forward_assumptions.py, not anything the
+# company or its market will ever do.
+_MODEL_THRESHOLD_LANGUAGE = re.compile(
+    r"(?i)\b(?:model(?:'?s)?\s+(?:cap|bound|limit|ceiling|floor|maximum|minimum)|"
+    r"configured\s+(?:default|bound|cap|limit|maximum|minimum|floor)|"
+    r"clamp(?:ed)?|model\s+range|software\s+limit|assumption\s+bound)\b")
+
+# Vocabulary that makes a condition genuinely forward-looking even when its
+# threshold is already met: it asks for MORE, or for the level to HOLD.
+_PERSISTENCE_LANGUAGE = re.compile(
+    r"(?i)\b(?:remains?|sustain\w*|maintain\w*|for\s+(?:the\s+)?next|"
+    r"consecutive|over\s+the\s+next|through\s+20\d{2}|for\s+\w+\s+quarters?|"
+    r"continues?\s+to|persist\w*|holds?\s+above|holds?\s+below|"
+    r"expands?\s+from|improves?\s+from|further)\b")
+
+# "margin above 15%", "growth of at least 30%", "leverage below 2.5x"
+_THRESHOLD_RE = re.compile(
+    r"(?i)\b(?P<metric>[a-z][a-z /\-]{2,40}?)\s*"
+    r"(?P<direction>above|below|over|under|exceeds?|at\s+least|greater\s+than|"
+    r"less\s+than|falls?\s+below|rises?\s+above)\s*"
+    r"\$?(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>%|x\b)?")
+
+# Canonical metric names a threshold phrase can refer to.
+_CONDITION_METRIC_ALIASES = {
+    "operating margin": "operating_margin",
+    "margin": "operating_margin",
+    "margins": "operating_margin",
+    "gross margin": "gross_margin",
+    "net margin": "net_margin",
+    "revenue growth": "revenue_growth",
+    "growth": "revenue_growth",
+    "sales growth": "revenue_growth",
+    "free cash flow margin": "free_cash_flow_margin",
+    "fcf margin": "free_cash_flow_margin",
+}
+
+
+# A comparison, which is what turns a mention of a model value into a
+# THRESHOLD. "revenue growth falls below the 25% model cap" uses the cap as a
+# business trigger; "a company-specific WACC replaces the configured default"
+# merely names it, and is a perfectly good reassessment trigger.
+_COMPARISON_LANGUAGE = re.compile(
+    r"(?i)\b(?:above|below|over|under|exceeds?|at\s+least|greater\s+than|"
+    r"less\s+than|falls?|rises?|drops?|reaches?|hits?|breaches?)\b")
+
+
+def uses_model_threshold(text: str) -> bool:
+    """Section 34: is this condition built on a software limit?
+
+    Requires BOTH a reference to an internal model value AND a comparison
+    against it. Without the comparison the condition is not using the bound
+    as a threshold -- it is talking about the bound, which is exactly what a
+    "replace the configured default with a company-specific figure" trigger
+    should do.
+    """
+    if not isinstance(text, str):
+        return False
+    return bool(_MODEL_THRESHOLD_LANGUAGE.search(text)
+                and _COMPARISON_LANGUAGE.search(text))
+
+
+def is_already_satisfied(text: str, current_metrics) -> bool:
+    """Section 32: does current evidence already meet this condition?
+
+    An upgrade condition of "margin above 15%" for a company already at 16%
+    is not a future development; it is a description of today. Such a
+    condition is only meaningful when it also asks for the level to PERSIST
+    or to improve FURTHER, which section 33 spells out and
+    `_PERSISTENCE_LANGUAGE` recognises.
+
+    Returns False whenever the comparison cannot be made -- an unparsed
+    threshold, an unknown metric, a missing current value. This validator
+    rejects conditions it can prove are vacuous, not ones it cannot check.
+    """
+    if not isinstance(text, str) or not current_metrics:
+        return False
+    if _PERSISTENCE_LANGUAGE.search(text):
+        return False
+    for match in _THRESHOLD_RE.finditer(text):
+        metric_phrase = (match.group("metric") or "").strip().lower()
+        key = None
+        for alias, canonical in sorted(_CONDITION_METRIC_ALIASES.items(),
+                                       key=lambda kv: -len(kv[0])):
+            if metric_phrase.endswith(alias):
+                key = canonical
+                break
+        if key is None:
+            continue
+        entry = current_metrics.get(key) or {}
+        current = entry.get("value") if isinstance(entry, dict) else entry
+        if current is None:
+            continue
+        try:
+            threshold = float(match.group("value"))
+        except (TypeError, ValueError):
+            continue
+        if (match.group("unit") or "").strip() == "%":
+            threshold /= 100.0
+        direction = (match.group("direction") or "").lower()
+        upward = any(word in direction for word in
+                     ("above", "over", "exceed", "at least", "greater", "rises"))
+        if upward and current >= threshold:
+            return True
+        if not upward and current <= threshold:
+            return True
+    return False
+
+
+def validate_conditions_against_current_state(validated: dict,
+                                              current_metrics=None) -> dict:
+    """Drop conditions that are vacuous or built on internal thresholds.
+
+    Two rejections, both narrow:
+
+    * a threshold already met by current evidence, with no persistence or
+      further-improvement requirement (section 32/33), and
+    * a threshold that exists only inside this software (section 34).
+
+    Dropped rather than repaired: neither has a correct form this validator
+    could infer. As elsewhere, the last remaining condition in a bucket is
+    never removed -- an empty list tells a reader less than one imperfect
+    entry.
+    """
+    validated = dict(validated)
+    for key in ("conditions_that_strengthen_the_view", "conditions_that_weaken_the_view",
+                "reassessment_triggers"):
+        conditions = validated.get(key) or []
+        if len(conditions) <= 1:
+            continue
+        kept = [c for c in conditions
+                if not uses_model_threshold(c)
+                and not is_already_satisfied(c, current_metrics)]
+        validated[key] = kept or conditions[:1]
+    return validated
+
+
+def guidance_already_available(guidance_metrics) -> bool:
+    """Section 38: is full-year guidance already published?"""
+    for entry in (guidance_metrics or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("target_period_type") in ("CURRENT_FISCAL_YEAR", "NEXT_FISCAL_YEAR"):
+            return True
+    return False
+
+
+# Reassessment triggers that claim something is not yet available.
+_AVAILABILITY_TRIGGER = re.compile(
+    r"(?i)\b(?:full[\s-]year\s+guidance|annual\s+guidance|guidance)\b[^.]{0,60}?"
+    r"\b(?:becomes?\s+available|is\s+(?:issued|published|provided)|"
+    r"are\s+(?:issued|published|provided))\b")
+
+
+def drop_stale_availability_triggers(validated: dict, guidance_metrics=None) -> dict:
+    """Section 38: "full-year guidance becomes available" is not a trigger
+    when full-year guidance is already available."""
+    if not guidance_already_available(guidance_metrics):
+        return validated
+    triggers = validated.get("reassessment_triggers") or []
+    if len(triggers) <= 1:
+        return validated
+    kept = [t for t in triggers if not _AVAILABILITY_TRIGGER.search(t or "")]
+    validated = dict(validated)
+    validated["reassessment_triggers"] = kept or triggers[:1]
+    return validated
+
+
+def _route_conditions_by_direction(validated: dict, current_metrics=None,
+                                   guidance_metrics=None) -> dict:
     """Spec 9: upgrade -> FAVORABLE, downgrade -> UNFAVORABLE, reassessment
     -> BIDIRECTIONAL. A misfiled condition is MOVED to the bucket its
     direction actually implies -- never rejected.
@@ -1751,12 +2094,21 @@ def _route_conditions_by_direction(validated: dict) -> dict:
 
     Caps are re-applied after routing so a bucket cannot overflow.
     """
+    validated = _filter_limiting_factors(validated)
+    validated = validate_conditions_against_current_state(validated, current_metrics)
+    validated = drop_stale_availability_triggers(validated, guidance_metrics)
     routed = {key: [] for key in _CONDITION_BUCKETS.values()}
     for expected, source_key in (
             (CONDITION_FAVOURABLE, "conditions_that_strengthen_the_view"),
             (CONDITION_UNFAVOURABLE, "conditions_that_weaken_the_view"),
             (CONDITION_BIDIRECTIONAL, "reassessment_triggers")):
         for condition in validated.get(source_key) or []:
+            # Section 53: a condition that validates the thesis purely from a
+            # price move is satisfied by the move it predicts and carries no
+            # information. Dropped rather than re-filed -- there is no bucket
+            # a circular condition belongs in.
+            if is_circular_price_condition(condition):
+                continue
             actual = classify_condition_direction(condition)
             destination = (source_key if actual in (CONDITION_UNCLASSIFIED, expected)
                           else _CONDITION_BUCKETS[actual])
@@ -1766,6 +2118,47 @@ def _route_conditions_by_direction(validated: dict) -> dict:
     for key, items in routed.items():
         validated[key] = items[:_CONDITION_BUCKET_CAP]
     return validated
+
+
+RISK_RECONCILIATION_REQUIRED = "RISK_RECONCILIATION_REQUIRED"
+
+_RISK_RANK = {"low": 0, "moderate": 1, "medium": 1, "high": 2, "critical": 3}
+
+
+def reconcile_final_risk(final_risk, reviewer_risk, reconciliation_reason=""):
+    """Sections 29-30: the synthesizer may not quietly lower the risk level.
+
+    The RiskReviewer is an independent stage and its aggregate is the
+    starting point. The FinalInvestmentSynthesizer may disagree -- it sees
+    evidence the reviewer does not -- but only with a stated reason that
+    cites it. Without one the reviewer's level stands, because a risk that
+    drifts down between two stages with no explanation is indistinguishable
+    from one that was simply rounded away.
+
+    Returns (risk, finding_or_None).
+    """
+    if not final_risk or not reviewer_risk:
+        return final_risk, None
+    final_rank = _RISK_RANK.get(str(final_risk).lower())
+    reviewer_rank = _RISK_RANK.get(str(reviewer_risk).lower())
+    if final_rank is None or reviewer_rank is None:
+        return final_risk, None
+    if final_rank >= reviewer_rank:
+        return final_risk, None
+    if len((reconciliation_reason or "").strip()) >= 40:
+        return final_risk, {
+            "code": RISK_RECONCILIATION_REQUIRED, "severity": "info",
+            "message": (
+                f"The final risk of {final_risk!r} sits below the RiskReviewer's "
+                f"{reviewer_risk!r}, with the stated reason: {reconciliation_reason}"),
+        }
+    return reviewer_risk, {
+        "code": RISK_RECONCILIATION_REQUIRED, "severity": "warning",
+        "message": (
+            f"The final synthesis proposed a risk of {final_risk!r} while the independent "
+            f"RiskReviewer assessed {reviewer_risk!r}, and gave no evidence-backed "
+            f"reconciliation. The reviewer's {reviewer_risk!r} stands."),
+    }
 
 
 def _require_recommendation_consistent_with_stance(recommendation: str, validated: dict) -> str:
@@ -1786,7 +2179,9 @@ def _require_recommendation_consistent_with_stance(recommendation: str, validate
 
 
 def _validate_final_synthesizer_output(raw, index, risk_output=None,
-                                       readiness_status=None) -> dict:
+                                       readiness_status=None,
+                                       current_metrics=None,
+                                       guidance_metrics=None) -> dict:
     if not isinstance(raw, dict):
         raise _Invalid("response was not a JSON object")
     validated = {
@@ -1863,7 +2258,22 @@ def _validate_final_synthesizer_output(raw, index, risk_output=None,
     # Spec 9: CORRECTS rather than rejects -- a misfiled condition is moved to
     # the bucket its direction implies. See the function's own docstring for
     # why rejecting here was the wrong call.
-    validated = _route_conditions_by_direction(validated)
+    # Phase H.9, sections 32-38: a condition current evidence already
+    # satisfies, or one built on an internal model bound, is not a future
+    # development and is dropped here rather than shown as one.
+    validated = _route_conditions_by_direction(
+        validated, current_metrics=current_metrics, guidance_metrics=guidance_metrics)
+
+    # Sections 29-30: the RiskReviewer's aggregate stands unless the
+    # synthesizer gives an evidence-backed reconciliation.
+    reviewer_risk = (risk_output or {}).get("overall_risk") if isinstance(
+        risk_output, dict) else None
+    reconciled, risk_finding = reconcile_final_risk(
+        validated.get("overall_risk"), reviewer_risk,
+        validated.get("risk_reconciliation_reason", ""))
+    validated["overall_risk"] = reconciled
+    if risk_finding:
+        validated["risk_reconciliation_finding"] = risk_finding
     # The content-policy AND claim-fidelity backstop (Problem 1 requirement 4;
     # Problem 5): even with no verdict field in the schema, a model can still
     # WRITE prohibited trade-advice language, or an unsupported superlative /
@@ -2254,7 +2664,10 @@ def _correction_for(kind: str, error: Optional[str],
 # ---------------------------------------------------------------------------
 
 def run_research_pipeline(evidence_index: Dict[str, EvidenceItem], ask_local_fn,
-                          readiness_status: Optional[str] = None) -> ResearchPipelineResult:
+                          readiness_status: Optional[str] = None,
+                          current_metrics: Optional[dict] = None,
+                          guidance_metrics: Optional[dict] = None
+                          ) -> ResearchPipelineResult:
     """Run the full staged pipeline. `evidence_index` is built ONCE by the
     caller (`finance.evidence.build_evidence_index`) and rendered to an
     immutable string here — every stage sees the identical text.
@@ -2357,8 +2770,15 @@ def run_research_pipeline(evidence_index: Dict[str, EvidenceItem], ask_local_fn,
             # MLI corrective patch: the risk_reviewer's validated output is
             # threaded in so its aggregated risk can be FORCED onto the
             # synthesis rather than re-derived (or silently softened) here.
+            # Phase H.9: the canonical CURRENT metrics and the current
+            # guidance are threaded in so the condition validators can tell a
+            # future development from a description of today, and so a
+            # "guidance becomes available" trigger cannot survive when
+            # guidance is already available.
             lambda raw: _validate_final_synthesizer_output(
-                raw, evidence_index, risk_checkpoint.output, readiness_status), ask_local_fn)
+                raw, evidence_index, risk_checkpoint.output, readiness_status,
+                current_metrics=current_metrics,
+                guidance_metrics=guidance_metrics), ask_local_fn)
     else:
         final_checkpoint = _skipped(
             "final_investment_synthesizer", "requires research_manager and risk_reviewer to have completed")

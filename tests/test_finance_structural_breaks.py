@@ -159,12 +159,50 @@ def test_a_routine_8k_item_is_not_a_material_event():
     assert events == []
 
 
-def test_a_securities_offering_is_a_material_event():
+def test_an_unidentifiable_securities_filing_claims_nothing():
+    """Phase H.9, section 28 reversed this deliberately.
+
+    A bare prospectus supplement with no describable security was previously
+    reported as "a securities offering" and treated as potential equity
+    dilution. On a live issuer that produced a dilution warning built from an
+    investment-grade DEBT offering and an insider's Form 144. An event whose
+    type cannot be determined now asserts nothing -- in particular, not
+    dilution.
+    """
     events = SB.find_post_balance_sheet_events(
         _submissions([("424B2", "", "2026-08-01")]),
         balance_sheet_date="2026-06-30", valuation_date="2026-08-17")
     assert len(events) == 1
-    assert "offering" in events[0].description
+    event = events[0]
+    assert event.event_type == SB.PostBalanceSheetEventType.UNKNOWN
+    assert event.impact["potential_dilution"] is False
+    assert event.impact["affects_share_count"] is False
+
+
+def test_a_debt_offering_is_identified_as_debt_not_dilution():
+    events = SB.find_post_balance_sheet_events(
+        _submissions([("8-K", "2.03", "2026-08-01")]),
+        balance_sheet_date="2026-06-30", valuation_date="2026-08-17")
+    assert len(events) == 1
+    event = events[0]
+    assert event.event_type == SB.PostBalanceSheetEventType.ISSUER_DEBT_ISSUANCE
+    assert event.impact["affects_debt"] is True
+    assert event.impact["potential_dilution"] is False
+    assert "debt" in event.description
+
+
+def test_an_insider_sale_changes_nothing_about_the_issuer():
+    """Section 25: existing shares changing hands."""
+    events = SB.find_post_balance_sheet_events(
+        _submissions([("144", "", "2026-08-01")]),
+        balance_sheet_date="2026-06-30", valuation_date="2026-08-17")
+    assert len(events) == 1
+    event = events[0]
+    assert event.event_type == SB.PostBalanceSheetEventType.INSIDER_SECONDARY_SALE
+    assert event.impact["affects_share_count"] is False
+    assert event.impact["potential_dilution"] is False
+    assert event.impact["affects_cash"] is False
+    assert event.impact["requires_reassessment"] is False
 
 
 def test_no_submissions_index_means_no_events_not_a_crash():

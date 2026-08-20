@@ -369,7 +369,13 @@ class ScenarioAssumptions:
     name: str
     revenue_growth: List[float]
     operating_margin: List[float]
-    tax_rate: float
+    # Phase H.8, sections 16-17: a SERIES, like every other per-year
+    # assumption in this dataclass. A company's current-year effective rate
+    # can be moved sharply by an acquisition or a settlement, and repeating
+    # that rate for five years carries a one-off tax consequence through the
+    # whole horizon. `_as_series` still accepts a bare scalar and holds it
+    # flat, so every existing caller is unaffected.
+    tax_rate: List[float]
     depreciation_pct_revenue: List[float]
     capex_pct_revenue: List[float]
     working_capital_pct_revenue: List[float]
@@ -388,7 +394,7 @@ class ScenarioAssumptions:
             "name": self.name,
             "revenue_growth": [_round(v) for v in self.revenue_growth],
             "operating_margin": [_round(v) for v in self.operating_margin],
-            "tax_rate": _round(self.tax_rate),
+            "tax_rate": [_round(v) for v in self.tax_rate],
             "depreciation_pct_revenue": [_round(v) for v in self.depreciation_pct_revenue],
             "capex_pct_revenue": [_round(v) for v in self.capex_pct_revenue],
             "working_capital_pct_revenue": [_round(v)
@@ -457,7 +463,7 @@ def build_scenario(raw, horizon) -> ScenarioAssumptions:
 
     wacc = _as_number(raw["wacc"], f"{name}.wacc")
     terminal_growth = _as_number(raw["terminal_growth"], f"{name}.terminal_growth")
-    tax_rate = _as_number(raw["tax_rate"], f"{name}.tax_rate")
+    tax_rate = _as_series(raw["tax_rate"], horizon, f"{name}.tax_rate")
 
     lo, hi = config.dcf_min_discount_rate(), config.dcf_max_discount_rate()
     if not (lo <= wacc <= hi):
@@ -470,9 +476,10 @@ def build_scenario(raw, horizon) -> ScenarioAssumptions:
             DCF_TERMINAL_GROWTH_TOO_HIGH,
             f"Scenario {name!r}: terminal growth {terminal_growth:.4f} must be strictly "
             f"below WACC {wacc:.4f}; the perpetuity is undefined otherwise.")
-    if not (0.0 <= tax_rate < 1.0):
-        raise ToolFailure(DCF_ASSUMPTION_INVALID,
-                          f"Scenario {name!r}: tax_rate must be in [0, 1).")
+    for index, rate in enumerate(tax_rate):
+        if not (0.0 <= rate < 1.0):
+            raise ToolFailure(DCF_ASSUMPTION_INVALID,
+                              f"Scenario {name!r}: tax_rate[{index}] must be in [0, 1).")
 
     return ScenarioAssumptions(
         name=name.strip(),
@@ -544,7 +551,7 @@ def _project_raw(inputs: DcfInputs, scenario: ScenarioAssumptions) -> List[dict]
         _require_finite(revenue, f"year {year} revenue")
 
         ebit = revenue * scenario.operating_margin[index]
-        nopat = ebit * (1.0 - scenario.tax_rate)
+        nopat = ebit * (1.0 - scenario.tax_rate[index])
         depreciation = revenue * scenario.depreciation_pct_revenue[index]
         capex = revenue * scenario.capex_pct_revenue[index]
         working_capital = revenue * scenario.working_capital_pct_revenue[index]
@@ -561,7 +568,7 @@ def _project_raw(inputs: DcfInputs, scenario: ScenarioAssumptions) -> List[dict]
             "revenue_growth": scenario.revenue_growth[index],
             "operating_margin": scenario.operating_margin[index],
             "ebit": ebit,
-            "tax_rate": scenario.tax_rate,
+            "tax_rate": scenario.tax_rate[index],
             "nopat": nopat,
             "depreciation_amortization": depreciation,
             "capital_expenditure": capex,

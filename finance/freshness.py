@@ -47,7 +47,9 @@ from typing import Dict, List, Optional, Tuple
 import tools.config as config
 from finance import net_debt as nd
 from finance import period_facts as pf
+from finance import profitability as prof
 from finance import structural_breaks as sb
+from finance import taxonomy as taxonomy_module
 from finance import ttm as ttm_module
 
 # ---------------------------------------------------------------------------
@@ -137,6 +139,11 @@ ALL_STALE_GUARD_CODES = (DCF_STALE_BALANCE_SHEET_INPUT, DCF_STALE_FLOW_INPUT,
 BALANCE_SHEET_FIELDS = (
     "cash_and_cash_equivalents",
     "short_term_investments",
+    # Section 27: reported so the bridge's exclusions are visible, never
+    # netted -- restricted cash cannot repay debt, and lease liabilities sit
+    # outside this project's documented total-debt policy.
+    "restricted_cash",
+    "lease_liabilities",
     # Phase H.6, section 14: kept as its own component so a net-debt policy
     # that does NOT treat equity holdings as cash can still report them.
     "equity_securities_at_fair_value",
@@ -166,6 +173,13 @@ POINT_IN_TIME_ONLY_FIELDS = frozenset(BALANCE_SHEET_FIELDS)
 TTM_FLOW_FIELDS = (
     "revenue",
     "operating_income",
+    # Phase H.8: the components an operating income is DERIVED from when the
+    # issuer does not tag `OperatingIncomeLoss`, plus the lines the
+    # profitability layer needs. Selected through the same freshness planner
+    # as everything else so they carry matching periods.
+    "income_before_tax",
+    "interest_expense_nonoperating",
+    "income_tax_expense",
     "net_income",
     "depreciation_and_amortization",
     "capital_expenditure",
@@ -634,6 +648,12 @@ class CurrentFinancialState:
     historical_comparability: Optional[dict] = None
     post_balance_sheet_events: Tuple[dict, ...] = ()
     freshness_audit: Optional[dict] = None
+    # Phase H.7 additions.
+    taxonomy: Optional[str] = None
+    reporting_framework_note: Optional[str] = None
+    # Phase H.8. Reported and normalized profitability, side by side, with
+    # every unusual-item adjustment itemized (sections 1-5).
+    profitability: Optional[dict] = None
 
     def value(self, name: str) -> Optional[float]:
         """The plain number for a field, from whichever compartment holds it."""
@@ -680,6 +700,9 @@ class CurrentFinancialState:
             "historical_comparability": self.historical_comparability,
             "post_balance_sheet_events": [dict(e) for e in self.post_balance_sheet_events],
             "freshness_audit": self.freshness_audit,
+            "taxonomy": self.taxonomy,
+            "reporting_framework_note": self.reporting_framework_note,
+            "profitability": self.profitability,
         }
 
 
@@ -718,6 +741,13 @@ def build_current_financial_state(company_facts: dict, symbol: str,
         datetime.timezone.utc).date().isoformat()
 
     balance, warnings = planner.select_balance_sheet()
+    framework_note = (taxonomy_module.unsupported_taxonomy_reason(company_facts)
+                      or taxonomy_module.reporting_currency_note(company_facts))
+    if framework_note:
+        # Phase H.7: without this the pipeline reported "this company
+        # published no financials", which is a far stronger claim than "this
+        # project cannot read this issuer's reporting framework".
+        warnings.append(framework_note)
     total_debt, debt_components = planner.derive_total_debt(balance)
     warnings.extend(exclusion["reason"] for exclusion in debt_components.excluded)
     # The balance-sheet date is the reference point for "is this flow
@@ -730,6 +760,25 @@ def build_current_financial_state(company_facts: dict, symbol: str,
     flow_reference = ttm_module.latest_reported_period_end(company_facts) or reference_date
     flows = {name: planner.select_flow(name, reference_date=flow_reference)
              for name in TTM_FLOW_FIELDS}
+
+    # Phase H.8 -- OPERATING INCOME, DERIVED WHEN IT IS NOT TAGGED.
+    #
+    # Not every issuer reports `OperatingIncomeLoss`. Two live examples had
+    # 775 and 394 us-gaap concepts respectively and neither included it, so
+    # `operating_income` resolved to None and the forward-assumption builder
+    # fell all the way through to the configured default margin. On one of
+    # them that produced a base modelled value of $0.20 against a $149.93
+    # market price.
+    #
+    # Both DO report pre-tax income and non-operating interest, which is the
+    # standard bridge. The result is labelled `derived` -- never `reported` --
+    # so nothing downstream mistakes it for a figure the issuer published.
+    if flows.get("operating_income") is None or flows["operating_income"].value is None:
+        derived = _derive_operating_income(
+            flows.get("income_before_tax"), flows.get("interest_expense_nonoperating"),
+            planner.retrieved_at)
+        if derived.value is not None:
+            flows["operating_income"] = derived
 
     # Free cash flow is DERIVED, never selected: OCF - capex, both on the SAME
     # basis. Mixing a trailing-twelve-month operating cash flow with an annual
@@ -804,7 +853,20 @@ def build_current_financial_state(company_facts: dict, symbol: str,
         history_years=config.dcf_assumption_history_max_years())
 
     # -- section 18: material events after the balance-sheet date ----------
-    events = sb.find_post_balance_sheet_events(submissions, bs_date, valuation_date)
+    all_events = sb.find_post_balance_sheet_events(submissions, bs_date, valuation_date)
+    # Phase H.9, sections 24-25. Only events that change the ISSUER's own
+    # capital structure make the equity bridge stale. A Form 144 -- an
+    # insider selling shares he already owns -- changes no share count, raises
+    # no capital and moves no debt, and reporting it as a freshness risk was
+    # describing a different fact about the company. Every event is still
+    # RECORDED; only the reassessment-worthy ones raise a finding.
+    events = [e for e in all_events if (e.impact or {}).get("requires_reassessment")]
+    non_material = [e for e in all_events if e not in events]
+    if non_material:
+        warnings.append(
+            f"{len(non_material)} securities filing(s) after {bs_date} were reviewed and do "
+            "not affect the company's share count, debt or cash "
+            f"({', '.join(sorted({e.event_type for e in non_material}))}).")
     for event in events:
         findings.append(_finding(
             DCF_POST_BALANCE_SHEET_EVENT, "warning",
@@ -816,11 +878,33 @@ def build_current_financial_state(company_facts: dict, symbol: str,
             filed=event.filed, form=event.form, items=event.items,
             accession=event.accession))
 
+    # -- Phase H.8, sections 1-5: reported vs normalized profitability ------
+    revenue_flow = flows.get("revenue")
+    profitability_state = prof.build_profitability_state(
+        revenue=getattr(revenue_flow, "value", None),
+        period=(f"{getattr(revenue_flow, 'period_start', None)}.."
+                f"{getattr(revenue_flow, 'as_of_date', None)}"),
+        operating_income=getattr(flows.get("operating_income"), "value", None),
+        net_income=getattr(flows.get("net_income"), "value", None),
+        operating_cash_flow=getattr(flows.get("operating_cash_flow"), "value", None),
+        income_tax_expense=getattr(flows.get("income_tax_expense"), "value", None),
+        income_before_tax=getattr(flows.get("income_before_tax"), "value", None),
+        company_facts=company_facts,
+        period_start=getattr(revenue_flow, "period_start", None),
+        period_end=getattr(revenue_flow, "as_of_date", None))
+    operating_selection = flows.get("operating_income")
+    if operating_selection is not None and operating_selection.components:
+        profitability_state.operating_income_source = "derived"
+        profitability_state.operating_income_derivation = operating_selection.derivation
+    findings.extend(profitability_state.findings)
+    warnings.extend(profitability_state.warnings)
+
     freshness = _classify_valuation_freshness(findings, balance, flows, bs_date, annual_end)
 
     audit = _build_freshness_audit(
         symbol, valuation_date, flows, bs_date, annual_end, quarterly_end,
-        management_guidance, events, comparability, net_debt_result, findings)
+        management_guidance, events, comparability, net_debt_result, findings,
+        company_facts=company_facts)
 
     return CurrentFinancialState(
         symbol=symbol,
@@ -840,14 +924,17 @@ def build_current_financial_state(company_facts: dict, symbol: str,
         warnings=tuple(warnings),
         net_debt_detail=net_debt_result.to_dict(),
         historical_comparability=comparability.to_dict(),
-        post_balance_sheet_events=tuple(e.to_dict() for e in events),
+        taxonomy=taxonomy_module.detect_taxonomy(company_facts),
+        profitability=profitability_state.to_dict(),
+        reporting_framework_note=framework_note,
+        post_balance_sheet_events=tuple(e.to_dict() for e in all_events),
         freshness_audit=audit,
     )
 
 
 def _build_freshness_audit(symbol, valuation_date, flows, bs_date, annual_end, quarterly_end,
                            management_guidance, events, comparability, net_debt_result,
-                           findings) -> dict:
+                           findings, company_facts=None) -> dict:
     """Section 23 — the compact internal audit built BEFORE the DCF runs.
 
     One structure answering "what period is each side of this valuation
@@ -897,8 +984,71 @@ def _build_freshness_audit(symbol, valuation_date, flows, bs_date, annual_end, q
         },
         "post_balance_sheet_events": [e.to_dict() for e in events],
         "historical_comparability": comparability.status,
+        # Section 48. `shares`, `dcf_suitability` and the reporting framework
+        # are filled in by the workflow once the share reconciliation and the
+        # valuation have run -- they are not knowable at this point, and
+        # leaving the keys present-but-empty is what makes the audit a fixed
+        # shape rather than a dict whose fields come and go.
+        "shares": {"basis": None, "reconciliation": None},
+        "dcf_suitability": None,
+        "reporting_framework": {
+            "taxonomy": taxonomy_module.detect_taxonomy(company_facts),
+            "note": taxonomy_module.unsupported_taxonomy_reason(company_facts)
+                    or taxonomy_module.reporting_currency_note(company_facts),
+        },
         "warnings": [f["message"] for f in findings if f.get("severity") in ("warning", "error")],
     }
+
+
+def _derive_operating_income(pre_tax: Optional[SelectedValue],
+                             interest: Optional[SelectedValue],
+                             retrieved_at: str) -> SelectedValue:
+    """operating income ~= pre-tax income + non-operating interest expense.
+
+    Only ever attempted when the issuer does not tag operating income
+    directly, and only when both components cover the SAME period -- adding
+    an interest expense from a different window to a pre-tax income is the
+    same class of error as any other period mismatch.
+
+    The bridge is approximate by nature: it recovers operating income from
+    below the line, so any other non-operating item the issuer nets into
+    pre-tax income (investment income, equity-method results, one-off gains)
+    stays inside the result. That is stated in the derivation rather than
+    hidden, and the value is labelled `derived` so the profitability layer
+    and the report can both say so.
+    """
+    evidence_id = _evidence_id("input", "operating_income_ttm")
+    if pre_tax is None or pre_tax.value is None:
+        return _unavailable(
+            "operating_income", evidence_id,
+            "This issuer does not report operating income, and no pre-tax income figure was "
+            "available to derive it from.")
+    if interest is None or interest.value is None:
+        return _unavailable(
+            "operating_income", evidence_id,
+            "This issuer does not report operating income. Pre-tax income is available but "
+            "non-operating interest expense is not, so the two cannot be bridged.")
+    if pre_tax.as_of_date != interest.as_of_date             or pre_tax.period_start != interest.period_start:
+        return _unavailable(
+            "operating_income", evidence_id,
+            f"Pre-tax income covers {pre_tax.period_start}..{pre_tax.as_of_date} but "
+            f"non-operating interest covers {interest.period_start}..{interest.as_of_date}; "
+            "bridging them would produce a figure belonging to neither period.")
+    value = pre_tax.value + abs(interest.value)
+    return SelectedValue(
+        field="operating_income", value=value, unit=pre_tax.unit, source=pre_tax.source,
+        provider=pre_tax.provider, accession=pre_tax.accession, form=pre_tax.form,
+        fiscal_period=pre_tax.fiscal_period, as_of_date=pre_tax.as_of_date,
+        period_start=pre_tax.period_start, retrieval_timestamp=retrieved_at,
+        evidence_id=evidence_id, freshness_status=pre_tax.freshness_status,
+        derivation=(
+            f"DERIVED, not reported: this issuer does not tag operating income. Pre-tax "
+            f"income ({pre_tax.value:,.0f}) plus non-operating interest expense "
+            f"({abs(interest.value):,.0f}) over {pre_tax.period_start}..{pre_tax.as_of_date}. "
+            "Any other non-operating item the issuer nets into pre-tax income remains inside "
+            "this figure."),
+        components=("income_before_tax", "interest_expense_nonoperating"),
+        concept=pre_tax.concept, ttm=pre_tax.ttm)
 
 
 def _derive_free_cash_flow(ocf: Optional[SelectedValue], capex: Optional[SelectedValue],
@@ -935,6 +1085,26 @@ def _derive_free_cash_flow(ocf: Optional[SelectedValue], capex: Optional[Selecte
             "free_cash_flow", evidence_id,
             f"Operating cash flow is reported in {ocf.unit} and capital expenditure in "
             f"{capex.unit}; they cannot be subtracted.")
+    # Section 4: a DERIVED value that carries a TTM label needs a TTM record
+    # too, or the label is unverifiable. The record is inherited from the
+    # components -- which the checks above have just proved cover the same
+    # window -- and names the derivation as its construction method, so
+    # nothing mistakes it for a directly summed series.
+    derived_ttm = None
+    if ocf.source == "ttm_calculation" and ocf.ttm:
+        component_record = dict(ocf.ttm)
+        derived_ttm = {
+            **component_record,
+            "metric": "free_cash_flow",
+            "value": ocf.value - abs(capex.value),
+            "construction_method": "operating_cash_flow_less_capital_expenditure",
+            "validation_status": ttm_module.TtmValidation.worst_of(
+                component_record.get("validation_status"),
+                (capex.ttm or {}).get("validation_status")),
+            "source_accessions": sorted(set(
+                (component_record.get("source_accessions") or [])
+                + ((capex.ttm or {}).get("source_accessions") or []))),
+        }
     return SelectedValue(
         field="free_cash_flow", value=ocf.value - abs(capex.value), unit=ocf.unit,
         source=ocf.source, provider=ocf.provider, accession=ocf.accession, form=ocf.form,
@@ -942,8 +1112,10 @@ def _derive_free_cash_flow(ocf: Optional[SelectedValue], capex: Optional[Selecte
         period_start=ocf.period_start, retrieval_timestamp=retrieved_at,
         evidence_id=evidence_id, freshness_status=ocf.freshness_status,
         derivation=(f"Operating cash flow ({ocf.value:,.0f}) less capital expenditure "
-                    f"({abs(capex.value):,.0f}), both {ocf.source}."),
-        components=("operating_cash_flow", "capital_expenditure"))
+                    f"({abs(capex.value):,.0f}), both {ocf.source} over "
+                    f"{ocf.period_start}..{ocf.as_of_date}."),
+        components=("operating_cash_flow", "capital_expenditure"),
+        ttm=derived_ttm)
 
 
 def _debt_change_finding(company_facts: dict, total_debt: SelectedValue,

@@ -409,7 +409,12 @@ def test_assumptions_are_preserved_exactly_in_the_output(result):
     used = result["assumptions"]
     assert used["wacc"] == pytest.approx(WACC)
     assert used["terminal_growth"] == pytest.approx(TERMINAL_GROWTH)
-    assert used["tax_rate"] == pytest.approx(TAX)
+    # Phase H.8: `tax_rate` became a per-year SERIES, like revenue_growth
+    # and operating_margin already were, so a current year distorted by an
+    # acquisition or a settlement is not repeated across the whole horizon.
+    # A scalar input is still accepted and held flat, which is what this
+    # scenario supplies -- so the round-trip is a flat series.
+    assert used["tax_rate"] == [pytest.approx(TAX)] * HORIZON
     assert used["revenue_growth"] == [pytest.approx(GROWTH)] * HORIZON
 
 

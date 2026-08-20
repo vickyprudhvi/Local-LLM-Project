@@ -110,11 +110,25 @@ class NetDebtComponents:
     cash_and_cash_equivalents: Optional[float] = None
     short_term_investments: Optional[float] = None
     equity_securities_at_fair_value: Optional[float] = None
+    # Section 27. Restricted cash is NOT available to repay debt -- it is
+    # pledged, escrowed or held against a specific obligation -- so it is
+    # reported as its own component and never netted by either policy.
+    restricted_cash: Optional[float] = None
     short_term_debt: Optional[float] = None
     current_portion_of_long_term_debt: Optional[float] = None
     long_term_debt: Optional[float] = None
+    # Section 27. Lease liabilities are a financing obligation under IFRS 16
+    # and ASC 842 but are excluded from this project's documented total-debt
+    # policy. Kept visible so a reader can see the size of what the policy
+    # leaves out rather than having to notice its absence.
+    lease_liabilities: Optional[float] = None
     total_debt: Optional[float] = None
     reported_total_debt: Optional[float] = None
+    # Section 28. Management's OWN net-debt measure, with its own definition.
+    # Never overwrites the model figure; the two are reconciled and their
+    # difference classified.
+    company_reported_net_debt: Optional[float] = None
+    company_net_debt_definition: Optional[str] = None
     as_of_date: Optional[str] = None
     unit: str = "USD"
     concepts: Dict[str, str] = field(default_factory=dict)
@@ -127,6 +141,10 @@ class NetDebtComponents:
             "cash_and_cash_equivalents": self.cash_and_cash_equivalents,
             "short_term_investments": self.short_term_investments,
             "equity_securities_at_fair_value": self.equity_securities_at_fair_value,
+            "restricted_cash": self.restricted_cash,
+            "lease_liabilities": self.lease_liabilities,
+            "company_reported_net_debt": self.company_reported_net_debt,
+            "company_net_debt_definition": self.company_net_debt_definition,
             "short_term_debt": self.short_term_debt,
             "current_portion_of_long_term_debt": self.current_portion_of_long_term_debt,
             "long_term_debt": self.long_term_debt,
@@ -204,6 +222,8 @@ def collect_components(selections: Dict[str, object],
 
     components.cash_and_cash_equivalents, _ = read("cash_and_cash_equivalents")
     components.short_term_investments, _ = read("short_term_investments")
+    components.restricted_cash, _ = read("restricted_cash")
+    components.lease_liabilities, _ = read("lease_liabilities")
     components.equity_securities_at_fair_value, _ = read("equity_securities_at_fair_value")
     short_term_debt, short_term_concept = read("short_term_debt")
     current_portion, _ = read("current_portion_of_long_term_debt")
@@ -370,3 +390,84 @@ def verify_net_debt(result: NetDebtResult, reported_net_debt: Optional[float]) -
         reported_net_debt=reported_net_debt, recalculated_net_debt=result.value,
         difference=reported_net_debt - result.value, policy=result.policy)]
     return result
+
+
+# ---------------------------------------------------------------------------
+# Sections 28-29 — company-defined vs model-defined
+# ---------------------------------------------------------------------------
+
+LEVERAGE_DEFINITION_MISMATCH = "LEVERAGE_DEFINITION_MISMATCH"
+
+
+def compare_company_and_model_net_debt(model: NetDebtResult,
+                                       company_reported: Optional[float],
+                                       definition: Optional[str] = None) -> dict:
+    """Section 28: reconcile management's net debt with the model's.
+
+    A difference here is normally a DEFINITION difference, not an error.
+    Management commonly nets restricted cash, includes lease liabilities,
+    counts long-term investments as liquidity, or reports on a
+    proportionally-consolidated basis. Treating that as an arithmetic failure
+    would fire on healthy companies; treating the two figures as
+    interchangeable would let a company-defined measure silently replace the
+    one the equity bridge uses. Both are recorded, and the difference is
+    CLASSIFIED.
+    """
+    record = {
+        "model_net_debt": model.value,
+        "model_net_debt_policy": model.policy,
+        "company_reported_net_debt": company_reported,
+        "company_net_debt_definition": definition,
+        "difference": None,
+        "status": "UNAVAILABLE",
+        "findings": [],
+    }
+    if model.value is None or company_reported is None:
+        return record
+    difference = company_reported - model.value
+    record["difference"] = difference
+    if _within_tolerance(model.value, company_reported):
+        record["status"] = "CONSISTENT"
+        return record
+    record["status"] = LEVERAGE_DEFINITION_MISMATCH
+    record["findings"].append(_finding(
+        LEVERAGE_DEFINITION_MISMATCH, "info",
+        f"Management reports net debt of {company_reported:,.0f}; this project's "
+        f"{model.policy!r} policy computes {model.value:,.0f} from the reported balance-sheet "
+        f"components, a difference of {difference:+,.0f}. This is a difference of DEFINITION, "
+        "not an arithmetic error: the two measures are reported side by side and are never "
+        "substituted for each other."
+        + (f" Management's stated definition: {definition}" if definition else ""),
+        model_net_debt=model.value, company_reported_net_debt=company_reported,
+        difference=difference, policy=model.policy))
+    return record
+
+
+# ---------------------------------------------------------------------------
+# Section 30 — free-cash-flow semantics
+# ---------------------------------------------------------------------------
+
+
+class FreeCashFlowDefinition:
+    """Section 30. Three different numbers that are all called "free cash flow".
+
+    Rendering operating cash flow AS free cash flow, or using a company's own
+    adjusted definition in one section and the simple one in another, makes
+    two sections of the same report disagree about the same quantity.
+    """
+
+    SIMPLE = "simple_fcf"                 # operating cash flow - capital expenditure
+    COMPANY_DEFINED = "company_defined_fcf"
+    ADJUSTED = "adjusted_fcf"
+    ALL = (SIMPLE, COMPANY_DEFINED, ADJUSTED)
+
+    LABELS = {
+        SIMPLE: "free cash flow (operating cash flow less capital expenditure)",
+        COMPANY_DEFINED: "free cash flow (as the company defines it)",
+        ADJUSTED: "adjusted free cash flow",
+    }
+
+
+def describe_free_cash_flow(definition: str) -> str:
+    return FreeCashFlowDefinition.LABELS.get(
+        definition, "free cash flow (definition not stated)")

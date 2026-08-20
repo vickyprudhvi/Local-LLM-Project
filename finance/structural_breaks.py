@@ -404,7 +404,221 @@ _POST_BALANCE_SHEET_ITEMS = {
 }
 
 # Registration/prospectus forms that mean a security was actually offered.
-_CAPITAL_MARKETS_FORMS = ("424B2", "424B3", "424B5", "424B7", "FWP")
+# Section 23/25: Form 144 is notice of a proposed sale of restricted stock by
+# an affiliate. It is included so the event can be REPORTED and correctly
+# typed as an insider secondary sale -- not so it can be counted as dilution.
+_CAPITAL_MARKETS_FORMS = ("424B2", "424B3", "424B5", "424B7", "FWP", "144")
+
+
+# ---------------------------------------------------------------------------
+# Phase H.9, sections 23-28 — TYPED post-balance-sheet events
+# ---------------------------------------------------------------------------
+#
+# THE BUG THIS REPLACES. Every post-balance-sheet securities filing was
+# described as "a securities offering prospectus supplement" and treated
+# alike. On a live issuer that produced a dilution warning built from:
+#
+#     424B5 / FWP     an investment-grade DEBT offering
+#     8-K item 2.03   creation of a direct financial obligation -- also debt
+#     Form 144        an INSIDER selling shares he already owns
+#
+# None of those issues a single new share. A Form 144 in particular moves
+# existing stock between holders: the issuer's share count is unchanged, no
+# capital is raised, and there is no dilution of any kind. Reporting them as
+# potential equity dilution is not a conservative approximation; it is a
+# different fact about the company.
+
+
+class PostBalanceSheetEventType:
+    """Section 23."""
+
+    ISSUER_EQUITY_ISSUANCE = "ISSUER_EQUITY_ISSUANCE"
+    ISSUER_DEBT_ISSUANCE = "ISSUER_DEBT_ISSUANCE"
+    CONVERTIBLE_ISSUANCE = "CONVERTIBLE_ISSUANCE"
+    WARRANT_ISSUANCE = "WARRANT_ISSUANCE"
+    INSIDER_SECONDARY_SALE = "INSIDER_SECONDARY_SALE"
+    SHAREHOLDER_SECONDARY_SALE = "SHAREHOLDER_SECONDARY_SALE"
+    SHARE_REPURCHASE = "SHARE_REPURCHASE"
+    ACQUISITION = "ACQUISITION"
+    DIVESTITURE = "DIVESTITURE"
+    REFINANCING = "REFINANCING"
+    SPECIAL_DIVIDEND = "SPECIAL_DIVIDEND"
+    OTHER_MATERIAL_FINANCING = "OTHER_MATERIAL_FINANCING"
+    UNKNOWN = "UNKNOWN"
+    ALL = (ISSUER_EQUITY_ISSUANCE, ISSUER_DEBT_ISSUANCE, CONVERTIBLE_ISSUANCE,
+           WARRANT_ISSUANCE, INSIDER_SECONDARY_SALE, SHAREHOLDER_SECONDARY_SALE,
+           SHARE_REPURCHASE, ACQUISITION, DIVESTITURE, REFINANCING,
+           SPECIAL_DIVIDEND, OTHER_MATERIAL_FINANCING, UNKNOWN)
+
+
+# Section 24. Deterministic impact per type. Every flag answers a question the
+# valuation actually asks, and nothing is inferred from the presence of
+# securities language.
+#
+#   affects_share_count   does the ISSUER's share count change?
+#   affects_debt          does reported debt change?
+#   affects_cash          does the issuer receive or pay cash?
+#   potential_dilution    can an existing holder's stake be reduced?
+_EVENT_IMPACT = {
+    PostBalanceSheetEventType.ISSUER_EQUITY_ISSUANCE: {
+        "affects_share_count": True, "affects_debt": False, "affects_cash": True,
+        "potential_dilution": True, "affects_equity_bridge": True,
+        "affects_enterprise_value_bridge": False, "requires_reassessment": True},
+    PostBalanceSheetEventType.ISSUER_DEBT_ISSUANCE: {
+        "affects_share_count": False, "affects_debt": True, "affects_cash": True,
+        "potential_dilution": False, "affects_equity_bridge": True,
+        "affects_enterprise_value_bridge": True, "requires_reassessment": True},
+    PostBalanceSheetEventType.CONVERTIBLE_ISSUANCE: {
+        "affects_share_count": False, "affects_debt": True, "affects_cash": True,
+        # Section 27: debt today, potential equity later. Both, not either.
+        "potential_dilution": True, "affects_equity_bridge": True,
+        "affects_enterprise_value_bridge": True, "requires_reassessment": True},
+    PostBalanceSheetEventType.WARRANT_ISSUANCE: {
+        "affects_share_count": False, "affects_debt": False, "affects_cash": False,
+        "potential_dilution": True, "affects_equity_bridge": True,
+        "affects_enterprise_value_bridge": False, "requires_reassessment": False},
+    PostBalanceSheetEventType.INSIDER_SECONDARY_SALE: {
+        # Section 25: existing shares changing hands. The issuer neither
+        # issues stock nor receives cash.
+        "affects_share_count": False, "affects_debt": False, "affects_cash": False,
+        "potential_dilution": False, "affects_equity_bridge": False,
+        "affects_enterprise_value_bridge": False, "requires_reassessment": False},
+    PostBalanceSheetEventType.SHAREHOLDER_SECONDARY_SALE: {
+        "affects_share_count": False, "affects_debt": False, "affects_cash": False,
+        "potential_dilution": False, "affects_equity_bridge": False,
+        "affects_enterprise_value_bridge": False, "requires_reassessment": False},
+    PostBalanceSheetEventType.SHARE_REPURCHASE: {
+        "affects_share_count": True, "affects_debt": False, "affects_cash": True,
+        "potential_dilution": False, "affects_equity_bridge": True,
+        "affects_enterprise_value_bridge": False, "requires_reassessment": False},
+    PostBalanceSheetEventType.ACQUISITION: {
+        "affects_share_count": False, "affects_debt": True, "affects_cash": True,
+        "potential_dilution": False, "affects_equity_bridge": True,
+        "affects_enterprise_value_bridge": True, "requires_reassessment": True},
+    PostBalanceSheetEventType.DIVESTITURE: {
+        "affects_share_count": False, "affects_debt": False, "affects_cash": True,
+        "potential_dilution": False, "affects_equity_bridge": True,
+        "affects_enterprise_value_bridge": True, "requires_reassessment": True},
+    PostBalanceSheetEventType.REFINANCING: {
+        "affects_share_count": False, "affects_debt": True, "affects_cash": True,
+        "potential_dilution": False, "affects_equity_bridge": True,
+        "affects_enterprise_value_bridge": True, "requires_reassessment": False},
+    PostBalanceSheetEventType.SPECIAL_DIVIDEND: {
+        "affects_share_count": False, "affects_debt": False, "affects_cash": True,
+        "potential_dilution": False, "affects_equity_bridge": True,
+        "affects_enterprise_value_bridge": False, "requires_reassessment": True},
+    PostBalanceSheetEventType.OTHER_MATERIAL_FINANCING: {
+        "affects_share_count": False, "affects_debt": False, "affects_cash": False,
+        "potential_dilution": False, "affects_equity_bridge": False,
+        "affects_enterprise_value_bridge": False, "requires_reassessment": True},
+    # Section 28: an unidentifiable event asserts NOTHING. In particular it
+    # does not assert dilution.
+    PostBalanceSheetEventType.UNKNOWN: {
+        "affects_share_count": False, "affects_debt": False, "affects_cash": False,
+        "potential_dilution": False, "affects_equity_bridge": False,
+        "affects_enterprise_value_bridge": False, "requires_reassessment": False},
+}
+
+_DEBT_LANGUAGE = re.compile(
+    r"(?i)\b(?:notes?|bonds?|debenture|senior\s+(?:unsecured|secured)|"
+    r"term\s+loan|credit\s+facility|indenture|fixed\s+rate|floating\s+rate|"
+    r"coupon|maturing|due\s+20\d{2})\b")
+_EQUITY_LANGUAGE = re.compile(
+    r"(?i)\b(?:common\s+stock|ordinary\s+shares?|equity\s+offering|"
+    r"depositary\s+shares?|preferred\s+stock)\b")
+_CONVERTIBLE_LANGUAGE = re.compile(r"(?i)\bconvertible\b")
+_WARRANT_LANGUAGE = re.compile(r"(?i)\bwarrants?\b")
+
+# 8-K item codes that identify an event type on their own.
+_ITEM_EVENT_TYPES = (
+    ("2.03", PostBalanceSheetEventType.ISSUER_DEBT_ISSUANCE),
+    ("2.01", PostBalanceSheetEventType.ACQUISITION),
+    ("3.02", PostBalanceSheetEventType.ISSUER_EQUITY_ISSUANCE),
+)
+
+# Forms whose very existence names the event.
+_FORM_EVENT_TYPES = {
+    # A Form 144 is notice of a proposed sale of RESTRICTED stock by an
+    # affiliate -- existing shares, no issuance, no proceeds to the issuer.
+    "144": PostBalanceSheetEventType.INSIDER_SECONDARY_SALE,
+    "4": PostBalanceSheetEventType.INSIDER_SECONDARY_SALE,
+}
+
+
+def classify_security_event(form: str, items: str, description: str = "",
+                            document_text: str = "") -> Tuple[str, float]:
+    """(event type, confidence) for one post-balance-sheet filing.
+
+    Deterministic and evidence-bound. When the form and its language do not
+    identify a type, the answer is UNKNOWN -- section 28 -- rather than a
+    guess that happens to be the most alarming option.
+    """
+    form = (form or "").upper()
+    items = items or ""
+    haystack = " ".join(filter(None, (description, document_text)))
+
+    if form in _FORM_EVENT_TYPES:
+        return _FORM_EVENT_TYPES[form], 0.95
+    for code, event_type in _ITEM_EVENT_TYPES:
+        if code in items:
+            # An item 2.03 that also mentions convertible language is a
+            # convertible, which carries BOTH debt and future-dilution
+            # consequences.
+            if event_type == PostBalanceSheetEventType.ISSUER_DEBT_ISSUANCE \
+                    and _CONVERTIBLE_LANGUAGE.search(haystack):
+                return PostBalanceSheetEventType.CONVERTIBLE_ISSUANCE, 0.8
+            return event_type, 0.85
+
+    if form.startswith("424") or form == "FWP":
+        # A prospectus supplement is a securities offering of SOME kind. Which
+        # kind is decided by the security described, never assumed.
+        if _CONVERTIBLE_LANGUAGE.search(haystack):
+            return PostBalanceSheetEventType.CONVERTIBLE_ISSUANCE, 0.8
+        if _WARRANT_LANGUAGE.search(haystack):
+            return PostBalanceSheetEventType.WARRANT_ISSUANCE, 0.7
+        if _DEBT_LANGUAGE.search(haystack) and not _EQUITY_LANGUAGE.search(haystack):
+            return PostBalanceSheetEventType.ISSUER_DEBT_ISSUANCE, 0.75
+        if _EQUITY_LANGUAGE.search(haystack) and not _DEBT_LANGUAGE.search(haystack):
+            return PostBalanceSheetEventType.ISSUER_EQUITY_ISSUANCE, 0.75
+        return PostBalanceSheetEventType.UNKNOWN, 0.3
+    return PostBalanceSheetEventType.UNKNOWN, 0.2
+
+
+def event_impact(event_type: str) -> dict:
+    """Section 24's deterministic impact flags for one event type."""
+    return dict(_EVENT_IMPACT.get(event_type, _EVENT_IMPACT[
+        PostBalanceSheetEventType.UNKNOWN]))
+
+
+_EVENT_DESCRIPTIONS = {
+    PostBalanceSheetEventType.ISSUER_EQUITY_ISSUANCE:
+        "an issuance of equity by the company",
+    PostBalanceSheetEventType.ISSUER_DEBT_ISSUANCE:
+        "an issuance of debt by the company",
+    PostBalanceSheetEventType.CONVERTIBLE_ISSUANCE:
+        "an issuance of convertible securities by the company",
+    PostBalanceSheetEventType.WARRANT_ISSUANCE: "an issuance of warrants",
+    PostBalanceSheetEventType.INSIDER_SECONDARY_SALE:
+        "a sale of existing shares by an insider, which does not change the company's "
+        "share count and raises no capital for it",
+    PostBalanceSheetEventType.SHAREHOLDER_SECONDARY_SALE:
+        "a sale of existing shares by a shareholder, which does not change the company's "
+        "share count",
+    PostBalanceSheetEventType.SHARE_REPURCHASE: "a repurchase of shares by the company",
+    PostBalanceSheetEventType.ACQUISITION: "a completed acquisition",
+    PostBalanceSheetEventType.DIVESTITURE: "a completed disposition of assets",
+    PostBalanceSheetEventType.REFINANCING: "a refinancing",
+    PostBalanceSheetEventType.SPECIAL_DIVIDEND: "a special distribution",
+    PostBalanceSheetEventType.OTHER_MATERIAL_FINANCING: "a material financing event",
+    PostBalanceSheetEventType.UNKNOWN:
+        "a securities filing whose type could not be determined from its form and item "
+        "codes; no share-count or dilution consequence is claimed for it",
+}
+
+
+def describe_event(event_type: str) -> str:
+    return _EVENT_DESCRIPTIONS.get(event_type, _EVENT_DESCRIPTIONS[
+        PostBalanceSheetEventType.UNKNOWN])
 
 
 @dataclass
@@ -416,10 +630,19 @@ class PostBalanceSheetEvent:
     items: str
     description: str
     accession: str = ""
+    event_type: str = PostBalanceSheetEventType.UNKNOWN
+    confidence: float = 0.0
+    impact: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {"filed": self.filed, "form": self.form, "items": self.items,
-                "description": self.description, "accession": self.accession}
+                "description": self.description, "accession": self.accession,
+                "event_type": self.event_type, "confidence": self.confidence,
+                "impact": dict(self.impact)}
+
+    @property
+    def implies_dilution(self) -> bool:
+        return bool(self.impact.get("potential_dilution"))
 
 
 def find_post_balance_sheet_events(submissions: Optional[dict],
@@ -463,14 +686,21 @@ def find_post_balance_sheet_events(submissions: Optional[dict],
                        if code in item_text]
             if not matched:
                 continue
+            description = "; ".join(matched)
+            event_type, confidence = classify_security_event(
+                form, item_text, description)
             out.append(PostBalanceSheetEvent(
                 filed=filed, form=form, items=item_text.strip(),
-                description="; ".join(matched), accession=accession))
+                description=f"{describe_event(event_type)} ({description})",
+                accession=accession, event_type=event_type, confidence=confidence,
+                impact=event_impact(event_type)))
         elif form in _CAPITAL_MARKETS_FORMS:
+            event_type, confidence = classify_security_event(form, "", "")
             out.append(PostBalanceSheetEvent(
                 filed=filed, form=form, items="",
-                description="a securities offering prospectus supplement",
-                accession=accession))
+                description=describe_event(event_type),
+                accession=accession, event_type=event_type, confidence=confidence,
+                impact=event_impact(event_type)))
         if len(out) >= limit:
             break
     return out

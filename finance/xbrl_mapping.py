@@ -32,6 +32,70 @@ CONCEPT_MAP: Dict[str, Tuple[bool, Tuple[str, ...]]] = {
     )),
     "net_income": (False, ("NetIncomeLoss", "ProfitLoss")),
     "operating_income": (False, ("OperatingIncomeLoss",)),
+    # Phase H.8 -- COMPONENTS FOR DERIVING OPERATING INCOME.
+    #
+    # Not every issuer tags `OperatingIncomeLoss`. Two live examples: a large
+    # pharmaceutical company reports 775 us-gaap concepts and that is not one
+    # of them, and a fuel/convenience retailer likewise reports none. Both
+    # therefore resolved `operating_income` to None, the forward-assumption
+    # builder fell through every precedence step to the CONFIGURED DEFAULT
+    # operating margin, and a 10% margin became the five-year forecast for
+    # companies whose real economics are nothing like it. On the
+    # pharmaceutical company that produced a base modelled value of $0.20 per
+    # share against a market price of $149.93.
+    #
+    # Both issuers DO report pre-tax income and non-operating interest, which
+    # is the standard bridge:
+    #
+    #     operating income ~= pre-tax income + non-operating interest expense
+    #                         - non-operating interest and investment income
+    #
+    # The derivation is arithmetic on reported figures, it is labelled as
+    # derived rather than reported (see finance/freshness.py), and it is only
+    # attempted when the direct concept is genuinely absent.
+    "income_before_tax": (False, (
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesDomestic",
+    )),
+    "interest_expense_nonoperating": (False, (
+        "InterestExpenseNonoperating",
+        "InterestIncomeExpenseNonoperatingNet",
+        "InterestExpense",
+    )),
+    "costs_and_expenses": (False, ("CostsAndExpenses", "BenefitsLossesAndExpenses")),
+    "income_tax_expense": (False, ("IncomeTaxExpenseBenefit",)),
+    "research_and_development": (False, ("ResearchAndDevelopmentExpense",)),
+    "gross_profit": (False, ("GrossProfit",)),
+    # Phase H.8 -- MATERIAL UNUSUAL / NON-RECURRING ITEMS (section 1).
+    #
+    # Only concepts an issuer TAGS WITH AN AMOUNT are listed. Section 3 is
+    # explicit that a normalization may not be built from prose like "results
+    # were impacted by acquisition activity" -- an unusual item without a
+    # figure is a disclosure, not an adjustment.
+    "restructuring_charges": (False, (
+        "RestructuringCharges",
+        "RestructuringAndRelatedCostIncurredCost",
+    )),
+    "impairment_charges": (False, (
+        "AssetImpairmentCharges",
+        "GoodwillAndIntangibleAssetImpairment",
+        "GoodwillImpairmentLoss",
+        "ImpairmentOfIntangibleAssetsExcludingGoodwill",
+    )),
+    "litigation_charges": (False, (
+        "LitigationSettlementExpense",
+        "LossContingencyAccrualAtCarryingValue",
+        "GainLossRelatedToLitigationSettlement",
+    )),
+    "acquired_in_process_research_and_development": (False, (
+        "BusinessCombinationAcquiredResearchAndDevelopmentAssetsWriteOffAmount",
+        "ResearchAndDevelopmentInProcess",
+        "ResearchAndDevelopmentAssetAcquiredOtherThanThroughBusinessCombinationWrittenOff",
+    )),
+    "acquisition_transaction_costs": (False, (
+        "BusinessCombinationAcquisitionRelatedCosts",
+    )),
     "cash_and_cash_equivalents": (True, ("CashAndCashEquivalentsAtCarryingValue",)),
     # Phase H.6 -- CURRENT MARKETABLE SECURITIES.
     #
@@ -125,6 +189,20 @@ CONCEPT_MAP: Dict[str, Tuple[bool, Tuple[str, ...]]] = {
         "LongTermDebt",
         "LongTermDebtAndCapitalLeaseObligations",
     )),
+    # Phase H.7, section 27. Restricted cash is not available to repay debt
+    # and lease liabilities sit outside this project's total-debt policy;
+    # both are resolved so they can be REPORTED beside the bridge rather than
+    # being invisible by omission.
+    "restricted_cash": (True, (
+        "RestrictedCashAndCashEquivalentsAtCarryingValue",
+        "RestrictedCashCurrent",
+        "RestrictedCashAndInvestmentsCurrent",
+    )),
+    "lease_liabilities": (True, (
+        "OperatingLeaseLiabilityNoncurrent",
+        "FinanceLeaseLiabilityNoncurrent",
+        "OperatingLeaseLiability",
+    )),
     "total_debt_combined": (True, (
         "DebtLongtermAndShorttermCombinedAmount",
         # `LongTermDebt` in us-gaap is the total carrying amount INCLUDING the
@@ -206,9 +284,28 @@ class ResolvedFact:
         }
 
 
-def _candidate_facts(company_facts: dict, concept: str) -> List[dict]:
-    usgaap = (company_facts.get("facts") or {}).get("us-gaap") or {}
-    entry = usgaap.get(concept)
+def _candidate_facts(company_facts: dict, concept: str,
+                     taxonomy: Optional[str] = None) -> List[dict]:
+    """Every fact reported for one concept, in a usable unit.
+
+    Phase H.7: the taxonomy is a PARAMETER rather than the hard-coded string
+    "us-gaap". A foreign private issuer reporting under `ifrs-full` has a
+    complete set of facts that this function previously could not see at all
+    -- it looked in one place, found nothing, and the whole pipeline
+    concluded the company had published no financials. When `taxonomy` is
+    omitted it is detected from the payload, so every existing caller keeps
+    working unchanged and gains IFRS support for free.
+
+    Each fact is stamped with the taxonomy and currency it came from, so a
+    downstream sum across two frameworks or two currencies is detectable
+    (finance/period_facts.py::periods_are_summable) rather than silent.
+    """
+    from finance import taxonomy as taxonomy_module
+
+    facts_root = (company_facts or {}).get("facts") or {}
+    if taxonomy is None:
+        taxonomy = taxonomy_module.detect_taxonomy(company_facts) or taxonomy_module.US_GAAP
+    entry = (facts_root.get(taxonomy) or {}).get(concept)
     if not entry:
         return []
     units = entry.get("units") or {}
@@ -216,7 +313,17 @@ def _candidate_facts(company_facts: dict, concept: str) -> List[dict]:
     # in a unit this project doesn't handle is treated as absent, not guessed.
     for unit_name in ("USD", "USD/shares", "shares"):
         if unit_name in units and isinstance(units[unit_name], list):
-            return [dict(f, _unit=unit_name) for f in units[unit_name]]
+            currency = unit_name.split("/")[0] if unit_name != "shares" else "USD"
+            return [dict(f, _unit=unit_name, _taxonomy=taxonomy, _currency=currency)
+                    for f in units[unit_name]]
+    # A non-USD reporting currency is deliberately NOT read into the numeric
+    # path. This project has no FX conversion, and feeding a EUR-denominated
+    # revenue series into an equity bridge that ends in a USD price per share
+    # is the currency version of the share-basis error this phase exists to
+    # stop. The presence of a non-USD series is reported instead, by
+    # finance/taxonomy.py::reporting_currency_note, so the run says "this
+    # issuer reports in EUR and this project cannot value it" rather than
+    # "this company reported nothing".
     return []
 
 

@@ -98,7 +98,12 @@ EXPECTED_DILUTED_SHARES = 444_803_000.0
 # than under the old, incorrect positive-ratio assumption.
 EXPECTED_BASE_VALUE_PER_SHARE = 297.897362
 EXPECTED_BULL_VALUE_PER_SHARE = 683.489309
-EXPECTED_BEAR_VALUE_PER_SHARE = 24.330408
+# Phase H.7: the bear scenario's operating margin (0.82%) sat below the old
+# +1% bound and was silently floored to it. The bound now permits the value
+# the scenario actually implies -- a bound limits an input, it does not
+# replace it (section 36). Base and bull are unchanged: their margins were
+# always inside the bound.
+EXPECTED_BEAR_VALUE_PER_SHARE = 13.637004
 
 
 class YahooFixtureClient:

@@ -46,6 +46,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import tools.config as config
 from finance import freshness as fr
 from finance import guidance as gm
+from finance import suitability
 from finance.dcf import AssumptionSourceType
 from finance.structural_breaks import HistoricalComparability
 
@@ -53,7 +54,26 @@ from finance.structural_breaks import HistoricalComparability
 # never silently accepted, and never rejected outright (a clamped run still
 # produces a valuation, it just says so).
 GROWTH_BOUNDS = (-0.20, 0.25)
-MARGIN_BOUNDS = (0.01, 0.60)
+# Phase H.7, section 36 -- THE LOWER MARGIN BOUND USED TO BE +1%.
+#
+# That floor forbade the model from representing a loss. On a live company
+# reporting a -60.1% operating margin it produced a forecast of +1.0% in
+# every one of five years: a 61-point swing invented by a bound, turning a
+# business burning $3.5B a year into a marginally profitable one, and then
+# discounting the result into a positive value per share. The DCF validated,
+# because the arithmetic was fine.
+#
+# A bound exists to reject the absurd, not to legislate profitability.
+# finance/dcf.py models a negative operating margin perfectly well -- EBIT
+# simply comes out negative and flows through NOPAT into FCFF -- so the floor
+# was never protecting the engine from anything. It is now set wide enough to
+# represent a company losing as much as it earns, which is far outside any
+# real operating result and still bounded.
+#
+# What catches genuinely unmodellable companies is no longer this floor but
+# finance/suitability.py, which says so explicitly instead of silently
+# rewriting the input.
+MARGIN_BOUNDS = (-1.00, 0.60)
 
 # How far a base-case year-1 growth may sit outside stated guidance before it
 # needs an explicit, evidence-backed justification (section 10's "2%-3%
@@ -269,7 +289,7 @@ def collect_growth_evidence(state: "fr.CurrentFinancialState",
     # covers can be matched against a reported comparable period.
     revenue_amount = guidance.get(gm.GuidanceMetricName.CONSOLIDATED_REVENUE)
     if isinstance(revenue_amount, dict) and revenue_amount.get("midpoint") is not None \
-            and company_facts:
+            and company_facts and evidence.guidance_low is None:
         _apply_absolute_revenue_guidance(evidence, revenue_amount, company_facts)
 
     if comparability:
@@ -359,9 +379,33 @@ def _apply_absolute_revenue_guidance(evidence: GrowthEvidence, entry: dict,
     from finance import period_facts as pf_module
 
     multiplier = _SCALE_MULTIPLIER.get((entry.get("scale") or "").lower())
-    if multiplier is None or entry.get("period_type") != "quarter":
+    if multiplier is None:
         return
     guided_amount = float(entry["midpoint"]) * multiplier
+
+    # An ANNUAL revenue level implies an annual growth rate against the
+    # trailing twelve months -- the two cover the same span, so the
+    # comparison is like-for-like. A live issuer guides "$101.1 billion of
+    # sales for 2026" and nothing else; read as a level only, its guidance
+    # could not be compared with the DCF's year-1 growth at all.
+    if entry.get("period_type") == "annual":
+        ttm = fr.build_ttm(company_facts, "revenue")
+        if ttm.ok and ttm.value:
+            evidence.guidance_low = (guided_amount - ttm.value) / abs(ttm.value)
+            evidence.guidance_high = evidence.guidance_low
+            evidence.guidance_source_metric = \
+                gm.GuidanceMetricName.CONSOLIDATED_REVENUE_GROWTH
+            evidence.guidance_period_label = entry.get("fiscal_period")
+            evidence.guidance_period_type = "annual"
+            evidence.guidance_basis = entry.get("basis")
+            evidence.guidance_bound_type = entry.get("bound_type")
+            evidence.guidance_evidence_id = entry.get("evidence_id")
+            evidence.guidance_implied_comparison_period = (
+                f"{ttm.period_start}..{ttm.period_end}")
+        return
+
+    if entry.get("period_type") != "quarter":
+        return
 
     series = pf_module.discrete_quarters(company_facts, "revenue")
     if len(series.quarters) < 4:
@@ -375,6 +419,41 @@ def _apply_absolute_revenue_guidance(evidence: GrowthEvidence, entry: dict,
     evidence.guidance_implied_next_period_growth = (
         (guided_amount - comparable.value) / abs(comparable.value))
     evidence.guidance_implied_comparison_period = f"{comparable.start}..{comparable.end}"
+
+
+# Reference margin against which an ABSOLUTE scenario delta is expressed. A
+# +/-2 percentage-point bull/bear shift is a sensible perturbation of a
+# 10%-margin business; applied to a 0.9%-margin distributor it is a 3x swing
+# in one direction and a sign flip in the other.
+_DELTA_REFERENCE_MARGIN = 0.10
+
+
+def apply_margin_delta(anchor: float, delta: float) -> Tuple[float, Optional[str]]:
+    """Apply a scenario's margin shift COHERENTLY (section 46).
+
+    Scenario deltas are absolute percentage points, which is right for a
+    company whose margin is of the same order as the delta and wrong for one
+    whose margin is much smaller. A live distributor reporting a 0.91%
+    operating margin got a bear case of -2.09% -- a profitable company turned
+    loss-making purely by the arithmetic of a fixed shift -- which then
+    produced a negative terminal FCFF and invalidated the whole valuation.
+    Nothing about the company had suggested a loss.
+
+    So when the delta is LARGER THAN THE ANCHOR IT ADJUSTS, the shift is
+    applied proportionally instead: the scenario keeps its intended severity
+    relative to a normal margin, without asserting a change of sign that no
+    evidence supports. A company already reporting a loss keeps the additive
+    treatment, because there a further absolute decline is meaningful and a
+    proportional one would shrink toward zero (an improvement) instead.
+    """
+    if not delta or anchor <= 0 or abs(delta) <= abs(anchor):
+        return anchor + delta, None
+    scaled = anchor * (1.0 + delta / _DELTA_REFERENCE_MARGIN)
+    return scaled, (
+        f"The scenario's {delta:+.1%} margin shift is larger than this company's own "
+        f"{anchor:.2%} operating margin, so applying it additively would have implied a "
+        f"change of sign rather than a change of degree. It was applied proportionally "
+        f"instead, giving {scaled:.2%}.")
 
 
 def _clamp(value: float, bounds: Tuple[float, float]) -> Tuple[float, bool]:
@@ -394,6 +473,28 @@ def _fade(anchor: float, terminal: float, years: int) -> List[float]:
     if years <= 1:
         return [anchor]
     return [anchor + (terminal - anchor) * (i / (years - 1)) for i in range(years)]
+
+
+def _no_annual_guidance_clause(evidence) -> str:
+    """How to open a derivation that did NOT anchor on guidance.
+
+    "No current guidance was available" is false whenever the company has
+    published something -- a next-quarter revenue level, guidance for a
+    component of revenue -- that simply cannot carry a five-year annual
+    growth path. A live analysis said exactly that while the same report
+    listed the company's Q3 revenue guidance two sections above, and a
+    research role duly flagged the contradiction as an analytical
+    inconsistency. It was right to. The distinction is between guidance that
+    does not exist and guidance that exists but does not answer this
+    question, and the derivation now says which.
+    """
+    if evidence.guidance_implied_next_period_growth is not None:
+        return ("Current guidance covers the NEXT QUARTER only and cannot by itself set a "
+                "multi-year annual growth path, so it was not used as the anchor. ")
+    if evidence.component_guidance_midpoint is not None:
+        return ("Current guidance covers a COMPONENT of revenue rather than the consolidated "
+                "total, so it was not used as the anchor. ")
+    return "No current guidance was available. "
 
 
 def build_growth_path(evidence: GrowthEvidence, forecast_years: int,
@@ -460,29 +561,33 @@ def build_growth_path(evidence: GrowthEvidence, forecast_years: int,
     elif evidence.ttm_yoy is not None:
         anchor = evidence.ttm_yoy
         path.anchor_source = AssumptionSourceType.TTM_CALCULATION
-        derivation = (f"No current guidance was available. Year 1 anchored on the "
-                      f"trailing-twelve-month revenue trend of {anchor:.2%}.")
+        derivation = (_no_annual_guidance_clause(evidence)
+                      + f"Year 1 anchored on the trailing-twelve-month revenue trend "
+                        f"of {anchor:.2%}.")
         evidence_ids = ("dcf.input.revenue_ttm",)
     elif evidence.history_is_broken and evidence.post_break_cagr is not None:
         anchor = evidence.post_break_cagr
         path.anchor_source = AssumptionSourceType.HISTORICAL_CALCULATION
         derivation = (
-            f"No current guidance or trailing-twelve-month trend was available, and this "
-            f"company's reported history contains a structural break. Year 1 anchored on the "
+            _no_annual_guidance_clause(evidence)
+            + f"No trailing-twelve-month trend was available either, and this "
+              f"company's reported history contains a structural break. Year 1 anchored on the "
             f"growth of the {len(evidence.post_break_periods)} COMPARABLE periods since the "
             f"break ({anchor:.2%}) rather than on the full-history CAGR, which spans the break.")
         evidence_ids = ()
     elif evidence.latest_annual_yoy is not None:
         anchor = evidence.latest_annual_yoy
         path.anchor_source = AssumptionSourceType.HISTORICAL_CALCULATION
-        derivation = (f"No current guidance or trailing-twelve-month trend was available. "
-                      f"Year 1 anchored on the latest reported annual growth of {anchor:.2%}.")
+        derivation = (_no_annual_guidance_clause(evidence)
+                      + f"No trailing-twelve-month trend was available either. "
+                        f"Year 1 anchored on the latest reported annual growth of {anchor:.2%}.")
         evidence_ids = ()
     elif evidence.historical_cagr is not None and not evidence.history_is_broken:
         anchor = evidence.historical_cagr
         path.anchor_source = AssumptionSourceType.HISTORICAL_CALCULATION
-        derivation = (f"No current guidance, trailing-twelve-month trend or single-year growth "
-                      f"was available. Year 1 anchored on the {len(evidence.historical_periods)}"
+        derivation = (_no_annual_guidance_clause(evidence)
+                      + f"No trailing-twelve-month trend or single-year growth "
+                        f"was available either. Year 1 anchored on the {len(evidence.historical_periods)}"
                       f"-period historical CAGR of {anchor:.2%}. This is a MEASUREMENT OF THE "
                       "PAST used in the absence of any forward evidence, not a forecast derived "
                       "from one.")
@@ -644,6 +749,66 @@ def classify_guidance_history_divergence(evidence: GrowthEvidence) -> Optional[d
     }
 
 
+def implied_margin_from_guidance(guidance):
+    """Section 10: an operating margin DERIVED from compatible guidance parts.
+
+    When a company guides sales, gross margin and operating expenses, an
+    operating margin follows arithmetically:
+
+        gross profit     = sales x gross margin
+        operating income = gross profit - operating expenses
+        operating margin = operating income / sales
+
+    Only performed when every component is present, the periods match, the
+    units are what the taxonomy says they should be, and the ACCOUNTING BASES
+    agree -- an adjusted gross margin combined with a GAAP operating expense
+    produces a number on neither basis. The result is labelled
+    DERIVED_FROM_GUIDANCE, never reported.
+
+    Returns (margin, derivation, evidence_ids) or None.
+    """
+    if not guidance:
+        return None
+    sales = guidance.get("revenue")
+    gross_margin = (guidance.get("adjusted_gross_margin")
+                    or guidance.get("gross_margin"))
+    opex = (guidance.get("adjusted_operating_expenses")
+            or guidance.get("operating_expenses"))
+    if not all(isinstance(x, dict) for x in (sales, gross_margin, opex)):
+        return None
+    for entry in (sales, gross_margin, opex):
+        if entry.get("midpoint") is None:
+            return None
+
+    periods = {entry.get("fiscal_period") for entry in (sales, gross_margin, opex)}
+    if len(periods) != 1 or None in periods:
+        return None
+    scales = {entry.get("scale") for entry in (sales, opex)}
+    if len(scales) != 1:
+        return None
+    bases = {entry.get("basis") for entry in (gross_margin, opex)}
+    if len(bases) != 1:
+        return None
+
+    sales_value = float(sales["midpoint"])
+    if sales_value <= 0:
+        return None
+    gross_profit = sales_value * float(gross_margin["midpoint"])
+    operating_income = gross_profit - float(opex["midpoint"])
+    margin = operating_income / sales_value
+    basis = bases.pop() or "unspecified"
+    period = periods.pop()
+    note = (
+        f"DERIVED_FROM_GUIDANCE: management guided sales of {sales_value:,.2f}, a gross "
+        f"margin of {float(gross_margin['midpoint']):.1%} and operating expenses of "
+        f"{float(opex['midpoint']):,.2f} for {period}, which imply an operating margin of "
+        f"{margin:.2%} on a {basis} basis. This is arithmetic on guided components, not a "
+        "figure management stated or a figure the company reported.")
+    ids = tuple(filter(None, (sales.get("evidence_id"), gross_margin.get("evidence_id"),
+                              opex.get("evidence_id"))))
+    return margin, note, ids
+
+
 def build_margin_path(state: "fr.CurrentFinancialState", forecast_years: int,
                       scenario: str = "base", margin_delta: float = 0.0) -> ForwardPath:
     """Operating margin by section 9's precedence.
@@ -659,12 +824,59 @@ def build_margin_path(state: "fr.CurrentFinancialState", forecast_years: int,
     revenue = state.flows.get("revenue")
     operating_income = state.flows.get("operating_income")
 
+    # Phase H.8, section 11 -- MARGIN PRECEDENCE.
+    #
+    #   1. explicit matching operating-margin guidance
+    #   2. a margin deterministically IMPLIED by compatible guidance
+    #      components (sales x gross margin - operating expenses)
+    #   3. the NORMALIZED current margin, when a normalization actually held
+    #   4. the REPORTED current margin
+    #   5. a normalized historical margin
+    #   6. the configured default -- LAST RESORT, and it downgrades DCF
+    #      suitability rather than passing as a forecast
+    #
+    # Step 3 is the Phase H.8 addition and the one that matters. A live
+    # large-cap pharmaceutical reported an 11.6% trailing operating margin
+    # against a 27.1% margin once a single acquisition-related research
+    # charge was normalized out. Forecasting five years at the reported
+    # figure carries a one-off charge through every year of the forecast; the
+    # normalized figure is what the recurring business actually earns.
+    _implied = implied_margin_from_guidance(guidance)
+    profitability = (state.profitability or {}) if hasattr(state, "profitability") else {}
+    normalized = (profitability.get("normalized") or {})
+    reported = (profitability.get("reported") or {})
+
     if isinstance(guided, dict) and guided.get("low") is not None:
         anchor = (float(guided["low"]) + float(guided["high"])) / 2.0
         path.anchor_source = AssumptionSourceType.MANAGEMENT_GUIDANCE
+        basis = guided.get("basis") or "unspecified"
         derivation = (f"Anchored on current management operating-margin guidance of "
-                      f"{float(guided['low']):.1%} to {float(guided['high']):.1%}.")
+                      f"{float(guided['low']):.1%} to {float(guided['high']):.1%} "
+                      f"(basis: {basis}).")
         evidence_ids = tuple(filter(None, (guided.get("evidence_id"),)))
+    elif _implied is not None:
+        implied, implied_note, implied_ids = _implied
+        anchor = implied
+        path.anchor_source = AssumptionSourceType.MANAGEMENT_GUIDANCE
+        derivation = implied_note
+        evidence_ids = tuple(implied_ids)
+    elif normalized.get("operating_margin") is not None \
+            and normalized.get("status") in ("VALID", "PARTIAL"):
+        anchor = float(normalized["operating_margin"])
+        path.anchor_source = AssumptionSourceType.HISTORICAL_CALCULATION
+        reported_margin = reported.get("operating_margin")
+        derivation = (
+            f"Anchored on the NORMALIZED current operating margin of {anchor:.2%}"
+            + (f", against a reported {reported_margin:.2%}"
+               if reported_margin is not None else "")
+            + ". The reported figure is depressed by identified unusual items; carrying it "
+              "through five forecast years would carry a one-off charge into every one of "
+              "them. Normalization status: " + str(normalized.get("status")) + ".")
+        evidence_ids = ("financial.normalized.operating_margin.ttm",
+                        "financial.reported.operating_margin.ttm")
+        path.notes.append(
+            "Reported and normalized operating margins differ; the forecast uses the "
+            "normalized figure and both are recorded.")
     elif (revenue is not None and operating_income is not None
             and revenue.value and operating_income.value is not None
             and revenue.source == "ttm_calculation"):
@@ -673,7 +885,7 @@ def build_margin_path(state: "fr.CurrentFinancialState", forecast_years: int,
         derivation = (f"Anchored on the trailing-twelve-month operating margin "
                       f"({operating_income.value:,.0f} / {revenue.value:,.0f} = {anchor:.2%}) "
                       f"for {revenue.period_start}..{revenue.as_of_date}.")
-        evidence_ids = ("dcf.input.revenue_ttm", "dcf.input.operating_income_ttm")
+        evidence_ids = ("financial.reported.operating_margin.ttm",)
     elif (revenue is not None and operating_income is not None
             and revenue.value and operating_income.value is not None):
         anchor = operating_income.value / revenue.value
@@ -689,25 +901,78 @@ def build_margin_path(state: "fr.CurrentFinancialState", forecast_years: int,
         else:
             anchor = config.dcf_default_operating_margin()
             path.anchor_source = AssumptionSourceType.CONFIGURED_DEFAULT
-            derivation = (f"No reported operating margin was available; using the configured "
-                          f"default of {anchor:.2%}.")
+            derivation = (
+                f"No operating margin could be read or normalized for this company; using the "
+                f"configured default of {anchor:.2%}. This is a LAST RESORT, not an estimate "
+                "of this company's profitability, and it downgrades the DCF suitability "
+                "assessment rather than passing as a forecast.")
 
     path.anchor_value = anchor
-    # Margin is held flat by default. Unlike growth there is no neutral
-    # long-run margin to fade toward -- a company's structural margin IS its
-    # own history -- so inventing a convergence target would be a stronger
-    # claim than holding the observed level.
-    for index in range(forecast_years):
-        value, clamped = _clamp(anchor + margin_delta, MARGIN_BOUNDS)
+
+    # Section 36/37 -- A BOUND MAY LIMIT AN INPUT, NEVER REPLACE IT.
+    #
+    # The old code clamped the anchor to MARGIN_BOUNDS and held the clamped
+    # value flat for every forecast year. On a company reporting a -60.1%
+    # operating margin that produced +1.0% in year one -- a 61-point swing
+    # invented by the floor -- and then held it for five years. The DCF
+    # validated, because the arithmetic was fine; what was wrong was that the
+    # modelled company had stopped being the reported one.
+    #
+    # When the observed margin sits FAR outside the bound (further than half
+    # the bound's own width -- see finance/suitability.py), the honest shape
+    # is a normalization PATH that starts where the company actually is and
+    # improves toward the bound across the horizon. Year one stays close to
+    # reality, the improvement is visible and adjustable, and the DCF
+    # suitability assessment records that the model is being stretched.
+    #
+    # The path is a REPRESENTATION, not a prediction: it asserts only that a
+    # company at the observed margin does not arrive at the modelled one
+    # instantly. `raw_value` keeps the observed figure on every entry.
+    scenario_anchor, delta_note = apply_margin_delta(anchor, margin_delta)
+    if delta_note:
+        path.notes.append(delta_note)
+    breach = suitability.classify_bound_breach(
+        scenario_anchor, MARGIN_BOUNDS, "operating_margin")
+    if breach and breach["replaces_input"]:
+        raw_values = suitability.normalization_path(
+            scenario_anchor, breach["bound"], forecast_years,
+            floor=MARGIN_BOUNDS[0] if scenario_anchor >= MARGIN_BOUNDS[0] else None)
+        path.notes.append(
+            f"The observed operating margin of {anchor:.1%} lies far outside the model's "
+            f"bound of {breach['bound']:.1%}. Rather than applying the bound as year-1 "
+            "margin -- which would model a company that reaches that level immediately -- "
+            "the forecast normalizes toward it across the horizon. This is a "
+            "REPRESENTATION of the gap, not evidence that the gap closes; see the DCF "
+            "suitability assessment.")
+    else:
+        # Margin is held flat otherwise. Unlike growth there is no neutral
+        # long-run margin to fade toward -- a company's structural margin IS
+        # its own history -- so inventing a convergence target would be a
+        # stronger claim than holding the observed level.
+        raw_values = [scenario_anchor] * forecast_years
+
+    for index, raw in enumerate(raw_values):
+        value, clamped = _clamp(raw, MARGIN_BOUNDS)
         path.values.append(round(value, 6))
+        clamp_reason = None
+        if clamped:
+            bound = MARGIN_BOUNDS[1] if raw > MARGIN_BOUNDS[1] else MARGIN_BOUNDS[0]
+            clamp_reason = (
+                f"The year-{index + 1} operating margin of {raw:.2%} lies outside the "
+                f"model's configured bound of {bound:.0%}. The bound is a safety limit on "
+                "what this engine will model, NOT an estimate of this company's "
+                f"profitability; the applied {value:.2%} reflects the limit and the derived "
+                f"{raw:.2%} is retained beside it.")
         path.entries.append(AssumptionEntry(
             field="operating_margin", forecast_year=index + 1, scenario=scenario,
             value=round(value, 6), units="ratio", source_type=path.anchor_source,
-            evidence_ids=evidence_ids, derivation=derivation + (
-                f" CLAMPED to the configured bound." if clamped else ""),
+            evidence_ids=evidence_ids,
+            derivation=derivation + (" " + clamp_reason if clamp_reason else ""),
             clamped=clamped,
-            original_proposed_value=round(anchor + margin_delta, 6) if clamped else None,
-            applied_value=round(value, 6)))
+            original_proposed_value=round(raw, 6) if clamped else None,
+            applied_value=round(value, 6),
+            raw_value=round(raw, 6),
+            clamp_reason=clamp_reason))
     return path
 
 
@@ -983,6 +1248,285 @@ def apply_proposal(baseline: Dict[str, ForwardPath], outcome: ProposalOutcome,
                 applied_value=value))
         updated[field_name] = path
     return updated
+
+
+# ---------------------------------------------------------------------------
+# Sections 16-17 — the current-year tax rate is not the forecast tax rate
+# ---------------------------------------------------------------------------
+
+# How far a guided tax rate may sit from the issuer's own normalized history
+# before the current year is treated as carrying an unusual tax effect. A
+# live release guided a 35-36% effective rate against a prior guide of
+# 23.5-24.5% for the same year -- an eleven-point move caused by two
+# acquisitions -- and applying 35% to all five forecast years would carry a
+# one-off tax consequence through the whole horizon.
+UNUSUAL_TAX_EFFECT_THRESHOLD = 0.05
+
+# The project's configured statutory-adjacent tax rate, matching the value
+# finance/workflow.py::propose_assumptions has always used. Named here so
+# the tax path and the scenario builder cannot drift apart.
+CONFIGURED_TAX_RATE = 0.21
+
+TAX_GUIDANCE_CONFLICT = "TAX_GUIDANCE_CONFLICT"
+
+
+def build_tax_path(state, forecast_years, guidance=None, historical_tax_rate=None):
+    """A year-by-year tax path (section 17), not one rate repeated.
+
+    Year 1 may legitimately carry an unusual effect -- an acquisition, a
+    one-off settlement, a rate change -- and years 2-5 should not. When the
+    current guided rate and the issuer's normalized history disagree
+    materially, the path starts at the guided rate and converges on the
+    normalized one; when they agree, the rate is simply held.
+
+    Returns (values, provenance) so the caller records what was used and why.
+    """
+    guidance = guidance or {}
+    guided = guidance.get("tax_rate")
+    guided_rate = None
+    basis = None
+    if isinstance(guided, dict) and guided.get("midpoint") is not None:
+        guided_rate = float(guided["midpoint"])
+        basis = guided.get("basis")
+
+    reported = None
+    profitability = getattr(state, "profitability", None) or {}
+    reported_block = profitability.get("reported") or {}
+    if reported_block.get("tax_rate") is not None:
+        reported = float(reported_block["tax_rate"])
+
+    normalized_rate = historical_tax_rate
+    if normalized_rate is None:
+        normalized_rate = CONFIGURED_TAX_RATE
+
+    provenance = {
+        "reported_tax_rate": reported,
+        "current_guided_tax_rate": guided_rate,
+        "guided_tax_basis": basis,
+        "normalized_forward_tax_rate": normalized_rate,
+        "findings": [],
+    }
+
+    if guided_rate is None:
+        rate = reported if reported is not None and 0.0 <= reported <= 0.60 \
+            else normalized_rate
+        provenance["source"] = ("reported_ttm" if rate == reported else "configured_default")
+        provenance["derivation"] = (
+            f"No current tax guidance was available; the forecast holds "
+            f"{rate:.1%} across all {forecast_years} years.")
+        return [round(rate, 6)] * forecast_years, provenance
+
+    divergence = abs(guided_rate - normalized_rate)
+    if divergence < UNUSUAL_TAX_EFFECT_THRESHOLD:
+        provenance["source"] = "management_guidance"
+        provenance["derivation"] = (
+            f"Current tax guidance of {guided_rate:.1%} (basis: {basis}) is close to the "
+            f"normalized rate of {normalized_rate:.1%}, so it is held across the horizon.")
+        return [round(guided_rate, 6)] * forecast_years, provenance
+
+    # Year 1 takes the guided rate; the path converges on the normalized one.
+    values = [guided_rate + (normalized_rate - guided_rate) * (i / max(1, forecast_years - 1))
+              for i in range(forecast_years)]
+    provenance["source"] = "management_guidance_normalized"
+    provenance["derivation"] = (
+        f"Current tax guidance of {guided_rate:.1%} (basis: {basis}) differs from the "
+        f"normalized rate of {normalized_rate:.1%} by {divergence:.1%}, which indicates an "
+        "unusual current-year tax effect. Year 1 uses the guided rate and the path converges "
+        "on the normalized rate rather than carrying a one-off tax consequence through every "
+        "forecast year.")
+    provenance["findings"].append({
+        "code": TAX_GUIDANCE_CONFLICT, "severity": "info",
+        "message": provenance["derivation"],
+        "guided_tax_rate": guided_rate, "normalized_tax_rate": normalized_rate,
+    })
+    return [round(v, 6) for v in values], provenance
+
+
+# ---------------------------------------------------------------------------
+# Sections 13-15 — is the DCF's year-1 assumption consistent with guidance?
+# ---------------------------------------------------------------------------
+
+DCF_GUIDANCE_ASSUMPTION_CONFLICT = "DCF_GUIDANCE_ASSUMPTION_CONFLICT"
+
+
+class GuidanceConsistency:
+    CONSISTENT = "GUIDANCE_ASSUMPTION_CONSISTENT"
+    DIVERGENCE = "GUIDANCE_ASSUMPTION_DIVERGENCE"
+    NOT_COMPARABLE = "GUIDANCE_METRIC_NOT_COMPARABLE"
+    NONE = "NO_RELEVANT_GUIDANCE"
+    ALL = (CONSISTENT, DIVERGENCE, NOT_COMPARABLE, NONE)
+
+
+# How far a year-1 assumption may sit outside stated guidance before the
+# divergence needs an explicit, evidence-backed rationale. Wider than the
+# ordinary tolerance because a forecast is allowed to disagree with guidance
+# -- section 14 is explicit that divergence is not automatically rejected --
+# but a gap this size is a thesis, and a thesis has to be stated.
+MATERIAL_GUIDANCE_DIVERGENCE = 0.05
+
+
+def validate_guidance_against_assumption(evidence, year_one_growth,
+                                         justification=""):
+    """Compare the DCF's year-1 revenue growth with RELEVANT guidance only.
+
+    Section 13's rule stated as code: a consolidated revenue-growth
+    assumption is compared against consolidated revenue guidance and against
+    nothing else. EBITDA growth, gross margin and EPS are not comparable to
+    it, and treating them as though they were is exactly the substitution
+    earlier phases fixed at extraction time -- this is the same rule applied
+    one layer later.
+
+    Divergence is REPORTED, never auto-corrected. The forecast may sit above
+    or below guidance when evidence supports it; what it may not do is sit
+    materially outside without saying why.
+    """
+    record = {
+        "status": GuidanceConsistency.NONE,
+        "assumption_metric": "consolidated_revenue_growth",
+        "forecast_period": "year_1",
+        "assumption_value": year_one_growth,
+        "guidance_low": None,
+        "guidance_high": None,
+        "guidance_metric": None,
+        "guidance_target_period": None,
+        "divergence": None,
+        "source_evidence_ids": [],
+        "findings": [],
+    }
+    if year_one_growth is None:
+        return record
+
+    low, high = evidence.guidance_low, evidence.guidance_high
+    metric = evidence.guidance_source_metric
+    if low is None and evidence.guidance_implied_next_period_growth is not None:
+        # A quarterly guide is near-term evidence about trajectory, not a
+        # full-year rate (section 16). It is recorded as CORROBORATION and
+        # never as the range a year-1 forecast must sit inside.
+        record["status"] = GuidanceConsistency.NOT_COMPARABLE
+        record["guidance_metric"] = "implied_next_quarter_revenue_growth"
+        record["guidance_target_period"] = evidence.guidance_period_label
+        record["findings"].append({
+            "code": GuidanceConsistency.NOT_COMPARABLE, "severity": "info",
+            "message": (
+                "The only revenue guidance available targets a single quarter, so it is "
+                "near-term evidence about trajectory rather than a full-year rate the "
+                f"year-1 assumption of {year_one_growth:.1%} can be checked against."),
+        })
+        return record
+    if low is None or high is None:
+        return record
+
+    record.update({"guidance_low": low, "guidance_high": high,
+                   "guidance_metric": metric,
+                   "guidance_target_period": evidence.guidance_period_label,
+                   "source_evidence_ids": [evidence.guidance_evidence_id]
+                   if evidence.guidance_evidence_id else []})
+
+    if evidence.guidance_period_type == "quarter":
+        record["status"] = GuidanceConsistency.NOT_COMPARABLE
+        return record
+
+    if low - MATERIAL_GUIDANCE_DIVERGENCE <= year_one_growth <= \
+            high + MATERIAL_GUIDANCE_DIVERGENCE:
+        record["status"] = GuidanceConsistency.CONSISTENT
+        return record
+
+    divergence = (year_one_growth - high if year_one_growth > high
+                  else year_one_growth - low)
+    record["divergence"] = divergence
+    record["status"] = GuidanceConsistency.DIVERGENCE
+    if len(justification or "") < 40:
+        record["findings"].append({
+            "code": DCF_GUIDANCE_ASSUMPTION_CONFLICT, "severity": "error",
+            "message": (
+                f"The DCF's year-1 revenue growth of {year_one_growth:.1%} sits "
+                f"{abs(divergence):.1%} outside management's own guidance of {low:.1%} to "
+                f"{high:.1%} for {record['guidance_target_period']}, and no evidence-backed "
+                "rationale was recorded for the difference. A forecast may disagree with "
+                "guidance; it may not disagree silently."),
+            "assumption_value": year_one_growth, "guidance_low": low,
+            "guidance_high": high, "divergence": divergence,
+        })
+    return record
+
+
+# ---------------------------------------------------------------------------
+# Sections 17-19 — a configured bound is not a forecast
+# ---------------------------------------------------------------------------
+
+DCF_MODEL_BOUND_CONFLICT = "DCF_MODEL_BOUND_CONFLICT"
+
+# How much a bound must move the year-1 assumption before it is materially
+# changing the forecast rather than trimming it.
+MATERIAL_BOUND_EFFECT = 0.05
+
+
+def detect_model_bound_conflict(evidence, raw_value, applied_value, bounds,
+                                label="revenue_growth"):
+    """Is a configured bound constraining well-corroborated current evidence?
+
+    Section 18 requires three things at once, and all three matter:
+
+      1. validated evidence supports a value outside the bound,
+      2. the bound materially changes the forecast, and
+      3. INDEPENDENT evidence -- current guidance -- corroborates the
+         out-of-bound value.
+
+    Without (3) an out-of-bound figure is ordinary assumption uncertainty and
+    the clamp is doing its job. With (3) the model's representational range,
+    not the company, is setting the forecast: a live issuer's trailing growth
+    was 39.5% and its own next-quarter guidance implied about the same, while
+    the model's ceiling was 25% -- so the valuation thesis became an artefact
+    of a software limit.
+
+    Section 19: this never raises the bound. It records the conflict so DCF
+    suitability and readiness can reflect it.
+    """
+    if raw_value is None or applied_value is None:
+        return None
+    low, high = bounds
+    if low <= raw_value <= high:
+        return None
+    if abs(raw_value - applied_value) < MATERIAL_BOUND_EFFECT:
+        return None
+
+    corroboration = None
+    if evidence is not None:
+        guided = evidence.guidance_midpoint
+        implied = evidence.guidance_implied_next_period_growth
+        for candidate, source in ((guided, "current management guidance"),
+                                  (implied, "management's next-quarter guidance")):
+            if candidate is None:
+                continue
+            # Corroborating means pointing the SAME WAY past the bound, not
+            # merely being a number that exists.
+            if (raw_value > high and candidate > high) or \
+                    (raw_value < low and candidate < low):
+                corroboration = (candidate, source)
+                break
+    if corroboration is None:
+        return None
+
+    value, source = corroboration
+    bound = high if raw_value > high else low
+    return {
+        "code": DCF_MODEL_BOUND_CONFLICT,
+        "severity": "error",
+        "assumption": label,
+        "raw_evidence_value": raw_value,
+        "model_bound": bound,
+        "applied_value": applied_value,
+        "corroborating_value": value,
+        "corroborating_source": source,
+        "message": (
+            f"Validated evidence supports a year-1 {label} of {raw_value:.1%} and {source} "
+            f"corroborates it at {value:.1%}, but the model's configured bound of "
+            f"{bound:.1%} caps the applied assumption at {applied_value:.1%}. The bound is a "
+            "safety control, not an estimate: here it is the model's representational range, "
+            "rather than the company's economics, that is setting the forecast. The bound is "
+            "deliberately NOT raised; the conflict is recorded so the valuation's standing "
+            "reflects it."),
+    }
 
 
 def build_forward_assumptions(state: "fr.CurrentFinancialState", forecast_years: int,
