@@ -70,11 +70,31 @@ class Severity:
     here now QUARANTINES the offending field rather than destroying six
     stages of work. The claim underneath still carries mandatory evidence
     IDs, which is the deterministic backstop that never false-positives.
+
+    SEMANTIC_MISUSE guards a claim the BUSINESS MODEL does not license --
+    an insurer's operating cash flow less capital expenditure standing in
+    for owner free cash flow, a working-capital ratio standing in for
+    liquidity. Unlike overstatement this is not a judgment about tone: the
+    verdict comes from the issuer's classification and the metric's
+    identity, so it never false-positives on wording.
+
+    It gets its own severity because neither existing consequence fits.
+    Cascade-fatal was tried and cost a live insurer its entire final
+    synthesis -- the stage exhausted its repairs still writing the claim,
+    and the report came back with no recommendation at all. Plain
+    overstatement does not work either: these claims land in `claims`,
+    `rationale` and `key_risks`, whose policy is FAIL precisely because
+    DROPPING an element would breach a min_items the schema requires.
+
+    So a semantic-misuse finding is always STUBBED. The element stays, the
+    structure stays valid, and the sentence is replaced by a marker saying
+    why it was withheld. The claim is blocked; the analysis survives.
     """
 
     FABRICATION = "fabrication"
     OVERSTATEMENT = "overstatement"
-    ALL = (FABRICATION, OVERSTATEMENT)
+    SEMANTIC_MISUSE = "semantic_misuse"
+    ALL = (FABRICATION, OVERSTATEMENT, SEMANTIC_MISUSE)
 
 
 @dataclass(frozen=True)

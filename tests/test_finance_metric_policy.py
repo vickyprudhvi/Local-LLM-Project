@@ -311,3 +311,115 @@ def test_a_degraded_pipeline_is_not_reported_as_complete():
                "rebuttal_round": "FAILED", "research_manager": "COMPLETE",
                "risk_reviewer": "COMPLETE", "final_investment_synthesizer": "COMPLETE"}
     assert _pipeline_overall_status(cascade) != "COMPLETE"
+
+
+# ---------------------------------------------------------------------------
+# Section 33 — the claim is blocked, the stage survives
+# ---------------------------------------------------------------------------
+
+def _insurer_index():
+    from finance.evidence import build_evidence_index
+
+    return build_evidence_index({
+        "symbol": "ZZ",
+        "valuation_method_status": V.VALID_BUT_NOT_APPLICABLE,
+        "business_model_evidence": {"business_model": P.INSURER},
+    })
+
+
+def test_a_business_model_claim_is_stubbed_not_dropped():
+    """The claim must not reach the report, and the stage must not die.
+
+    Both failure modes were live. Raising cost a real insurer its entire
+    final synthesis -- no recommendation at all. Dropping is impossible
+    here: `claims` carries min_items=2 and its quarantine policy is FAIL
+    precisely because removing an element breaches that. Stubbing replaces
+    the sentence and leaves the element, so neither happens.
+    """
+    from finance.research_pipeline import apply_quarantine, _business_model_claim_findings
+
+    output = {"claims": [
+        {"claim": "Positive free cash flow demonstrates strong cash generation.",
+         "evidence_ids": ["a"]},
+        {"claim": "Revenue grew 6.5% over the trailing twelve months.",
+         "evidence_ids": ["b"]}]}
+    findings = _business_model_claim_findings(output, _insurer_index())
+    result, records, fatal = apply_quarantine(output, findings)
+
+    assert fatal == []
+    assert len(result["claims"]) == 2
+    assert "withheld" in result["claims"][0]["claim"]
+    assert "does not support for this business model" in result["claims"][0]["claim"]
+    # The legitimate claim beside it is untouched.
+    assert result["claims"][1]["claim"] == "Revenue grew 6.5% over the trailing twelve months."
+    assert [r["policy"] for r in records] == ["stub"]
+
+
+def test_a_fail_policy_field_still_survives_a_semantic_finding():
+    """`key_risks` is FAIL-policy for the same min_items reason."""
+    from finance.research_pipeline import apply_quarantine, _business_model_claim_findings
+
+    output = {"key_risks": [{"risk": "Current ratio below 1.0 indicates liquidity stress."}]}
+    findings = _business_model_claim_findings(output, _insurer_index())
+    result, _records, fatal = apply_quarantine(output, findings)
+
+    assert fatal == []
+    assert len(result["key_risks"]) == 1
+    assert "withheld" in result["key_risks"][0]["risk"]
+
+
+def test_findings_are_path_aware():
+    from finance.research_pipeline import _business_model_claim_findings
+
+    output = {"claims": [
+        {"claim": "Revenue grew.", "evidence_ids": ["a"]},
+        {"claim": "Strong free cash flow underpins the thesis.", "evidence_ids": ["b"]}]}
+    findings = _business_model_claim_findings(output, _insurer_index())
+    assert [f.field_path for f in findings] == ["claims[1].claim"]
+    assert findings[0].rule_id == "BM-001"
+
+
+def test_an_ordinary_company_produces_no_semantic_findings():
+    from finance.evidence import build_evidence_index
+    from finance.research_pipeline import _business_model_claim_findings
+
+    index = build_evidence_index({
+        "symbol": "ZZ",
+        "valuation_method_status": V.VALID_AND_APPLICABLE,
+        "business_model_evidence": {"business_model": P.STANDARD_OPERATING_COMPANY},
+    })
+    output = {"claims": [
+        {"claim": "Positive free cash flow demonstrates strong cash generation.",
+         "evidence_ids": ["a"]}]}
+    assert _business_model_claim_findings(output, index) == []
+
+
+def test_semantic_misuse_is_never_fatal_even_beside_an_overstatement():
+    """The new severity must not change how the existing ones behave."""
+    from finance.content_policy import Finding, Severity
+    from finance.research_pipeline import apply_quarantine
+
+    output = {"thesis": "Strong free cash flow.", "claims": [
+        {"claim": "Free cash flow demonstrates strong cash generation.",
+         "evidence_ids": ["a"]},
+        {"claim": "Revenue grew.", "evidence_ids": ["b"]}]}
+    findings = [
+        Finding("BM-001", "CASH_FLOW_SEMANTIC_MISUSE", Severity.SEMANTIC_MISUSE,
+                "claims[0].claim", "free_cash_flow"),
+        Finding("CV-101", "superlative", Severity.OVERSTATEMENT, "thesis", "strong"),
+    ]
+    result, records, fatal = apply_quarantine(output, findings)
+    assert fatal == []
+    assert "withheld" in result["claims"][0]["claim"]
+    assert "withheld" in result["thesis"]
+    assert len(records) == 2
+
+
+def test_a_fabrication_finding_is_still_fatal():
+    from finance.content_policy import Finding, Severity
+    from finance.research_pipeline import apply_quarantine
+
+    findings = [Finding("CP-001", "position size", Severity.FABRICATION,
+                        "rationale[0].statement", "position size")]
+    _result, _records, fatal = apply_quarantine({"rationale": [{"statement": "x"}]}, findings)
+    assert len(fatal) == 1

@@ -592,6 +592,13 @@ _QUARANTINE_STUB_TEXT = (
     "[withheld: this passage used language stronger than the cited evidence "
     "supports and was removed by automated screening]")
 
+# A semantic misuse is a different fault and deserves a different sentence:
+# the language was not too strong, the metric does not mean what the passage
+# used it to mean for this business model.
+_SEMANTIC_STUB_TEXT = (
+    "[withheld: this passage drew a conclusion the metric does not support for this "
+    "business model and was removed by automated screening]")
+
 # Keyed by the FIELD NAME as it appears at the top level of a stage's
 # validated output (list indices and nested keys are resolved to their root
 # field before lookup). Anything not listed defaults to DROP.
@@ -632,7 +639,7 @@ def _policy_for(field_path: str) -> str:
     return _FIELD_QUARANTINE_POLICY.get(_root_field(field_path), QUARANTINE_DROP)
 
 
-def _remove_at_path(container, field_path: str, stub: bool) -> bool:
+def _remove_at_path(container, field_path: str, stub: bool, stub_text=None) -> bool:
     """Remove (or stub) the value at `field_path`. True when it was applied.
 
     Walks the same path grammar `_walk_fields` produces: dotted keys and
@@ -660,7 +667,7 @@ def _remove_at_path(container, field_path: str, stub: bool) -> bool:
     kind, token = tokens[-1]
     try:
         if stub:
-            parent[token] = _QUARANTINE_STUB_TEXT
+            parent[token] = stub_text or _QUARANTINE_STUB_TEXT
         elif kind == "index":
             del parent[token]
         else:
@@ -684,8 +691,19 @@ def apply_quarantine(validated: dict, findings) -> Tuple[dict, List[dict], List]
     fatal = [f for f in findings if f.severity == cp_module.Severity.FABRICATION]
     quarantinable = [f for f in findings if f.severity != cp_module.Severity.FABRICATION]
 
+    # A business-model semantic misuse is always stubbed and is never fatal
+    # (see Severity.SEMANTIC_MISUSE). The FAIL policy below exists because
+    # DROPPING an element would breach a min_items; stubbing replaces the
+    # text and leaves the element in place, so the reason for FAIL does not
+    # apply to it.
+    semantic = [f for f in quarantinable
+                if f.severity == cp_module.Severity.SEMANTIC_MISUSE]
+    quarantinable = [f for f in quarantinable
+                     if f.severity != cp_module.Severity.SEMANTIC_MISUSE]
+
     fatal += [f for f in quarantinable if _policy_for(f.field_path) == QUARANTINE_FAIL]
     quarantinable = [f for f in quarantinable if _policy_for(f.field_path) != QUARANTINE_FAIL]
+    quarantinable += semantic
     if fatal:
         return validated, [], fatal
 
@@ -698,8 +716,13 @@ def apply_quarantine(validated: dict, findings) -> Tuple[dict, List[dict], List]
                                     f.field_path),
                      reverse=True)
     for finding in ordered:
-        policy = _policy_for(finding.field_path)
-        applied = _remove_at_path(output, finding.field_path, stub=(policy == QUARANTINE_STUB))
+        policy = (QUARANTINE_STUB
+                  if finding.severity == cp_module.Severity.SEMANTIC_MISUSE
+                  else _policy_for(finding.field_path))
+        applied = _remove_at_path(
+            output, finding.field_path, stub=(policy == QUARANTINE_STUB),
+            stub_text=(_SEMANTIC_STUB_TEXT
+                       if finding.severity == cp_module.Severity.SEMANTIC_MISUSE else None))
         if not applied:
             continue
         record = finding.to_dict()
@@ -826,10 +849,11 @@ def _validate_claim_fidelity(validated: dict, index) -> dict:
     # so a role is far less likely to write the claim in the first place.
     # This pass catches what still gets through and attaches it to the
     # output, where readiness and the audit can see it.
-    semantic_findings = _business_model_claim_findings(validated, index)
-    if semantic_findings:
-        validated = dict(validated)
-        validated["business_model_semantic_findings"] = semantic_findings
+    # Routed through the SAME quarantine machinery as every other finding.
+    # These are stubbed rather than dropped or raised, so the offending
+    # sentence is replaced by a withheld marker while the element -- and the
+    # stage -- survives.
+    findings = findings + _business_model_claim_findings(validated, index)
 
     # Phase H.5, Phase 2: OVERSTATEMENT findings quarantine their field; only
     # FABRICATION (and overstatement on a FAIL-policy field) still fails the
@@ -997,27 +1021,40 @@ def _business_model_policy_from_index(index):
         "business_model.valuation_method_status")
 
 
+# Stable ids for the business-model rules, so a quarantine record means the
+# same thing between runs (the reason every other rule id is explicit).
+_BUSINESS_MODEL_RULE_IDS = {
+    "CASH_FLOW_SEMANTIC_MISUSE": "BM-001",
+    "GENERIC_RATIO_INTERPRETATION_NOT_SUPPORTED": "BM-002",
+    "VALUATION_APPLICABILITY_MISSTATED": "BM-003",
+    "VALUATION_LIMITATION_AS_COMPANY_RISK": "BM-004",
+}
+
+
 def _business_model_claim_findings(validated, index) -> list:
-    """Every business-model semantic violation in one stage's output."""
+    """Every business-model semantic violation, as quarantinable Findings.
+
+    Path-aware, because a field cannot be quarantined without knowing which
+    field it was. `_walk_fields` produces the same dotted/indexed grammar
+    `apply_quarantine` consumes, so these route through exactly the machinery
+    the overstatement findings already use.
+    """
     from finance import metric_policy
+    from finance.content_policy import Finding, Severity, _walk_fields
 
     profile, valuation_status = _business_model_policy_from_index(index)
     if not profile:
         return []
 
     findings = []
-
-    def walk(node):
-        if isinstance(node, str):
-            findings.extend(metric_policy.validate_claim(node, profile, valuation_status))
-        elif isinstance(node, dict):
-            for item in node.values():
-                walk(item)
-        elif isinstance(node, (list, tuple)):
-            for item in node:
-                walk(item)
-
-    walk(validated)
+    for field_path, text in _walk_fields(validated):
+        for violation in metric_policy.validate_claim(text, profile, valuation_status):
+            findings.append(Finding(
+                rule_id=_BUSINESS_MODEL_RULE_IDS.get(violation["code"], "BM-000"),
+                label=violation["code"],
+                severity=Severity.SEMANTIC_MISUSE,
+                field_path=field_path,
+                matched_span=(violation.get("metric_id") or "")))
     return findings
 
 
