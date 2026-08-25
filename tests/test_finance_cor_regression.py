@@ -234,7 +234,7 @@ _BULL_COR = json.dumps({
         {"claim_id": "bull-5",
          "claim": ("Reported return on average equity is approximately 144%, a figure influenced "
                    "by a comparatively small equity base."),
-         "evidence_ids": ["fundamental.roe_average_equity", "fundamental.debt_to_equity"],
+         "evidence_ids": ["fundamental.roe_average_equity", "current.debt_to_equity"],
          "claim_type": "fact_interpretation", "assumptions": [], "confidence": 0.5},
     ],
     "confidence": "medium",
@@ -245,12 +245,12 @@ _BEAR_COR = json.dumps({
               "liquidity is tight, and operating margins are thin."),
     "claims": [
         {"claim_id": "bear-1",
-         "claim": ("The debt-to-equity ratio is approximately 5.08, reflecting a comparatively "
+         "claim": ("The debt-to-equity ratio is approximately 3.84, reflecting a comparatively "
                    "small equity base relative to total debt."),
-         "evidence_ids": ["fundamental.debt_to_equity"], "claim_type": "fact_interpretation",
+         "evidence_ids": ["current.debt_to_equity"], "claim_type": "fact_interpretation",
          "assumptions": [], "confidence": 0.7},
-        {"claim_id": "bear-2", "claim": "The current ratio is approximately 0.90, below 1.0.",
-         "evidence_ids": ["fundamental.current_ratio"], "claim_type": "fact_interpretation",
+        {"claim_id": "bear-2", "claim": "The current ratio is approximately 0.93, below 1.0.",
+         "evidence_ids": ["current.current_ratio"], "claim_type": "fact_interpretation",
          "assumptions": [], "confidence": 0.7},
         {"claim_id": "bear-3",
          "claim": "The operating margin is approximately 0.9%, a thin margin relative to revenue.",
@@ -270,11 +270,11 @@ _REBUTTAL_COR = json.dumps({
     "bull_rebuttal": {
         "response": ("The elevated debt-to-equity ratio partly reflects a small equity base "
                     "rather than an unusually large debt load in isolation."),
-        "evidence_cited": ["fundamental.debt_to_equity"],
+        "evidence_cited": ["current.debt_to_equity"],
     },
     "bear_rebuttal": {
         "response": "A small equity base does not fully offset the current ratio remaining below 1.0.",
-        "evidence_cited": ["fundamental.current_ratio"],
+        "evidence_cited": ["current.current_ratio"],
     },
 })
 
@@ -282,8 +282,8 @@ _RESEARCH_MANAGER_COR = json.dumps({
     "evidence_balance": "mixed",
     "supported_bull_points": ["Revenue grew approximately 9.3% year over year.",
                               "Free cash flow is positive."],
-    "supported_bear_points": ["The debt-to-equity ratio is approximately 5.08.",
-                              "The current ratio is approximately 0.90, below 1.0."],
+    "supported_bear_points": ["The debt-to-equity ratio is approximately 3.84.",
+                              "The current ratio is approximately 0.93, below 1.0."],
     "unsupported_points": [],
     "shared_findings": ["Both sides cite the same reported leverage and liquidity figures."],
     "key_disagreements": [("Whether the elevated debt-to-equity ratio primarily reflects a small "
@@ -294,7 +294,7 @@ _RESEARCH_MANAGER_COR = json.dumps({
     "balanced_assessment": ("Both sides cite real, reported evidence; the spread between the bull "
                            "and bear modeled values mainly reflects differing revenue-growth and "
                            "margin assumptions."),
-    "evidence_cited": ["fundamental.debt_to_equity", "fundamental.current_ratio"],
+    "evidence_cited": ["current.debt_to_equity", "current.current_ratio"],
 })
 
 _RISK_COR = json.dumps({
@@ -303,15 +303,15 @@ _RISK_COR = json.dumps({
                  "approximately $8.91 billion, and total debt is approximately 2.4 times free "
                  "cash flow."),
          "severity": "medium",
-         "evidence_cited": ["fundamental.debt_to_equity", "current.net_debt", "fundamental.debt_to_fcf"]},
+         "evidence_cited": ["current.debt_to_equity", "current.net_debt", "fundamental.debt_to_fcf"]},
         {"risk": "The current ratio is below 1.0, indicating comparatively tight short-term liquidity.",
-         "severity": "medium", "evidence_cited": ["fundamental.current_ratio"]},
+         "severity": "medium", "evidence_cited": ["current.current_ratio"]},
         {"risk": "Operating margins are thin relative to revenue.",
          "severity": "low", "evidence_cited": ["current.operating_margin"]},
     ],
     "data_quality_concerns": [("Earnings history is unavailable this cycle.")],
-    "evidence_cited": ["fundamental.debt_to_equity", "current.net_debt", "fundamental.debt_to_fcf",
-                       "fundamental.current_ratio", "current.operating_margin"],
+    "evidence_cited": ["current.debt_to_equity", "current.net_debt", "fundamental.debt_to_fcf",
+                       "current.current_ratio", "current.operating_margin"],
 })
 
 _FINAL_COR = json.dumps({
@@ -320,7 +320,7 @@ _FINAL_COR = json.dumps({
     "primary_reason": "Evidence and valuation point the same way at this confidence level.", "supporting_factors": [], "limiting_factors": ["Research readiness is LIMITED: a key DCF assumption came from a configured default and the bull-to-bear scenario spread is wide."], "rationale": [
         {"statement": ("The market price sits below the modeled base scenario value while "
                       "balance-sheet leverage remains elevated relative to the equity base."),
-         "evidence_ids": ["valuation_gap.direction", "fundamental.debt_to_equity"]},
+         "evidence_ids": ["valuation_gap.direction", "current.debt_to_equity"]},
         {"statement": ("Earnings history and earnings-surprise context are unavailable this "
                       "cycle, which limits the completeness of this analysis."),
          "evidence_ids": ["plan.omitted.earnings"]},

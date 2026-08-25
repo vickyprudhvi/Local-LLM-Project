@@ -47,6 +47,7 @@ import tools.config as config
 from finance import freshness as fr
 from finance import guidance as gm
 from finance import suitability
+from finance import semantics as sem
 from finance.dcf import AssumptionSourceType
 from finance.structural_breaks import HistoricalComparability
 
@@ -189,6 +190,13 @@ class GrowthEvidence:
     # becomes the five-year anchor by default.
     guidance_implied_next_period_growth: Optional[float] = None
     guidance_implied_comparison_period: Optional[str] = None
+
+    # Phase H.10. Every guidance-to-growth derivation the semantic validator
+    # refused, with the two identities and the reason. Held here so readiness
+    # can name the ROOT cause (a period mismatch) instead of the symptom a
+    # reader would otherwise see (a clamped assumption), and so a rejection
+    # is never silently indistinguishable from "the company guided nothing".
+    semantic_rejections: List[dict] = field(default_factory=list)
 
     ttm_yoy: Optional[float] = None
     latest_annual_yoy: Optional[float] = None
@@ -365,16 +373,73 @@ def collect_growth_evidence(state: "fr.CurrentFinancialState",
 _SCALE_MULTIPLIER = {"billion": 1e9, "billions": 1e9, "million": 1e6, "millions": 1e6}
 
 
-def _apply_absolute_revenue_guidance(evidence: GrowthEvidence, entry: dict,
-                                     company_facts: dict) -> None:
-    """Turn "$91.0 billion next quarter" into a growth rate, or leave it alone.
+GUIDANCE_PERIOD_INCOMPATIBLE = "GUIDANCE_PERIOD_INCOMPATIBLE"
 
-    Only ever compared against the SAME fiscal quarter of the prior year —
-    a guided Q2 against the reported Q2, never against the most recent
-    quarter, because a sequential comparison of a seasonal business is not a
-    growth rate. If no comparable quarter can be identified the field stays
-    unset: an implied growth rate that silently compared unlike periods would
-    be worse than no signal at all.
+# How far a guided level may sit from the issuer's own reported figures for
+# the period it CLAIMS to cover before the claim is disbelieved. A company
+# guiding its full year names a number in the neighbourhood of its own annual
+# revenue; one that names a quarter's worth of revenue and calls it the year
+# has been misread somewhere upstream.
+_SCALE_DISAGREEMENT = 0.45
+
+
+def _guidance_scale_contradicts_period(guided_amount, period_type, company_facts):
+    """Does the issuer's own history contradict the period this guidance claims?
+
+    Defence in depth, and the part of this fix that generalises. A regex
+    corrected for one release wording will be wrong again for the next; what
+    cannot go stale is the company's own reported scale. An ANNUAL revenue
+    figure roughly one quarter the size of the issuer's trailing twelve
+    months is not that issuer's annual revenue, whatever the surrounding
+    prose says -- and a live release headed "third quarter FY2026 targets"
+    produced exactly that: a quarterly level read as full-year guidance,
+    divided by the trailing twelve months, and reported as a -73% decline.
+
+    Returns a reason string when the label is contradicted, else None.
+    Deliberately one-sided -- it rejects a figure far too SMALL for the
+    period claimed and never one that is large, because a company growing
+    quickly is not evidence of a parsing error.
+    """
+    from finance import period_facts as pf_module
+
+    ttm = fr.build_ttm(company_facts, "revenue")
+    if not (ttm.ok and ttm.value):
+        return None
+    if period_type != "annual":
+        return None
+
+    ratio = guided_amount / abs(ttm.value)
+    if ratio >= _SCALE_DISAGREEMENT:
+        return None
+
+    series = pf_module.discrete_quarters(company_facts, "revenue")
+    quarterly = [q.value for q in series.quarters[-4:] if q.value]
+    if quarterly:
+        typical = sorted(quarterly)[len(quarterly) // 2]
+        if typical and abs(guided_amount - typical) < abs(guided_amount - ttm.value):
+            return ("the figure is {:.0%} of the issuer's trailing-twelve-month revenue and "
+                    "closer to a single reported quarter than to a year, so the full-year "
+                    "period it was read as covering is contradicted by the issuer's own "
+                    "filings".format(ratio))
+    return ("the figure is only {:.0%} of the issuer's trailing-twelve-month revenue, which "
+            "is not a plausible full-year revenue level for this issuer".format(ratio))
+
+
+def _apply_absolute_revenue_guidance(evidence, entry, company_facts):
+    """Turn a guided revenue LEVEL into a growth rate, or refuse to.
+
+    Phase H.10 rewrites this around one rule: the division that produces a
+    growth rate happens only after `finance.semantics` has confirmed that
+    both sides cover the same length of time. Before, the period recorded on
+    the guidance CHOSE the comparison and was then never checked against it,
+    so a mislabelled period silently selected the wrong denominator and the
+    resulting nonsense was clamped into range rather than rejected (sections
+    10-11: a clamp must never hide an upstream semantic error).
+
+    A refusal is recorded on `evidence.semantic_rejections` and leaves the
+    guidance fields unset. The guidance itself survives as evidence -- it is
+    still shown and still citable -- it simply does not become an annual
+    growth assumption.
     """
     from finance import period_facts as pf_module
 
@@ -382,43 +447,103 @@ def _apply_absolute_revenue_guidance(evidence: GrowthEvidence, entry: dict,
     if multiplier is None:
         return
     guided_amount = float(entry["midpoint"]) * multiplier
+    period_type = entry.get("period_type")
 
-    # An ANNUAL revenue level implies an annual growth rate against the
-    # trailing twelve months -- the two cover the same span, so the
-    # comparison is like-for-like. A live issuer guides "$101.1 billion of
-    # sales for 2026" and nothing else; read as a level only, its guidance
-    # could not be compared with the DCF's year-1 growth at all.
-    if entry.get("period_type") == "annual":
-        ttm = fr.build_ttm(company_facts, "revenue")
-        if ttm.ok and ttm.value:
-            evidence.guidance_low = (guided_amount - ttm.value) / abs(ttm.value)
-            evidence.guidance_high = evidence.guidance_low
-            evidence.guidance_source_metric = \
-                gm.GuidanceMetricName.CONSOLIDATED_REVENUE_GROWTH
-            evidence.guidance_period_label = entry.get("fiscal_period")
-            evidence.guidance_period_type = "annual"
-            evidence.guidance_basis = entry.get("basis")
-            evidence.guidance_bound_type = entry.get("bound_type")
-            evidence.guidance_evidence_id = entry.get("evidence_id")
-            evidence.guidance_implied_comparison_period = (
-                f"{ttm.period_start}..{ttm.period_end}")
+    guided = sem.SemanticFact(
+        metric_id=sem.MetricIdentity.REVENUE,
+        value=guided_amount,
+        units="currency",
+        accounting_basis=(entry.get("basis") or sem.AccountingBasis.UNKNOWN),
+        period_frequency=(sem.PeriodFrequency.ANNUAL if period_type == "annual"
+                          else sem.PeriodFrequency.QUARTER if period_type == "quarter"
+                          else sem.PeriodFrequency.UNKNOWN),
+        fiscal_year=entry.get("fiscal_year"),
+        fiscal_quarter=entry.get("fiscal_quarter"),
+        flow_or_instant=sem.FlowOrInstant.FLOW,
+        current_or_historical=sem.CurrentOrHistorical.FORWARD,
+        evidence_id=entry.get("evidence_id"),
+        definition_id="guidance_revenue_level")
+
+    def reject(reason, base_fact, code=GUIDANCE_PERIOD_INCOMPATIBLE):
+        evidence.semantic_rejections.append({
+            "code": code,
+            "operation": sem.Operation.GROWTH,
+            "left": guided.label(),
+            "right": base_fact.label(),
+            "reason": reason,
+            "context": "guidance revenue level -> year-1 revenue growth",
+        })
+
+    contradiction = _guidance_scale_contradicts_period(
+        guided_amount, period_type, company_facts)
+    if contradiction:
+        claimed = period_type or "an unspecified period"
+        reject("The guided revenue level was read as covering {}, but {}. No growth "
+               "assumption is derived from it.".format(claimed, contradiction),
+               sem.SemanticFact(metric_id=sem.MetricIdentity.REVENUE,
+                                period_frequency=sem.PeriodFrequency.TTM,
+                                flow_or_instant=sem.FlowOrInstant.FLOW,
+                                definition_id="reported_ttm_revenue"))
         return
 
-    if entry.get("period_type") != "quarter":
+    if period_type == "annual":
+        ttm = fr.build_ttm(company_facts, "revenue")
+        if not (ttm.ok and ttm.value):
+            return
+        base = sem.SemanticFact(
+            metric_id=sem.MetricIdentity.REVENUE, value=ttm.value, units="currency",
+            accounting_basis=sem.AccountingBasis.GAAP,
+            period_frequency=sem.PeriodFrequency.TTM,
+            start_date=ttm.period_start, end_date=ttm.period_end,
+            flow_or_instant=sem.FlowOrInstant.FLOW,
+            current_or_historical=sem.CurrentOrHistorical.CURRENT,
+            definition_id="reported_ttm_revenue")
+        verdict = sem.compatible_for(sem.Operation.GROWTH, guided, base)
+        if not verdict.allowed:
+            reject(verdict.reason, base, verdict.code or GUIDANCE_PERIOD_INCOMPATIBLE)
+            return
+        evidence.guidance_low = (guided_amount - ttm.value) / abs(ttm.value)
+        evidence.guidance_high = evidence.guidance_low
+        evidence.guidance_source_metric = gm.GuidanceMetricName.CONSOLIDATED_REVENUE_GROWTH
+        evidence.guidance_period_label = entry.get("fiscal_period")
+        evidence.guidance_period_type = "annual"
+        evidence.guidance_basis = entry.get("basis")
+        evidence.guidance_bound_type = entry.get("bound_type")
+        evidence.guidance_evidence_id = entry.get("evidence_id")
+        evidence.guidance_implied_comparison_period = "{}..{}".format(
+            ttm.period_start, ttm.period_end)
+        return
+
+    if period_type != "quarter":
         return
 
     series = pf_module.discrete_quarters(company_facts, "revenue")
     if len(series.quarters) < 4:
         return
     # The guided quarter is the one AFTER the latest reported quarter, so its
-    # prior-year comparable is four quarters before that — i.e. the quarter
+    # prior-year comparable is four quarters before that -- i.e. the quarter
     # three back from the latest reported one.
-    comparable = series.quarters[-4] if len(series.quarters) >= 4 else None
-    if comparable is None or not comparable.value:
+    comparable = series.quarters[-4]
+    if not comparable.value:
+        return
+    base = sem.SemanticFact(
+        metric_id=sem.MetricIdentity.REVENUE, value=comparable.value, units="currency",
+        accounting_basis=sem.AccountingBasis.GAAP,
+        period_frequency=sem.PeriodFrequency.QUARTER,
+        start_date=comparable.start, end_date=comparable.end,
+        fiscal_quarter=entry.get("fiscal_quarter"),
+        flow_or_instant=sem.FlowOrInstant.FLOW,
+        current_or_historical=sem.CurrentOrHistorical.HISTORICAL,
+        definition_id="reported_quarter_revenue")
+    verdict = sem.compatible_for(sem.Operation.GROWTH, guided, base)
+    if not verdict.allowed:
+        reject(verdict.reason, base, verdict.code or GUIDANCE_PERIOD_INCOMPATIBLE)
         return
     evidence.guidance_implied_next_period_growth = (
         (guided_amount - comparable.value) / abs(comparable.value))
-    evidence.guidance_implied_comparison_period = f"{comparable.start}..{comparable.end}"
+    evidence.guidance_implied_comparison_period = "{}..{}".format(
+        comparable.start, comparable.end)
+
 
 
 # Reference margin against which an ABSOLUTE scenario delta is expressed. A

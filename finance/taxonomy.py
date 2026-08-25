@@ -231,13 +231,38 @@ def reporting_currency_note(company_facts: dict) -> Optional[str]:
     taxonomy = detect_taxonomy(company_facts)
     if not taxonomy:
         return None
+    # Decided from the concepts the VALUATION actually reads, not from a scan
+    # of everything the issuer tags.
+    #
+    # Two earlier versions of this check were fooled. The first counted a
+    # `shares` unit as evidence of usability -- but every filer reports share
+    # counts in `shares` whatever currency its statements use. The second
+    # counted any `USD` unit, and a real euro-reporting issuer carried three:
+    # a foreign-exchange derivative notional, a purchase commitment and a
+    # tax-benefit lapse. None of them is a statement line, and 548 of its
+    # concepts were in euros. Incidental disclosures cannot establish the
+    # currency of the accounts.
+    #
+    # The mapping FOR THIS FRAMEWORK is the list of things the numeric path
+    # tries to read. If none of those is available in US dollars while some
+    # are available in another currency, the statements are not in dollars.
+    # Taken through `concept_map_for` rather than reaching straight for the
+    # us-gaap map, because an IFRS filer tags `Revenue`, not `Revenues`, and
+    # a us-gaap-only list would find nothing to judge and fall silent -- the
+    # same silence this whole check exists to end.
+    wanted = set()
+    for _prefer_latest, concepts in concept_map_for(taxonomy).values():
+        wanted.update(concepts)
+
     currencies = set()
     usable = False
-    for entry in (facts.get(taxonomy) or {}).values():
+    for name, entry in (facts.get(taxonomy) or {}).items():
+        if name not in wanted:
+            continue
         for unit_name, rows in ((entry or {}).get("units") or {}).items():
             if not isinstance(rows, list) or not rows:
                 continue
-            if unit_name in ("USD", "USD/shares", "shares"):
+            if unit_name == "USD":
                 usable = True
             elif len(unit_name) == 3 and unit_name.isalpha():
                 currencies.add(unit_name)

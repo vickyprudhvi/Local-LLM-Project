@@ -435,12 +435,20 @@ def test_compact_synthesis_payload_is_within_budget_for_the_real_cost_fixture(wi
     estimated_tokens = len(payload) // 4
 
     assert estimated_tokens < 20_000, f"hard limit: {estimated_tokens} tokens"
-    # 11_000, not 10_000 -- see test_finance_msft_regression.py's own
-    # test_synthesis_prompt_is_compact_for_the_msft_fixture for why (Phase 9's
-    # five new leverage-context fundamental_metrics). COST itself stays
-    # comfortably under 10k even after that addition; the ceiling still
-    # moves up here too so both fixtures are held to the same preferred bar.
-    assert estimated_tokens < 11_000, f"preferred threshold: {estimated_tokens} tokens"
+    # 11_500, not 11_000, and 11_000 not 10_000 before that.
+    #
+    # The earlier move is explained in test_finance_msft_regression.py (Phase
+    # 9's five leverage-context fundamental_metrics). Phase H.11 adds roughly
+    # 300 more tokens for three things a consumer cannot work without: the
+    # guidance COVERAGE verdicts (which row is current, which the valuation
+    # still lacks, and why), the growth BRIDGE summary, and the current-date
+    # balance-sheet ratios that replaced the stale annual ones in the
+    # Snapshot. Everything not load-bearing was trimmed first -- the twelve-row
+    # guidance table, the bridge's source excerpts, and the ratio components
+    # themselves all stay in the full facts and out of this payload.
+    #
+    # The 20k hard limit above is unchanged and remains the real guard.
+    assert estimated_tokens < 11_500, f"preferred threshold: {estimated_tokens} tokens"
     # A generous regression ceiling on the REAL fixture -- catches a future
     # regression without being brittle to the exact byte count.
     assert estimated_tokens < 12_000, f"COST-specific regression ceiling: {estimated_tokens} tokens"

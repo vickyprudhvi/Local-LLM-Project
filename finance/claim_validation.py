@@ -288,6 +288,35 @@ _DCF_TERMINOLOGY_PATTERNS = [
      "unsupported DCF terminology (fair-value target -- use 'modeled value')"),
 ]
 
+# Phase H.10, section 26. A technical indicator is a summary of price
+# history. Saying what one HISTORICALLY PREDICTS attributes a forecasting
+# record to it that this system has never measured and holds no data to
+# support -- there is no backtest here, no base rate, no study. The
+# descriptive form of the same sentence is fine and is what the roles are
+# asked for: "RSI is above 70, indicating relatively elevated recent
+# momentum" states what was measured.
+#
+# Deliberately narrow. It matches a claim about what an indicator PREDICTS
+# or what TYPICALLY FOLLOWS one, not the ordinary vocabulary of technical
+# description ("overbought", "support", "crossover"), which is correct and
+# carries no forecast.
+_TECHNICAL_PREDICTION_PATTERNS = [
+    (re.compile(r"(?i)\b(?:historically|typically|usually|often|generally)\s+"
+                r"(?:precedes?|predicts?|signals?|leads?\s+to|results?\s+in|"
+                r"indicates?\s+an?\s+(?:imminent|upcoming|likely))\b"),
+     "unsupported predictive claim from a technical indicator (no backtest data exists)"),
+    (re.compile(r"(?i)\b(?:rsi|macd|moving\s+average|golden\s+cross|death\s+cross|"
+                r"crossover|breakout)\b[^.]{0,60}?\b(?:predicts?|forecasts?|"
+                r"signals?\s+an?\s+(?:imminent|impending)|implies?\s+a\s+(?:coming|"
+                r"future))\b"),
+     "technical indicator presented as a forecast rather than a description"),
+    (re.compile(r"(?i)\b(?:suggests?|points?\s+to|indicates?)\s+an?\s+"
+                r"(?:imminent|impending|likely|probable)\s+"
+                r"(?:correction|reversal|rally|breakout|decline|pullback)\b"),
+     "predicted price move stated as an indicator's implication"),
+]
+
+
 _FUTURE_TENSE_TECHNICAL_PATTERNS = [
     (re.compile(r"\bwill\s+(?:reverse|rebound|bounce|rally|correct|break\s?out)\b", re.IGNORECASE),
      "future-tense technical certainty"),
@@ -299,6 +328,7 @@ _FUTURE_TENSE_TECHNICAL_PATTERNS = [
 ]
 
 _ALL_TEXT_PATTERNS = (
+    _TECHNICAL_PREDICTION_PATTERNS +
     _SUPERLATIVE_PATTERNS + _CAUSAL_OVERREACH_PATTERNS
     + _CONSENSUS_LANGUAGE_PATTERNS + _FUTURE_TENSE_TECHNICAL_PATTERNS
     + _DCF_TERMINOLOGY_PATTERNS
@@ -322,6 +352,10 @@ _CLAIM_VALIDATION_RULE_GROUPS = (
     ("CV-3", _CONSENSUS_LANGUAGE_PATTERNS),
     ("CV-4", _FUTURE_TENSE_TECHNICAL_PATTERNS),
     ("CV-5", _DCF_TERMINOLOGY_PATTERNS),
+    # Phase H.10, section 26. Registered as its own group so the ids of every
+    # existing rule stay put -- a renumbered id would corrupt stored
+    # quarantine records and the aggregation that reads them.
+    ("CV-6", _TECHNICAL_PREDICTION_PATTERNS),
 )
 
 

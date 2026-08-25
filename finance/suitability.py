@@ -43,6 +43,7 @@ deterministic model bound.
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
+from finance import business_model as bm
 
 
 class DcfSuitability:
@@ -180,6 +181,7 @@ def assess_dcf_suitability(
         negative_periods: Optional[int] = None,
         total_periods: Optional[int] = None,
         cash_runway_years: Optional[float] = None,
+        business_model: Optional[object] = None,
 ) -> SuitabilityAssessment:
     """Classify whether a DCF describes this company (section 35).
 
@@ -191,6 +193,25 @@ def assess_dcf_suitability(
     basis under every per-share figure.
     """
     assessment = SuitabilityAssessment()
+
+    # -- sections 17-19: can this model represent this business at all? -----
+    #
+    # Checked FIRST because it is not a question of degree. Every other
+    # signal here asks how much confidence a valuation deserves; this one
+    # asks whether the quantity being discounted is the right quantity. A
+    # broker-dealer's operating cash flow is mostly customer money in
+    # transit, so operating cash flow less capital expenditure -- correct
+    # arithmetic, and the input this model discounts -- is not cash the
+    # owners can take out. Discounting it produces a number with no
+    # meaning, which is worse than declining to produce one.
+    if business_model is not None:
+        fcff_status = getattr(business_model, "standard_fcff_suitability", None)
+        if fcff_status == bm.FcffSuitability.NOT_SUITABLE:
+            _signal(assessment, bm.DCF_CASH_FLOW_NOT_STANDARD_FCFF, "blocking",
+                    bm.describe_cash_flow_limitation(business_model))
+        elif fcff_status == bm.FcffSuitability.LIMITED:
+            _signal(assessment, bm.DCF_CASH_FLOW_NOT_STANDARD_FCFF, "material",
+                    bm.describe_cash_flow_limitation(business_model))
 
     # -- section 36: is a bound forecasting? --------------------------------
     if margin_bounds is not None:

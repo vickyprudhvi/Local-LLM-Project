@@ -526,6 +526,29 @@ def _require_valid_stance_when_dcf_invalid(validated: dict, index) -> dict:
     a banned-phrase scan.
     """
     if not _dcf_validation_failed(index):
+        # Phase H.12, section 16. A model that never applied is not a model
+        # that failed. A live insurer's report carried "Valuation view: model
+        # invalid" while its own Valuation section said the standard FCFF
+        # approach does not fit an insurer -- two different claims, and only
+        # the second one true. The state is checked against the evidence, so
+        # this is an objective correction rather than a judgment call.
+        _profile, method_status = _business_model_policy_from_index(index)
+        if (method_status == "VALID_BUT_NOT_APPLICABLE"
+                and validated.get("valuation_view") == "model_invalid"):
+            # CORRECTED deterministically rather than raised. Which of the
+            # two states this run is in is an objective fact read from
+            # `business_model.valuation_method_status`, exactly like the
+            # forced value below -- not a judgment the model could
+            # reasonably get right or wrong. Raising cost a live insurer its
+            # entire final synthesis when the model reproduced the same
+            # value on repair, which is a far worse outcome than the wrong
+            # label it was meant to fix (section 27: the absence of a
+            # valuation must not cost the recommendation).
+            validated = dict(validated)
+            validated["valuation_view"] = "insufficient_data"
+            validated["valuation_view_correction"] = (
+                "The standard discounted-cash-flow model does not apply to this business "
+                "model, so no valuation view was established. The model did not fail.")
         return validated
     validated = dict(validated)
     validated["valuation_view"] = "model_invalid"
@@ -783,6 +806,31 @@ def _validate_claim_fidelity(validated: dict, index) -> dict:
             validated, providers_present_in_index(index), dcf_invalid=_dcf_validation_failed(index))
     )
 
+    # Phase H.12, sections 7/32/33. The business-model decision is enforced on
+    # the stage's own prose. A live insurer's Valuation section said its
+    # operating cash flow less capital expenditure is NOT owner free cash
+    # flow, and its Bull Case then cited "free cash flow of 23.6 billion" as
+    # evidence of cash generation -- a contradiction inside one report,
+    # because nothing carried the first statement forward to the second.
+    #
+    # The verdict comes from the classification and the metric identity, never
+    # from the prose, so a stage cannot argue its way past it (section 33).
+    # Recorded, not raised. Raising killed a live insurer's entire final
+    # synthesis: the stage exhausted its repairs still writing the same
+    # claim, and the report came back with no recommendation at all -- a
+    # worse outcome than the sentence being blocked, and a direct breach of
+    # section 27 (the absence of a valuation must not cost the analysis).
+    #
+    # The structural half of the fix does the real work upstream: the metric
+    # is relabelled in the evidence index and carries its restriction inline,
+    # so a role is far less likely to write the claim in the first place.
+    # This pass catches what still gets through and attaches it to the
+    # output, where readiness and the audit can see it.
+    semantic_findings = _business_model_claim_findings(validated, index)
+    if semantic_findings:
+        validated = dict(validated)
+        validated["business_model_semantic_findings"] = semantic_findings
+
     # Phase H.5, Phase 2: OVERSTATEMENT findings quarantine their field; only
     # FABRICATION (and overstatement on a FAIL-policy field) still fails the
     # stage. The claim underneath a quarantined passage still had to cite a
@@ -931,6 +979,46 @@ def _researcher_prompt(side, evidence_text):
         "catalyst = a specific, evidence-grounded potential future driver."
     )
     return _stage_prompt(role, schema, evidence_text)
+
+
+def _business_model_policy_from_index(index):
+    """The classification and valuation status, read back from the evidence.
+
+    Taken from the index rather than passed down a new parameter chain: the
+    packet is already there, every stage already receives it, and one source
+    means the validator and the roles cannot hold different views of what
+    business this is.
+    """
+    def value(evidence_id):
+        item = (index or {}).get(evidence_id)
+        return getattr(item, "value", None)
+
+    return value("business_model.classification"), value(
+        "business_model.valuation_method_status")
+
+
+def _business_model_claim_findings(validated, index) -> list:
+    """Every business-model semantic violation in one stage's output."""
+    from finance import metric_policy
+
+    profile, valuation_status = _business_model_policy_from_index(index)
+    if not profile:
+        return []
+
+    findings = []
+
+    def walk(node):
+        if isinstance(node, str):
+            findings.extend(metric_policy.validate_claim(node, profile, valuation_status))
+        elif isinstance(node, dict):
+            for item in node.values():
+                walk(item)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                walk(item)
+
+    walk(validated)
+    return findings
 
 
 def _validate_researcher_output(raw, index, side) -> dict:
@@ -1941,6 +2029,21 @@ _CONDITION_METRIC_ALIASES = {
     "sales growth": "revenue_growth",
     "free cash flow margin": "free_cash_flow_margin",
     "fcf margin": "free_cash_flow_margin",
+    # Phase H.11, sections 30-32. The canonical current packet now derives
+    # the balance-sheet ratios and the trailing growth rate, so a condition
+    # written against any of them can be checked against today's actual
+    # value instead of passing unexamined. A live upgrade condition read
+    # "TTM revenue growth above 10%" for an issuer already at 14.8%.
+    "ttm revenue growth": "revenue_growth",
+    "trailing revenue growth": "revenue_growth",
+    "trailing twelve month revenue growth": "revenue_growth",
+    "revenue growth yoy": "revenue_growth",
+    "current ratio": "current_ratio",
+    "debt to equity": "debt_to_equity",
+    "debt-to-equity": "debt_to_equity",
+    "leverage": "debt_to_equity",
+    "net debt to equity": "net_debt_to_equity",
+    "operating cash flow margin": "operating_cash_flow_margin",
 }
 
 

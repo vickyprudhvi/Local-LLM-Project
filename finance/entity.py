@@ -45,6 +45,7 @@ parent/subsidiary relationships are read from filing and provider metadata.
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
+from finance import semantics as sem
 
 # Deterministic guard codes (sections 20-23).
 MARKET_CAP_RECONCILIATION_FAILURE = "MARKET_CAP_RECONCILIATION_FAILURE"
@@ -82,6 +83,11 @@ class ShareCountType:
 
 
 class ReconciliationStatus:
+    # Phase H.10, section 13. Not a failure and not agreement: the two sides
+    # are different measures, so no tolerance applies to the gap between
+    # them. Kept distinct from UNKNOWN, which means the comparison could not
+    # be made -- this one means it should not be.
+    NOT_COMPARABLE = "NOT_COMPARABLE"
     """Section 20."""
 
     RECONCILED = "RECONCILED"
@@ -249,6 +255,29 @@ def economic_shares_outstanding(security: SecurityIdentity) -> Tuple[Optional[fl
                    "stated economic basis")
 
 
+_SHARE_METRIC_IDS = {
+    ShareCountType.CURRENT_OUTSTANDING: sem.MetricIdentity.SHARES_CURRENT_OUTSTANDING,
+    ShareCountType.ECONOMIC_OUTSTANDING: sem.MetricIdentity.SHARES_ECONOMIC_CURRENT,
+    ShareCountType.WEIGHTED_AVERAGE_BASIC: sem.MetricIdentity.SHARES_WEIGHTED_AVERAGE_BASIC,
+    ShareCountType.WEIGHTED_AVERAGE_DILUTED: sem.MetricIdentity.SHARES_WEIGHTED_AVERAGE_DILUTED,
+}
+
+
+def _share_fact(kind: str, value: float) -> sem.SemanticFact:
+    """One share count as a fact that knows which basis it is on."""
+    metric_id = _SHARE_METRIC_IDS.get(kind, sem.MetricIdentity.UNKNOWN)
+    weighted = metric_id in sem.WEIGHTED_AVERAGE_SHARE_IDENTITIES
+    return sem.SemanticFact(
+        metric_id=metric_id, value=value, units="shares",
+        period_frequency=(sem.PeriodFrequency.ANNUAL if weighted
+                          else sem.PeriodFrequency.INSTANT),
+        flow_or_instant=(sem.FlowOrInstant.FLOW if weighted
+                         else sem.FlowOrInstant.INSTANT),
+        current_or_historical=(sem.CurrentOrHistorical.HISTORICAL if weighted
+                               else sem.CurrentOrHistorical.CURRENT),
+        definition_id=kind)
+
+
 def _classify_difference(left: float, right: float) -> Tuple[str, float]:
     if right == 0:
         return ReconciliationStatus.UNKNOWN, 0.0
@@ -339,8 +368,29 @@ def reconcile_share_basis(counts: ShareCountSet, security: SecurityIdentity,
         return result
 
     # -- pairwise comparison, for the record --------------------------------
+    #
+    # Phase H.10, sections 13 and 15. A difference is only evidence of a
+    # problem when both sides were supposed to be the same number. A current
+    # outstanding count and a weighted-average diluted count differ BY
+    # CONSTRUCTION -- one counts the shares in issue at a moment, the other
+    # averages them across a reporting period -- and a live analysis reported
+    # that difference as a share-count conflict, sending a reader after a bug
+    # that did not exist. Compatibility is now decided before the subtraction,
+    # not after it.
     for index, (kind, value) in enumerate(candidates):
         for other_kind, other_value in candidates[index + 1:]:
+            verdict = sem.compatible_for(
+                sem.Operation.RECONCILE,
+                _share_fact(kind, value), _share_fact(other_kind, other_value))
+            if not verdict.allowed:
+                result.comparisons.append({
+                    "left": kind, "left_value": value,
+                    "right": other_kind, "right_value": other_value,
+                    "gap": None,
+                    "status": ReconciliationStatus.NOT_COMPARABLE,
+                    "reason": verdict.reason,
+                })
+                continue
             status, gap = _classify_difference(value, other_value)
             result.comparisons.append({
                 "left": kind, "left_value": value,

@@ -800,11 +800,19 @@ def _to_number(text: str) -> Optional[float]:
 _QUARTER_WORDS = {"first": 1, "second": 2, "third": 3, "fourth": 4,
                   "1st": 1, "2nd": 2, "3rd": 3, "4th": 4}
 
+# "FY2026" is a fiscal-year TOKEN, not a statement that a figure is annual.
+# A live release headed "<company>'s third quarter FY2026 targets" was read as
+# full-year guidance because this pattern accepted "fiscal 2026" but not
+# "FY2026": the quarter alternative failed, and the ANNUAL pattern below then
+# matched the bare FY token. The quarter qualifier is what decides the
+# frequency, so it is now recognised ahead of every spelling of the year that
+# can follow it.
+_FY_YEAR = r"(?:of\s+)?(?:fiscal\s+(?:year\s+)?|FY\s*)?(20\d{2})"
 _QUARTER_PERIOD_RE = re.compile(
     r"(?i)\b(first|second|third|fourth|1st|2nd|3rd|4th)\s+quarter\s+"
-    r"(?:of\s+)?(?:fiscal\s+(?:year\s+)?)?(20\d{2})\b"
-    r"|\b(?:fiscal\s+)?Q([1-4])\s*(?:of\s+)?(?:fiscal\s+(?:year\s+)?)?(20\d{2})\b"
-    r"|\bQ([1-4])\s*FY\s*(20\d{2}|\d{2})\b")
+    + _FY_YEAR
+    + r"|\b(?:fiscal\s+)?Q([1-4])\s*" + _FY_YEAR
+    + r"|\bQ([1-4])\s*FY\s*(20\d{2}|\d{2})\b")
 
 # A bare year immediately attached to a guidance/outlook word names the
 # TARGET fiscal year: "increasing 2026 guidance with estimated reported sales
@@ -1691,6 +1699,193 @@ VALUATION_RELEVANT_METRICS = (
 # Groups whose absence most changes a forecast. Revenue and profitability are
 # the two the DCF cannot proceed without some view of.
 _CORE_GROUP_INDEXES = (0, 1)
+
+
+# ---------------------------------------------------------------------------
+# Phase H.11, sections 11-15 — coverage is per METRIC, not one verdict
+# ---------------------------------------------------------------------------
+
+class GuidanceMetricStatus:
+    """What is known about ONE guided metric."""
+
+    CURRENT = "CURRENT"
+    SUPERSEDED = "SUPERSEDED"
+    WITHDRAWN = "WITHDRAWN"
+    UNAVAILABLE = "UNAVAILABLE"
+    NOT_SEARCHED = "NOT_SEARCHED"
+    INCOMPATIBLE = "INCOMPATIBLE"
+
+    ALL = (CURRENT, SUPERSEDED, WITHDRAWN, UNAVAILABLE, NOT_SEARCHED, INCOMPATIBLE)
+
+
+class GuidanceAbsence:
+    """Section 14: four different reasons a guidance figure is missing.
+
+    Collapsing them into "none extracted" makes an issuer that guides capital
+    expenditure but not revenue indistinguishable from one that guides
+    nothing, and both indistinguishable from a parser that failed. They call
+    for different responses, so they are different values.
+    """
+
+    NO_GUIDANCE_EXISTS = "NO_GUIDANCE_EXISTS"
+    NO_REVENUE_GUIDANCE = "NO_REVENUE_GUIDANCE"
+    GUIDANCE_EXTRACTION_FAILED = "GUIDANCE_EXTRACTION_FAILED"
+    PARTIAL_GUIDANCE_ONLY = "PARTIAL_GUIDANCE_ONLY"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+# The per-metric rows of the matrix, each naming the guidance metric names
+# that satisfy it. Rows are the vocabulary a reader and the assumption
+# builder both think in; the names are the extractor's vocabulary.
+COVERAGE_ROWS = (
+    ("revenue", (GuidanceMetricName.CONSOLIDATED_REVENUE,)),
+    ("revenue_growth", (GuidanceMetricName.CONSOLIDATED_REVENUE_GROWTH,
+                        GuidanceMetricName.SERVICE_REVENUE_GROWTH,
+                        GuidanceMetricName.PRODUCT_REVENUE_GROWTH)),
+    ("gross_margin", (GuidanceMetricName.GROSS_MARGIN,
+                      GuidanceMetricName.ADJUSTED_GROSS_MARGIN)),
+    ("operating_margin", (GuidanceMetricName.OPERATING_MARGIN,
+                          GuidanceMetricName.ADJUSTED_OPERATING_MARGIN)),
+    ("operating_expenses", (GuidanceMetricName.OPERATING_EXPENSES,
+                            GuidanceMetricName.ADJUSTED_OPERATING_EXPENSES)),
+    ("eps", (GuidanceMetricName.EPS, GuidanceMetricName.ADJUSTED_EPS)),
+    ("tax_rate", (GuidanceMetricName.TAX_RATE,)),
+    ("capex", (GuidanceMetricName.CAPEX,)),
+    ("operating_cash_flow", (GuidanceMetricName.OPERATING_CASH_FLOW,)),
+    ("free_cash_flow", (GuidanceMetricName.FREE_CASH_FLOW,)),
+    ("shares", (GuidanceMetricName.SHARE_COUNT,)),
+    ("leverage", (GuidanceMetricName.NET_LEVERAGE_TARGET,)),
+)
+
+# Section 13: the rows a DCF assumption actually consumes. Earnings per share
+# is real guidance and does not feed this model's inputs, so it is scored in
+# the overall matrix and not here.
+DCF_RELEVANT_ROWS = ("revenue", "revenue_growth", "gross_margin", "operating_margin",
+                     "tax_rate", "capex", "operating_cash_flow", "free_cash_flow")
+
+
+class DcfGuidanceCoverage:
+    COMPLETE_FOR_DCF_RELEVANT_METRICS = "COMPLETE_FOR_DCF_RELEVANT_METRICS"
+    PARTIAL = "PARTIAL"
+    MINIMAL = "MINIMAL"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+def _row_status(present_names, metrics, superseded_names) -> str:
+    """The status of one row, from what the extractor actually produced."""
+    for name in present_names:
+        entry = (metrics or {}).get(name)
+        if isinstance(entry, dict) and entry.get("low") is not None:
+            status = (entry.get("status") or "CURRENT").upper()
+            if status in GuidanceMetricStatus.ALL:
+                return status
+            return GuidanceMetricStatus.CURRENT
+    if any(name in (superseded_names or set()) for name in present_names):
+        return GuidanceMetricStatus.SUPERSEDED
+    return GuidanceMetricStatus.UNAVAILABLE
+
+
+def build_guidance_matrix(metrics, superseded=None, releases_examined=None,
+                          extraction_failed=False) -> dict:
+    """Sections 11-14: a status for every row, and two summary verdicts.
+
+    The live failure this replaces: a report said "management guidance:
+    unavailable" for an issuer that had published current capital-expenditure
+    guidance. One missing row -- revenue -- had been allowed to speak for the
+    whole matrix, and the assumption builder discarded the capital-expenditure
+    figure along with it.
+
+    `releases_examined` separates "we looked and found nothing" from "we never
+    looked", which is the difference between UNAVAILABLE and NOT_SEARCHED.
+    """
+    metrics = metrics or {}
+    superseded_names = {entry.get("name") for entry in (superseded or [])
+                        if isinstance(entry, dict)}
+
+    never_searched = releases_examined is None
+    rows = {}
+    for row, names in COVERAGE_ROWS:
+        if never_searched:
+            rows[row] = GuidanceMetricStatus.NOT_SEARCHED
+        else:
+            rows[row] = _row_status(names, metrics, superseded_names)
+
+    current_rows = [row for row, status in rows.items()
+                    if status == GuidanceMetricStatus.CURRENT]
+    dcf_current = [row for row in DCF_RELEVANT_ROWS
+                   if rows.get(row) == GuidanceMetricStatus.CURRENT]
+    dcf_missing = [row for row in DCF_RELEVANT_ROWS
+                   if rows.get(row) != GuidanceMetricStatus.CURRENT]
+
+    if never_searched:
+        overall = GuidanceCoverage.UNAVAILABLE
+        dcf_status = DcfGuidanceCoverage.UNAVAILABLE
+        absence = GuidanceAbsence.NOT_APPLICABLE
+    elif extraction_failed and not current_rows:
+        overall = GuidanceCoverage.UNAVAILABLE
+        dcf_status = DcfGuidanceCoverage.UNAVAILABLE
+        absence = GuidanceAbsence.GUIDANCE_EXTRACTION_FAILED
+    elif not current_rows:
+        overall = GuidanceCoverage.UNAVAILABLE
+        dcf_status = DcfGuidanceCoverage.UNAVAILABLE
+        absence = GuidanceAbsence.NO_GUIDANCE_EXISTS
+    else:
+        overall = (GuidanceCoverage.COMPLETE_FOR_RELEVANT_METRICS if not dcf_missing
+                   else GuidanceCoverage.PARTIAL)
+        if not dcf_missing:
+            dcf_status = DcfGuidanceCoverage.COMPLETE_FOR_DCF_RELEVANT_METRICS
+        elif dcf_current:
+            dcf_status = DcfGuidanceCoverage.PARTIAL
+        else:
+            dcf_status = DcfGuidanceCoverage.MINIMAL
+        # Section 14: partial guidance that happens to exclude revenue is
+        # named for what it is, so nothing downstream reports it as absence.
+        if rows.get("revenue") != GuidanceMetricStatus.CURRENT \
+                and rows.get("revenue_growth") != GuidanceMetricStatus.CURRENT:
+            absence = GuidanceAbsence.NO_REVENUE_GUIDANCE
+        elif dcf_missing:
+            absence = GuidanceAbsence.PARTIAL_GUIDANCE_ONLY
+        else:
+            absence = GuidanceAbsence.NOT_APPLICABLE
+
+    return {
+        "rows": rows,
+        "guidance_coverage_status": overall,
+        "dcf_guidance_coverage": dcf_status,
+        "absence_reason": absence,
+        "current_rows": sorted(current_rows),
+        "dcf_rows_current": list(dcf_current),
+        "dcf_rows_missing": list(dcf_missing),
+        "releases_examined": releases_examined,
+    }
+
+
+def guidance_summary_line(matrix) -> str:
+    """One sentence for the compact report (section 12).
+
+    Never renders "unavailable" while a row is CURRENT -- that claim is the
+    thing this whole section exists to stop.
+    """
+    if not matrix:
+        return "no guidance assessment was made"
+    status = matrix.get("guidance_coverage_status")
+    current = matrix.get("current_rows") or []
+    if status == GuidanceCoverage.UNAVAILABLE:
+        reason = matrix.get("absence_reason")
+        if reason == GuidanceAbsence.GUIDANCE_EXTRACTION_FAILED:
+            return ("guidance could not be extracted from the filings examined (an extraction "
+                    "failure, not a statement that none was issued)")
+        if reason == GuidanceAbsence.NOT_APPLICABLE:
+            return "guidance was not searched for in this run"
+        return "no current guidance was found in the earnings releases examined"
+    covered = ", ".join(current)
+    missing = ", ".join(matrix.get("dcf_rows_missing") or [])
+    line = f"partial — current guidance for {covered}"
+    if status == GuidanceCoverage.COMPLETE_FOR_RELEVANT_METRICS:
+        line = f"complete for the metrics this valuation uses — {covered}"
+    elif missing:
+        line += f"; no current guidance for {missing}"
+    return line
 
 
 def assess_guidance_coverage(metrics) -> dict:

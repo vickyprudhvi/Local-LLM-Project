@@ -37,8 +37,8 @@ H3_STRING = ("If you do not currently hold a position: AVOID. "
 
 def test_every_pattern_has_a_stable_id_and_a_severity():
     # 13 original + 3 added by Phase 4 (addressing-based fabrication).
-    assert len(cp.RULES) == 16
-    assert len(cv.RULES) == 34
+    assert len(cp.RULES) == 21
+    assert len(cv.RULES) == 37
     for rule in list(cp.RULES) + list(cv.RULES):
         assert rule.rule_id
         assert rule.severity in cp.Severity.ALL
@@ -54,7 +54,9 @@ def test_the_fabrication_set_is_exactly_the_information_lacking_rules():
     """The split the whole rework turns on. Fabrication guards sentences with
     no true version -- the system cannot know the reader's capital, or
     whether they hold anything. Phase 4 added three that ban the ADDRESSING
-    rather than a topic."""
+    rather than a topic; Phase H.10 added five that ban an ASSUMED POSITION,
+    which is the same missing information reached through the third person
+    ("investors should continue holding") rather than the second."""
     fabrication = {r.label for r in cp.RULES if r.severity == cp.Severity.FABRICATION}
     assert fabrication == {
         # topic bans (original)
@@ -64,6 +66,12 @@ def test_the_fabrication_set_is_exactly_the_information_lacking_rules():
         # addressing bans (Phase 4)
         "reader-addressed second person", "reader-directed action",
         "bare trading imperative",
+        # assumed-position bans (Phase H.10, section 35)
+        "assumes the reader holds a position (continue holding)",
+        "assumes the reader holds a position (maintain the position)",
+        "assumes the reader holds a position (retain the position)",
+        "directs an assumed existing holder",
+        "directs a change to an assumed existing position",
     }
     assert all(r.severity == cp.Severity.OVERSTATEMENT for r in cv.RULES)
 
@@ -71,9 +79,15 @@ def test_the_fabrication_set_is_exactly_the_information_lacking_rules():
 def test_the_phase_four_addressing_rules_are_prose_only():
     """Invariant: `recommendation` is an enum whose members include `buy`,
     `hold`, `sell` and `avoid` -- bare imperative verbs. A rule applied to
-    every string would make every real recommendation cascade-fatal."""
+    every string would make every real recommendation cascade-fatal.
+
+    The Phase H.10 assumed-position rules are prose-only for exactly the
+    same reason: the enum's own HOLD member must stay legal, and only the
+    sentences ABOUT holding are the problem.
+    """
     prose_only = {r.rule_id for r in cp.RULES if r.prose_only}
-    assert prose_only == {"CP-014", "CP-015", "CP-016"}
+    assert prose_only == {"CP-014", "CP-015", "CP-016",
+                          "CP-017", "CP-018", "CP-019", "CP-020", "CP-021"}
 
 
 def test_the_rule_table_fails_loudly_if_it_drifts_from_the_pattern_list():

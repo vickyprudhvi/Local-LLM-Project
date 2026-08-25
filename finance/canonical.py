@@ -43,9 +43,15 @@ Nothing here is issuer-specific.
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
+from finance import growth as growth_module
 
 CANONICAL_CURRENT_EVIDENCE_CONFLICT = "CANONICAL_CURRENT_EVIDENCE_CONFLICT"
 TTM_BASE_PERIOD_MISMATCH = "TTM_BASE_PERIOD_MISMATCH"
+
+# Phase H.11, section 39.
+DERIVED_METRIC_STALE_SOURCE = "DERIVED_METRIC_STALE_SOURCE"
+DERIVED_RATIO_PERIOD_MISMATCH = "DERIVED_RATIO_PERIOD_MISMATCH"
+CURRENT_GROWTH_USED_HISTORICAL_PERIOD = "CURRENT_GROWTH_USED_HISTORICAL_PERIOD"
 
 # How far two supposedly-canonical values may differ before the difference is
 # a conflict rather than rounding.
@@ -75,6 +81,15 @@ class CanonicalMetric:
     evidence_id: str = ""
     freshness_status: Optional[str] = None
     validation_status: Optional[str] = None
+    # Phase H.11, sections 1-2 and 37. A derived figure is only as current as
+    # the facts underneath it, and a bare float cannot say what those were.
+    # `derivation_formula` states how the value was produced and
+    # `source_metrics` names the canonical inputs, which together form the
+    # lightweight derivation graph section 37 asks for: current_ratio ->
+    # current_assets@date, current_liabilities@date.
+    derivation_formula: str = ""
+    source_metrics: tuple = ()
+    source_periods: tuple = ()
 
     def to_dict(self) -> dict:
         return {
@@ -84,6 +99,9 @@ class CanonicalMetric:
             "evidence_id": self.evidence_id,
             "freshness_status": self.freshness_status,
             "validation_status": self.validation_status,
+            "derivation_formula": self.derivation_formula,
+            "source_metrics": list(self.source_metrics),
+            "source_periods": list(self.source_periods),
         }
 
 
@@ -93,6 +111,9 @@ class CanonicalFinancialEvidence:
 
     current: Dict[str, CanonicalMetric] = field(default_factory=dict)
     historical: Dict[str, CanonicalMetric] = field(default_factory=dict)
+    # Which growth measure filled the current slot, and how to name it.
+    current_growth_kind: Optional[str] = None
+    current_growth_label: Optional[str] = None
     base_period: Optional[str] = None
     base_period_aligned: bool = True
     findings: List[dict] = field(default_factory=list)
@@ -108,6 +129,8 @@ class CanonicalFinancialEvidence:
             "historical": {k: v.to_dict() for k, v in self.historical.items()},
             "base_period": self.base_period,
             "base_period_aligned": self.base_period_aligned,
+            "current_growth_kind": self.current_growth_kind,
+            "current_growth_label": self.current_growth_label,
             "findings": [dict(f) for f in self.findings],
             "warnings": list(self.warnings),
         }
@@ -148,6 +171,32 @@ _BASE_PERIOD_METRICS = ("revenue", "operating_income", "net_income",
 # (canonical key, numerator flow, denominator flow, definition) for the
 # margins section 8 requires to be DERIVED from current components rather
 # than read from a stale annual statement.
+# (canonical key, numerator, denominator, definition) for the balance-sheet
+# ratios of sections 7-9. Every one is computed from components carrying the
+# SAME instant date; a numerator from one date over a denominator from
+# another is not a ratio of anything.
+#
+# The live failure: a report stated a balance-sheet date of the latest
+# quarter and a current ratio of 5.92 taken from the prior fiscal year, while
+# that quarter's own current assets and liabilities -- both present, both
+# already selected -- gave 4.78. The annual ratio was not wrong; it was an
+# answer to a question nobody asked.
+_DERIVED_INSTANT_RATIOS = (
+    ("current_ratio", "current_assets", "current_liabilities",
+     "current assets divided by current liabilities at the same balance-sheet date"),
+    ("debt_to_equity", "total_debt", "stockholders_equity",
+     "total debt divided by shareholders' equity at the same balance-sheet date"),
+    ("net_debt_to_equity", "net_debt", "stockholders_equity",
+     "net debt divided by shareholders' equity at the same balance-sheet date"),
+    ("cash_to_debt", "cash_and_cash_equivalents", "total_debt",
+     "cash and equivalents divided by total debt at the same balance-sheet date"),
+)
+
+# A denominator at or below this magnitude makes the ratio meaningless rather
+# than large -- the existing `not_meaningful` treatment for zero or negative
+# equity, applied at the point the ratio is derived instead of after.
+_RATIO_DENOMINATOR_FLOOR = 0.0
+
 _DERIVED_MARGINS = (
     ("operating_margin", "operating_income", "revenue",
      "operating income divided by revenue, both over the same trailing window"),
@@ -161,8 +210,8 @@ _DERIVED_MARGINS = (
 
 
 def build_canonical_evidence(state, historical_metrics: Optional[dict] = None,
-                             fcf_definition: str = "simple_fcf"
-                             ) -> CanonicalFinancialEvidence:
+                             fcf_definition: str = "simple_fcf",
+                             growth_set=None) -> CanonicalFinancialEvidence:
     """Assemble the canonical packet from an already-validated state.
 
     Reads only `CurrentFinancialState`, which has already decided which
@@ -241,7 +290,10 @@ def build_canonical_evidence(state, historical_metrics: Optional[dict] = None,
             period_type=PeriodKind.DERIVED, definition=definition,
             accounting_basis=top.accounting_basis, source=top.source,
             evidence_id=f"current.derived.{key}",
-            validation_status=top.validation_status)
+            validation_status=top.validation_status,
+            derivation_formula=f"{numerator} / {denominator}",
+            source_metrics=(numerator, denominator),
+            source_periods=(top.period, bottom.period))
 
     # -- current balance-sheet points --------------------------------------
     for name in ("cash_and_cash_equivalents", "short_term_investments", "long_term_debt",
@@ -272,6 +324,93 @@ def build_canonical_evidence(state, historical_metrics: Optional[dict] = None,
             period=getattr(state, "financial_as_of", None), period_type=PeriodKind.INSTANT,
             definition=f"net debt under the {policy!r} policy",
             evidence_id="current.instant.net_debt")
+
+    # -- sections 7-9: ratios derived from ONE balance-sheet date ----------
+    #
+    # Computed here, from the same current components every other current
+    # figure comes from, so the Snapshot has a current ratio to show and
+    # never has to fall back on the annual one. A component pair that does
+    # not share an instant is refused rather than divided.
+    for key, numerator, denominator, definition in _DERIVED_INSTANT_RATIOS:
+        top = evidence.current.get(numerator)
+        bottom = evidence.current.get(denominator)
+        if top is None or bottom is None or top.value is None or bottom.value is None:
+            continue
+        if top.period != bottom.period:
+            evidence.findings.append(_finding(
+                DERIVED_RATIO_PERIOD_MISMATCH, "warning",
+                f"{key} was not derived: {numerator} is measured at {top.period} and "
+                f"{denominator} at {bottom.period}. A numerator from one date over a "
+                "denominator from another is not a ratio of anything.",
+                metric=key, numerator_period=top.period, denominator_period=bottom.period))
+            continue
+        if bottom.value <= _RATIO_DENOMINATOR_FLOOR:
+            # Zero or negative equity, or no debt at all. The existing
+            # `not_meaningful` treatment applies; deriving a number here
+            # would only give a later stage something false to quote.
+            continue
+        evidence.current[key] = CanonicalMetric(
+            key=key, value=top.value / bottom.value, period=top.period,
+            period_type=PeriodKind.DERIVED, definition=definition,
+            accounting_basis=top.accounting_basis, source=top.source,
+            evidence_id=f"current.instant.{key}",
+            freshness_status=top.freshness_status,
+            derivation_formula=f"{numerator} / {denominator}",
+            source_metrics=(numerator, denominator),
+            source_periods=(top.period, bottom.period))
+
+    # -- sections 3-6: the growth family, each member under its own id -----
+    #
+    # `revenue_growth` as a single name is what let last fiscal year's rate
+    # be displayed under a heading that said trailing twelve months. The
+    # members are published separately and the CURRENT one is marked, so a
+    # consumer asking for current growth cannot receive a historical rate by
+    # default.
+    if growth_set is not None:
+        for kind, growth in (growth_set.metrics or {}).items():
+            if growth.value is None:
+                continue
+            historical = growth.evidence_id.startswith("historical.")
+            metric = CanonicalMetric(
+                key=f"{growth.metric}_growth_{kind.lower()}", value=growth.value,
+                period=growth.current_period,
+                period_type=PeriodKind.DERIVED, definition=growth.definition,
+                evidence_id=growth.evidence_id,
+                validation_status=growth.validation_status,
+                derivation_formula=(f"{growth.metric}({growth.current_period}) / "
+                                    f"{growth.metric}({growth.comparison_period}) - 1"),
+                source_metrics=(growth.metric,),
+                source_periods=tuple(x for x in (growth.current_period,
+                                                 growth.comparison_period) if x))
+            bucket = evidence.historical if historical else evidence.current
+            bucket[metric.key] = metric
+
+        current_growth = growth_set.current
+        if current_growth is not None and current_growth.value is not None:
+            # The one a Snapshot should show, carrying the label that says
+            # which period it covers.
+            evidence.current["revenue_growth"] = CanonicalMetric(
+                key="revenue_growth", value=current_growth.value,
+                period=current_growth.current_period, period_type=PeriodKind.DERIVED,
+                definition=f"{current_growth.definition} ({current_growth.label})",
+                evidence_id=current_growth.evidence_id,
+                validation_status=current_growth.validation_status,
+                derivation_formula=(f"{current_growth.metric}"
+                                    f"({current_growth.current_period}) / "
+                                    f"{current_growth.metric}"
+                                    f"({current_growth.comparison_period}) - 1"),
+                source_metrics=(current_growth.metric,),
+                source_periods=tuple(x for x in (current_growth.current_period,
+                                                 current_growth.comparison_period) if x))
+            evidence.current_growth_kind = current_growth.kind
+            evidence.current_growth_label = current_growth.label
+            if current_growth.kind == growth_module.GrowthKind.FY_YOY:
+                evidence.findings.append(_finding(
+                    CURRENT_GROWTH_USED_HISTORICAL_PERIOD, "info",
+                    "No trailing-twelve-month, year-to-date or quarterly growth rate could be "
+                    "built for this issuer, so the current growth figure is the last fiscal "
+                    "year's change. It is labelled as such wherever it appears.",
+                    kind=current_growth.kind))
 
     # -- historical, in its OWN namespace ----------------------------------
     for name, entry in (historical_metrics or {}).items():

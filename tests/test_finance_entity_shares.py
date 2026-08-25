@@ -192,14 +192,26 @@ def test_no_share_count_at_all_is_unknown_rather_than_an_error():
 
 
 def test_pairwise_comparisons_are_recorded_even_when_one_reconciles():
+    """Phase H.10 changed what this comparison MEANS.
+
+    It used to assert that a current outstanding count and a weighted-average
+    diluted count differing by 40% produced MATERIAL_DIFFERENCE. Section 13
+    of the semantics phase says that is wrong: the two are different bases --
+    one counts shares in issue at a moment, the other averages them over a
+    reporting period -- so they are expected to differ and the gap is not a
+    data-quality finding. The comparison is still RECORDED, which is what
+    this test was really protecting; it is now recorded as not comparable.
+    """
     counts = E.ShareCountSet()
     counts.set(E.ShareCountType.CURRENT_OUTSTANDING, 1_000, "provider")
     counts.set(E.ShareCountType.WEIGHTED_AVERAGE_DILUTED, 1_400, "sec")
     result = E.reconcile_share_basis(counts, _security(), price=10.0,
                                      reported_market_cap=10_000)
     assert result.comparisons
-    assert any(c["status"] == E.ReconciliationStatus.MATERIAL_DIFFERENCE
+    assert all(c["status"] == E.ReconciliationStatus.NOT_COMPARABLE
                for c in result.comparisons)
+    assert not any(c["status"] == E.ReconciliationStatus.MATERIAL_DIFFERENCE
+                   for c in result.comparisons)
 
 
 # ---------------------------------------------------------------------------

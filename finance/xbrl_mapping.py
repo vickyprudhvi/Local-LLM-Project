@@ -18,6 +18,7 @@ report-ready statement shape.
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Dict, List, Optional, Tuple
+from finance import taxonomy as taxonomy_module
 
 # Each entry: normalized_field -> (is_instant, candidate concepts in precedence order).
 # is_instant=True means the concept is a POINT-IN-TIME balance (only an `end`
@@ -257,8 +258,23 @@ CONCEPT_MAP: Dict[str, Tuple[bool, Tuple[str, ...]]] = {
     "diluted_eps": (False, ("EarningsPerShareDiluted",)),
 }
 
-ANNUAL_FORMS = ("10-K", "10-K/A")
-QUARTERLY_FORMS = ("10-Q", "10-Q/A")
+# The forms an annual or interim fact may be reported on.
+#
+# These were ("10-K", "10-K/A") and ("10-Q", "10-Q/A") -- domestic forms
+# only. A foreign private issuer files a 20-F (or a 40-F under the Canadian
+# MJDS) and never a 10-K, so for those issuers EVERY annual fact was filtered
+# out here and every downstream flow came back unavailable: no revenue, no
+# balance sheet, no DCF. Phase H.7 added the correct list to
+# `finance/taxonomy.py`, but this module -- the one that actually filters the
+# raw XBRL facts -- kept its own narrower copy and was never pointed at it.
+# Two lists, one of them authoritative, and the wrong one on the live path.
+#
+# Sourced from `finance.taxonomy` so they cannot drift apart again. The
+# duration windows below still reject anything of the wrong length, which is
+# what makes including the semi-annual 6-K safe: a six-month fact does not
+# fit the 45-130 day quarterly window and is dropped on duration, not form.
+ANNUAL_FORMS = tuple(taxonomy_module.ANNUAL_FORMS)
+QUARTERLY_FORMS = tuple(taxonomy_module.INTERIM_FORMS)
 
 
 @dataclass(frozen=True)

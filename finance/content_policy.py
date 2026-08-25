@@ -315,7 +315,51 @@ _CONTENT_POLICY_RULE_SPECS = (
     ("CP-014", "reader-addressed second person", Severity.FABRICATION, True),
     ("CP-015", "reader-directed action", Severity.FABRICATION, True),
     ("CP-016", "bare trading imperative", Severity.FABRICATION, True),
+    # -- Phase H.10, section 35: an ASSUMED POSITION.
+    #
+    # Same fabrication mechanism as CP-006 and CP-014, reached by a different
+    # grammar. "Maintain your position" is caught as second person; "investors
+    # should continue holding" says exactly the same thing in the third and
+    # slipped through. Both invent the same fact -- that the reader owns the
+    # security -- which this system has no data source capable of knowing.
+    # Prose-only, because the `recommendation` enum's own HOLD member is a
+    # bare classification and must stay legal.
+    ("CP-017", "assumes the reader holds a position (continue holding)",
+     Severity.FABRICATION, True),
+    ("CP-018", "assumes the reader holds a position (maintain the position)",
+     Severity.FABRICATION, True),
+    ("CP-019", "assumes the reader holds a position (retain the position)",
+     Severity.FABRICATION, True),
+    ("CP-020", "directs an assumed existing holder", Severity.FABRICATION, True),
+    ("CP-021", "directs a change to an assumed existing position",
+     Severity.FABRICATION, True),
 )
+# Phase H.10, section 35. "HOLD" is a research classification and nothing
+# else. This system has no portfolio data source and cannot know whether the
+# reader owns the security, so any sentence that presumes an existing
+# position is inventing a fact about the reader -- the same class of error as
+# inventing one about the company, and harder to notice because it reads like
+# ordinary advice.
+#
+# The second-person forms ("maintain your position") are already caught by
+# the reader-addressing rule above. These are the THIRD-PERSON ones, which
+# slip past it while making exactly the same assumption.
+_ASSUMED_OWNERSHIP_PATTERNS = [
+    (re.compile(r"(?i)\bcontinue\s+(?:to\s+)?hold(?:ing)?\b"),
+     "assumes the reader holds a position (continue holding)"),
+    (re.compile(r"(?i)\bmaintain(?:ing)?\s+(?:the|their|an?|its)\s+"
+                r"(?:current\s+)?(?:position|holding|stake|exposure)\b"),
+     "assumes the reader holds a position (maintain the position)"),
+    (re.compile(r"(?i)\b(?:keep|retain)\s+(?:the|their)\s+"
+                r"(?:current\s+)?(?:position|holding|shares|stake)\b"),
+     "assumes the reader holds a position (retain the position)"),
+    (re.compile(r"(?i)\b(?:existing|current)\s+(?:holders|shareholders)\s+should\b"),
+     "directs an assumed existing holder"),
+    (re.compile(r"(?i)\b(?:add\s+to|trim|reduce|exit)\s+(?:the|their)\s+position\b"),
+     "directs a change to an assumed existing position"),
+]
+
+_PROHIBITED_PATTERNS = _PROHIBITED_PATTERNS + _ASSUMED_OWNERSHIP_PATTERNS
 
 
 # Leaf field names whose value is a closed enum, an identifier, or a
@@ -482,6 +526,8 @@ def _match_is_negated(text: str, match) -> bool:
     before = text[max(0, match.start() - _NEGATION_LOOKBEHIND):match.start()]
     after = text[match.end():match.end() + _NEGATION_LOOKAHEAD]
     return bool(_NEGATION_CUES.search(before) or _NEGATION_CUES.search(after))
+
+
 
 
 def scan_for_prohibited_directives(text) -> List[str]:

@@ -256,14 +256,67 @@ def build_evidence_index(compact_payload: dict) -> Dict[str, EvidenceItem]:
     # has no id for, so the current values get ids -- each carrying the
     # period it covers, because a figure without its period is exactly the
     # ambiguity this phase exists to remove.
+    # -- Phase H.12, sections 4/29/31: what this business model licenses ---
+    #
+    # The classification used to stop at the DCF gate, so a research role saw
+    # "current.free_cash_flow" for an insurer with nothing attached and used
+    # it exactly as it would for a manufacturer. The packet is indexed as
+    # evidence in its own right, and the cash-flow item carries its
+    # restriction inline -- a role reading the index cannot miss it.
+    packet = compact_payload.get("business_model_evidence") or {}
+    if packet:
+        _add(index, "business_model.classification", "Business model",
+             packet.get("business_model"))
+        # Read from the payload's own top-level key: the compact packet drops
+        # it precisely because it is already there, and taking it from the
+        # packet meant the validator saw nothing and the guard never fired.
+        _add(index, "business_model.valuation_method_status",
+             "Standard FCFF valuation applicability",
+             compact_payload.get("valuation_method_status")
+             or packet.get("valuation_method_status"))
+        if packet.get("primary_metrics"):
+            _add(index, "business_model.primary_metrics",
+                 "Metrics that carry the analysis for this business model",
+                 ", ".join(packet["primary_metrics"]))
+        if packet.get("low_information_metrics"):
+            _add(index, "business_model.low_information_metrics",
+                 "Metrics with low economic information value for this business model",
+                 ", ".join(packet["low_information_metrics"]))
+        for i, restriction in enumerate(packet.get("prohibited_interpretations") or []):
+            index[f"business_model.prohibited.{i}"] = EvidenceItem(
+                evidence_id=f"business_model.prohibited.{i}",
+                label=(f"Prohibited interpretation: {restriction.get('metric_id')} may not "
+                       f"support a {restriction.get('use', '').replace('_', ' ').lower()}"),
+                value=restriction.get("suitability"),
+                evidence_type="business_model_policy",
+                source_type="business_model_policy",
+                derivation=restriction.get("reason"))
+
+    prohibited_metrics = {r.get("metric_id")
+                          for r in (packet.get("prohibited_interpretations") or [])}
+    cash_flow_label = packet.get("cash_flow_label") or "FCF"
+
     canonical = compact_payload.get("canonical_evidence") or {}
     for name, metric in (canonical.get("current") or {}).items():
         if not isinstance(metric, dict) or metric.get("value") is None:
             continue
         period = metric.get("period")
+        # Section 31: a metric whose ordinary name asserts economics this
+        # business model does not support is labelled by what was actually
+        # computed. "Free cash flow" claims owner cash; "cash flow after
+        # capital expenditure" claims only the subtraction that was done.
+        display_name = name.replace("_", " ")
+        restriction_note = ""
+        if name in prohibited_metrics:
+            if name in ("free_cash_flow", "simple_fcf"):
+                display_name = cash_flow_label.lower()
+            restriction_note = (
+                " NOTE: for this business model this figure may be reported but may NOT be "
+                "used to claim cash available to the owners, liquidity strength, or "
+                "valuation support -- see the business_model.prohibited.* items.")
         index[f"current.{name}"] = EvidenceItem(
             evidence_id=f"current.{name}",
-            label=f"Current {name.replace('_', ' ')} ({period})",
+            label=f"Current {display_name} ({period})",
             value=metric["value"],
             evidence_type="canonical_current",
             source_type="canonical_current",
@@ -273,7 +326,7 @@ def build_evidence_index(compact_payload: dict) -> Dict[str, EvidenceItem]:
                 f"{(metric.get('period_type') or 'reported').lower()} basis. This is "
                 "the figure the Snapshot shows; cite it, not the `fundamental.*` "
                 "entry of the same name, whenever a claim is about the company "
-                "today."),
+                "today." + restriction_note),
         )
 
     for name, metric in (compact_payload.get("fundamental_metrics") or {}).items():

@@ -189,6 +189,40 @@ def _finding(code: str, severity: str, message: str, **detail) -> dict:
     return entry
 
 
+def _reported_total_is_inclusive(reported_total, concept, selections) -> bool:
+    """Does this reported figure really cover BOTH current and noncurrent debt?
+
+    `DebtLongtermAndShorttermCombinedAmount` says so in its name and is taken
+    at face value. `LongTermDebt` is the ambiguous one: the us-gaap
+    definition includes current maturities, but the tag is widely used for
+    the noncurrent portion alone. When the issuer reports
+    `LongTermDebtNoncurrent` at the same value, the tag is being used for the
+    part -- and a "total" that equals the noncurrent portion cannot be a
+    total whenever any current debt exists.
+
+    Returns False when inclusiveness cannot be established, because a
+    cross-check that might be comparing a whole against its own part is worth
+    less than no cross-check at all.
+    """
+    if concept == "DebtLongtermAndShorttermCombinedAmount":
+        return True
+    if concept != "LongTermDebt" or reported_total is None:
+        return False
+    noncurrent = None
+    for name in ("long_term_debt", "long_term_debt_noncurrent"):
+        selection = (selections or {}).get(name)
+        value = getattr(selection, "value", None)
+        if value is None and isinstance(selection, dict):
+            value = selection.get("value")
+        if value is not None:
+            noncurrent = float(value)
+            break
+    if noncurrent is None:
+        return False
+    # Equal to the noncurrent portion -> it IS the noncurrent portion.
+    return not _within_tolerance(noncurrent, reported_total)
+
+
 def collect_components(selections: Dict[str, object],
                        reported_total_debt: Optional[float] = None,
                        reported_total_debt_concept: Optional[str] = None,
@@ -264,8 +298,20 @@ def collect_components(selections: Dict[str, object],
     components.total_debt = sum(value for _n, value in known) if known else None
 
     # -- cross-check against a reported total, when the issuer files one ---
+    #
+    # Phase H.10, section 14. `LongTermDebt` is on the inclusive list because
+    # its us-gaap definition covers current maturities too -- but plenty of
+    # filers tag it as the NONCURRENT portion alone, and against those the
+    # component sum was being compared with one of its own components and the
+    # difference reported as a discrepancy. The concept name is no longer
+    # taken as proof of what it contains: when the issuer also reports the
+    # noncurrent portion separately and the two are equal, the tag is the
+    # part, not the whole, and no cross-check is possible.
+    inclusive = _reported_total_is_inclusive(
+        reported_total_debt, reported_total_debt_concept, selections)
     if (components.total_debt is not None and reported_total_debt is not None
-            and reported_total_debt_concept in TOTAL_DEBT_INCLUSIVE_CONCEPTS):
+            and reported_total_debt_concept in TOTAL_DEBT_INCLUSIVE_CONCEPTS
+            and inclusive):
         if not _within_tolerance(components.total_debt, reported_total_debt):
             components.findings.append(_finding(
                 DCF_NET_DEBT_COMPONENT_OVERLAP, "warning",

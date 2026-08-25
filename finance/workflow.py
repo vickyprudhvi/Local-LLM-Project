@@ -33,6 +33,13 @@ from typing import Dict, List, Optional, Tuple
 
 import tools.config as config
 from finance.dcf import AssumptionSourceType, DcfValidationStatus, NetDebtPolicy
+from finance import taxonomy as taxonomy_module
+from finance import metric_policy
+from finance import business_model as business_model_module
+from finance import business_model as bm
+from finance import guidance as guidance_module
+from finance import growth_quality
+from finance import growth as growth_module
 from finance import canonical as canonical_module
 from finance import entity as entity_module
 from finance import suitability as suitability_module
@@ -1501,6 +1508,81 @@ def split_adjusted_sec_share_count(facts: dict) -> Tuple[Optional[float], dict]:
     return raw * factor, detail
 
 
+# Phase H.10, section 30. Every way the valuation can be refused, named.
+# Collapsing these into one "DCF unavailable" string is what made a semantic
+# error indistinguishable from missing data, and left readiness with nothing
+# to rank.
+DCF_PERIOD_FREQUENCY_MISMATCH = "DCF_PERIOD_FREQUENCY_MISMATCH"
+DCF_GUIDANCE_METRIC_MISMATCH = "DCF_GUIDANCE_METRIC_MISMATCH"
+DCF_GUIDANCE_PERIOD_MISMATCH = "DCF_GUIDANCE_PERIOD_MISMATCH"
+DCF_SHARE_BASIS_INVALID = "DCF_SHARE_BASIS_INVALID"
+DCF_DEBT_BASIS_INVALID = "DCF_DEBT_BASIS_INVALID"
+DCF_CASH_FLOW_NOT_STANDARD_FCFF = "DCF_CASH_FLOW_NOT_STANDARD_FCFF"
+DCF_CANONICAL_EVIDENCE_CONFLICT = "DCF_CANONICAL_EVIDENCE_CONFLICT"
+DCF_INPUT_NORMALIZATION_UNRESOLVED = "DCF_INPUT_NORMALIZATION_UNRESOLVED"
+
+
+DCF_REPORTING_CURRENCY_UNSUPPORTED = "DCF_REPORTING_CURRENCY_UNSUPPORTED"
+DCF_TAXONOMY_UNSUPPORTED = "DCF_TAXONOMY_UNSUPPORTED"
+
+
+def _unreadable_statements_reason(facts):
+    """Is the reason for having no inputs that the statements cannot be READ?
+
+    Returns (code, message) or None. Distinguishing this from "nothing was
+    reported" matters because the two call for opposite responses: one is a
+    gap in the data, the other is a limit of this project against data that
+    is complete and present.
+    """
+    company_facts = facts.get("_sec_company_facts")
+    if not company_facts:
+        return None
+    reason = taxonomy_module.unsupported_taxonomy_reason(company_facts)
+    if reason:
+        return DCF_TAXONOMY_UNSUPPORTED, reason
+    reason = taxonomy_module.reporting_currency_note(company_facts)
+    if reason:
+        return DCF_REPORTING_CURRENCY_UNSUPPORTED, reason
+    return None
+
+
+def _business_model_blocks_dcf(facts):
+    """Section 19: refuse the model before building inputs for it.
+
+    Placed at the top of the input builder rather than in the suitability
+    assessment that runs afterwards, because suitability describes a DCF
+    that already exists. By the time it says NOT_SUITABLE the scenario
+    values have been computed, and something downstream will quote them.
+    The only way "do not force a DCF" can be true is for the inputs never to
+    be assembled.
+    """
+    classification = facts.get("_business_model")
+    if classification is None or bm.may_enter_standard_fcff(classification):
+        return None
+    return (DCF_CASH_FLOW_NOT_STANDARD_FCFF,
+            bm.describe_cash_flow_limitation(classification))
+
+
+def _growth_source_texts(sec_extras):
+    """Filed passages already in hand that may state a growth decomposition.
+
+    Reuses what the guidance ingestion already downloaded -- the earnings
+    release excerpts and their source documents. Nothing new is fetched, and
+    no page is scraped: section 18 allows approved filing evidence only, and
+    this is the same text the guidance extractor reads.
+    """
+    texts = []
+    guidance = (sec_extras or {}).get("guidance") or {}
+    for entry in (guidance.get("metrics") or {}).values():
+        if isinstance(entry, dict) and entry.get("source_excerpt"):
+            texts.append({"text": entry["source_excerpt"],
+                          "evidence_id": entry.get("evidence_id")})
+    for excerpt in (guidance.get("release_excerpts") or []):
+        if isinstance(excerpt, str) and excerpt.strip():
+            texts.append({"text": excerpt, "evidence_id": "guidance.release_text"})
+    return texts
+
+
 def _dcf_inputs_from_facts(symbol, facts, forecast_years):
     """Assemble DCF equity-bridge inputs from normalized data (Problem 3).
     Returns None when a REQUIRED input is genuinely unavailable — never a
@@ -1523,7 +1605,28 @@ def _dcf_inputs_from_facts(symbol, facts, forecast_years):
     # plan over. See finance/freshness.py.
     state = facts.get("_current_financial_state")
 
+    # Section 19: the business-model gate runs before anything is assembled.
+    blocked = _business_model_blocks_dcf(facts)
+    if blocked is not None:
+        code, message = blocked
+        facts["dcf_unavailable_code"] = code
+        return None, message
+
+    # An issuer whose statements this project cannot read is a DIFFERENT
+    # situation from one that reported nothing, and saying the second when the
+    # first is true sends a reader looking for missing data that is in fact
+    # present. A euro-reporting issuer files complete accounts; there is
+    # simply no currency conversion here to bring them onto the same scale as
+    # a US-dollar share price. Checked before the "not reported" paths below,
+    # because it EXPLAINS them.
+    unreadable = _unreadable_statements_reason(facts)
+    if unreadable is not None:
+        code, message = unreadable
+        facts["dcf_unavailable_code"] = code
+        return None, message
+
     if not income and state is None:
+        facts["dcf_unavailable_code"] = DCF_INPUT_NORMALIZATION_UNRESOLVED
         return None, "No annual income statement is available."
 
     base_revenue = None
@@ -1919,12 +2022,59 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
         # TTM values both existed under names like `operating_margin` and
         # `free_cash_flow`, and which one a consumer got depended on the code
         # path it happened to take.
+        # Phase H.11, sections 4-6. Growth is measured HERE, once, from the
+        # same company facts everything else current is built from -- rather
+        # than being read out of the annual statements by whichever consumer
+        # asked first.
+        growth_set = growth_module.build_growth_set(
+            company_facts,
+            historical_metrics={
+                name: entry for name, entry in
+                (facts.get("fundamental_metrics") or {}).items()
+                if isinstance(entry, dict)})
+        facts["growth_metrics"] = growth_set.to_dict()
+        facts["_growth_set"] = growth_set
+
+        # Phase H.11, sections 16-27. What the issuer itself attributes the
+        # change to. Read only from filed text already retrieved -- the
+        # earnings-release passages the guidance extractor works over -- so
+        # this adds no fetch, no scrape and no new provider. A rate with no
+        # stated decomposition produces an EMPTY bridge and a note saying so,
+        # never an inferred split.
+        current_growth = growth_set.current
+        bridge = growth_quality.build_growth_bridge(
+            reported_growth=(current_growth.value if current_growth else None),
+            period=(current_growth.current_period if current_growth else None),
+            source_texts=_growth_source_texts(sec_extras),
+            revenue_guidance_present=bool(
+                (facts.get("guidance_matrix") or {}).get("rows", {}).get("revenue")
+                == guidance_module.GuidanceMetricStatus.CURRENT))
+        facts["growth_bridge"] = bridge.to_dict()
+        facts["_growth_bridge"] = bridge
+        for finding in bridge.findings:
+            warnings.append(f"{finding['code']}: {finding['message']}")
+
         canonical = canonical_module.build_canonical_evidence(
             state,
             historical_metrics={
                 name: entry for name, entry in
                 (facts.get("fundamental_metrics") or {}).items()
-                if isinstance(entry, dict)})
+                if isinstance(entry, dict)},
+            growth_set=growth_set)
+        # Phase H.10, sections 16-18. What KIND of business this is, decided
+        # from the SEC's own SIC code and the concepts the issuer actually
+        # reports -- never from a ticker, a name, or a vendor sector label
+        # (the vendor called a live broker-dealer "Technology / Software").
+        # This gates whether operating cash flow less capital expenditure may
+        # be discounted as owner cash flow at all.
+        business = business_model_module.classify_business_model(
+            submissions=(sec_extras or {}).get("submissions"),
+            company_facts=company_facts)
+        facts["business_model"] = business.to_dict()
+        facts["_business_model"] = business
+        for finding in business.findings:
+            warnings.append(f"{finding['code']}: {finding['message']}")
+
         facts["canonical_evidence"] = canonical.to_dict()
         facts["_canonical_evidence"] = canonical
         for finding in canonical.findings:
@@ -1932,6 +2082,13 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
         warnings.extend(canonical.warnings)
         facts["_sec_company_facts"] = company_facts
         facts["management_guidance"] = (sec_extras or {}).get("guidance")
+        # Phase H.11, sections 11-14. Coverage per METRIC. One missing row
+        # (revenue) used to speak for the whole matrix, so an issuer with
+        # current capital-expenditure guidance was reported as having none.
+        facts["guidance_matrix"] = guidance_module.build_guidance_matrix(
+            ((sec_extras or {}).get("guidance") or {}).get("metrics"),
+            superseded=(sec_extras or {}).get("superseded_guidance"),
+            releases_examined=(sec_extras or {}).get("guidance_releases_examined"))
         facts["superseded_guidance"] = (sec_extras or {}).get("superseded_guidance") or []
         # None means ingestion never ran; 0 means it ran and found no
         # earnings release. Collapsing them with `or 0` would erase the
@@ -1955,7 +2112,8 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
     # -- valuation, always through the registered tool --
     dcf_inputs, blocker = _dcf_inputs_from_facts(symbol, facts, forecast_years)
     if dcf_inputs is None:
-        facts["dcf"] = {"available": False, "reason": blocker}
+        facts["dcf"] = {"available": False, "reason": blocker,
+                        "unavailable_code": facts.get("dcf_unavailable_code")}
         warnings.append(f"No DCF valuation was produced: {blocker}")
     else:
         # Share-count provenance (Phase 8 corrective patch): recorded on
@@ -2030,6 +2188,23 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
     # guidance that is actually comparable to it, and detect a configured
     # bound that is constraining corroborated current evidence.
     facts["assumption_conflicts"] = _detect_assumption_conflicts(facts)
+    # Phase H.12, sections 15 and 29. The business-model decision stops being
+    # a DCF-local fact here: the valuation METHOD status and the packet of
+    # what this model does and does not license are built once and handed to
+    # every downstream consumer.
+    dcf_record = facts.get("dcf") or {}
+    facts["valuation_method_status"] = metric_policy.valuation_method_status(
+        facts.get("_business_model"),
+        dcf_available=bool(dcf_record.get("available")),
+        dcf_validation_failed=_dcf_validation_failed(dcf_record))
+    packet = metric_policy.build_relevant_evidence(
+        facts.get("_business_model"),
+        canonical_current=((facts.get("canonical_evidence") or {}).get("current") or {}),
+        guidance_matrix=facts.get("guidance_matrix"),
+        valuation_method_status=facts["valuation_method_status"])
+    facts["business_model_evidence"] = packet.to_dict()
+
+    facts["semantic_rejections"] = _collect_semantic_rejections(facts)
     facts["dcf_suitability"] = _assess_dcf_suitability(facts)
     # Section 48: complete the immutable audit now that the share basis and
     # the valuation are known. One object answers "what period, what basis,
@@ -2238,6 +2413,19 @@ def _research_readiness(plan: AnalysisPlan, facts: dict) -> dict:
     dcf = facts.get("dcf") or {}
     reasons = []
 
+    # Section 33: the root cause first. A refused derivation is the reason a
+    # later assumption is weaker, so it is stated before that weakness is.
+    for rejection in (facts.get("semantic_rejections") or []):
+        reasons.append(
+            f"A required figure could not be derived because two values were semantically "
+            f"incompatible ({rejection.get('left')} against {rejection.get('right')} for "
+            f"{rejection.get('operation')}): {rejection.get('reason')}")
+
+    business = facts.get("business_model") or {}
+    if business.get("standard_fcff_suitability") == "NOT_SUITABLE":
+        for finding in business.get("findings") or []:
+            reasons.append(finding.get("message", ""))
+
     if dcf.get("available") and _dcf_validation_failed(dcf):
         reasons.append(
             f"DCF validation failed ({dcf.get('validation_status')}); valuation-based "
@@ -2333,6 +2521,11 @@ def _detect_assumption_conflicts(facts: dict) -> List[dict]:
 
     from finance import forward_assumptions as fa
 
+    # Phase H.10, sections 31-33. A rejected derivation must be VISIBLE, or
+    # the run looks identical to one where the company simply guided nothing
+    # -- and the reader is left with the downstream symptoms (an assumption
+    # anchored on history, a wider scenario spread) and no explanation. The
+    # rejection is the explanation.
     evidence = fa.collect_growth_evidence(
         state, facts.get("_sec_company_facts"),
         comparability=state.historical_comparability)
@@ -2369,6 +2562,27 @@ def _complete_dcf_input_audit(facts: dict) -> None:
     }
     audit["dcf_suitability"] = (facts.get("dcf_suitability") or {}).get("dcf_suitability")
     facts["dcf_input_audit"] = dict(audit)
+
+
+def _collect_semantic_rejections(facts: dict) -> List[dict]:
+    """Every operation `finance.semantics` refused during this analysis.
+
+    Section 49: the operation, the two identities and the reason -- never a
+    value, so this is safe to log in full. Section 31: these are the ROOT
+    causes. When one appears, the assumption that would have depended on it
+    was never created, so there is no clamp, no bound warning and no
+    valuation gap to explain; the single rejection replaces the cascade of
+    five downstream symptoms the same error used to produce.
+    """
+    state = facts.get("_current_financial_state")
+    company_facts = facts.get("_sec_company_facts")
+    if state is None or not company_facts:
+        return []
+    try:
+        evidence = fa.collect_growth_evidence(state, company_facts)
+    except Exception:  # diagnostics must never take down an analysis
+        return []
+    return list(getattr(evidence, "semantic_rejections", []) or [])
 
 
 def _assess_dcf_suitability(facts: dict) -> dict:
@@ -2446,6 +2660,7 @@ def _assess_dcf_suitability(facts: dict) -> dict:
             equity_value = scenario.get("equity_value")
 
     assessment = suitability_module.assess_dcf_suitability(
+        business_model=facts.get("_business_model"),
         revenue=revenue.value if revenue is not None else None,
         operating_margin=margin,
         free_cash_flow=burn,
@@ -2477,6 +2692,15 @@ def _assess_dcf_suitability(facts: dict) -> dict:
 # number, and a live run led with a historical structural-break note while a
 # current-period profitability default was driving the entire valuation.
 _READINESS_REASON_PRIORITY = (
+    # Phase H.10, section 33. A semantic incompatibility outranks everything
+    # below it, because everything below it may be a CONSEQUENCE of it. The
+    # ordering is the phase's argument in one list: report why the number
+    # could not be built, not what the pipeline did afterwards without it.
+    "semantically incompatible",
+    "cannot be compared",
+    "period it was read as covering",
+    "not owner free cash flow",
+    "different length of time",
     # Phase H.9, section 22. A year-1 assumption that contradicts the
     # company's own guidance, or a model bound that is setting the forecast,
     # bears on the current valuation more than anything below it -- and a
@@ -2993,14 +3217,27 @@ def _pipeline_stage_cascade(pipeline_result) -> Dict[str, str]:
 
 
 def _pipeline_overall_status(cascade: Dict[str, str]) -> str:
-    """COMPLETE (final synthesis reached) / PARTIAL (the pipeline ran but
-    something in the cascade did not complete) / DISABLED (never ran at
-    all — config disabled, or no facts to run it on)."""
+    """What actually happened to the pipeline (Phase H.12, section 21).
+
+    COMPLETE used to mean only that the final synthesis was reached, so a run
+    whose rebuttal stage failed validation three times still reported
+    "Research pipeline: COMPLETE" -- on the same page as the sentence saying
+    the rebuttal had failed. COMPLETE now means what a reader takes it to
+    mean: every required stage completed.
+
+      COMPLETE  every required stage completed
+      DEGRADED  the final synthesis was produced, but at least one required
+                stage did not complete, so it rests on a reduced evidence set
+      PARTIAL   the final synthesis was not reached
+      DISABLED  the pipeline never ran
+    """
     if all(status == "NOT_RUN" for status in cascade.values()):
         return "DISABLED"
-    if cascade.get("final_investment_synthesizer") == "COMPLETE":
-        return "COMPLETE"
-    return "PARTIAL"
+    if cascade.get("final_investment_synthesizer") != "COMPLETE":
+        return "PARTIAL"
+    incomplete = [name for name in _REQUIRED_PIPELINE_STAGES
+                  if cascade.get(name) not in ("COMPLETE", None)]
+    return "DEGRADED" if incomplete else "COMPLETE"
 
 
 def _pipeline_failure_summary(pipeline_result) -> Optional[str]:
@@ -3663,6 +3900,81 @@ def _compact_financial_basis(basis: Optional[dict]) -> Optional[dict]:
     return compact
 
 
+def _compact_business_model_evidence(packet: Optional[dict]) -> Optional[dict]:
+    """The packet at compact size.
+
+    For an ordinary operating company the policy restricts nothing, so the
+    whole packet is a list of empty lists -- omitted entirely rather than
+    carried. For a specialized business the restrictions are what matter, and
+    the long per-restriction reasons live in the evidence index (where a role
+    reads them) rather than being repeated here.
+    """
+    if not packet:
+        return None
+    restrictions = packet.get("prohibited_interpretations") or []
+    # `valuation_method_status` is a top-level key of this payload already;
+    # repeating it here was pure duplication.
+    if not restrictions and not packet.get("low_information_metrics"):
+        return {"business_model": packet.get("business_model")}
+    return {
+        "business_model": packet.get("business_model"),
+        "cash_flow_label": packet.get("cash_flow_label"),
+        "primary_metrics": packet.get("primary_metrics"),
+        "low_information_metrics": packet.get("low_information_metrics"),
+        "prohibited": sorted({(r.get("metric_id"), r.get("use"))
+                              for r in restrictions}),
+        "relevant_guidance_found": packet.get("relevant_guidance_found"),
+        "relevant_guidance_missing": packet.get("relevant_guidance_missing"),
+    }
+
+
+def _compact_guidance_matrix(matrix: Optional[dict]) -> Optional[dict]:
+    """The coverage verdicts, without the full per-row table.
+
+    A consumer needs to know what IS covered, what a valuation still lacks,
+    and why anything is missing. The twelve-row table restates the same facts
+    at four times the size, and this payload has a token budget a real
+    fixture already sits close to.
+    """
+    if not matrix:
+        return None
+    return {
+        "guidance_coverage_status": matrix.get("guidance_coverage_status"),
+        "dcf_guidance_coverage": matrix.get("dcf_guidance_coverage"),
+        "absence_reason": matrix.get("absence_reason"),
+        "current_rows": matrix.get("current_rows"),
+        "dcf_rows_missing": matrix.get("dcf_rows_missing"),
+    }
+
+
+def _compact_growth_bridge(bridge: Optional[dict]) -> Optional[dict]:
+    """The decomposition, without the source excerpts.
+
+    The excerpts are what makes a contribution auditable and they belong in
+    the full facts; what a research role needs is which components were
+    measured, how much of the rate stays unexplained, and that the headline
+    is not automatically organic.
+    """
+    if not bridge:
+        return None
+    measured = {c["type"]: c["contribution"] for c in (bridge.get("components") or [])
+                if c.get("contribution") is not None and not c.get("qualitative_only")}
+    qualitative = [c["type"] for c in (bridge.get("components") or [])
+                   if c.get("qualitative_only")]
+    if not measured and not qualitative and bridge.get("coverage_status") == "NONE":
+        # Nothing was stated. One field saying so beats five saying nothing.
+        return {"coverage_status": "NONE", "reported_growth": bridge.get("reported_growth")}
+    return {
+        "reported_growth": bridge.get("reported_growth"),
+        "period": bridge.get("period"),
+        "coverage_status": bridge.get("coverage_status"),
+        "quality": bridge.get("quality"),
+        "contributions": measured,
+        "qualitative_drivers": qualitative,
+        "unexplained_component": bridge.get("unexplained_component"),
+    }
+
+
 def _compact_canonical_evidence(evidence: Optional[dict]) -> Optional[dict]:
     """The canonical packet at compact size.
 
@@ -3682,7 +3994,16 @@ def _compact_canonical_evidence(evidence: Optional[dict]) -> Optional[dict]:
     quoted = ("revenue", "operating_income", "net_income", "operating_cash_flow",
               "free_cash_flow", "operating_margin", "net_margin",
               "free_cash_flow_margin", "revenue_growth", "net_debt", "total_debt",
-              "cash_and_cash_equivalents", "stockholders_equity")
+              "cash_and_cash_equivalents", "stockholders_equity",
+              # Phase H.11: the balance-sheet ratios the Snapshot renders are
+              # now DERIVED from current components, so they travel with the
+              # rest of the current packet rather than being recomputed from
+              # the annual statements at render time.
+              # The RATIOS travel; their components do not. A consumer that
+              # needs current assets has the ratio derived from them, and the
+              # full facts still carry both -- this payload has a budget a
+              # real fixture already sits close to.
+              "current_ratio", "debt_to_equity")
 
     def trim(bucket):
         return {name: {"value": m.get("value"), "period": m.get("period"),
@@ -3700,6 +4021,10 @@ def _compact_canonical_evidence(evidence: Optional[dict]) -> Optional[dict]:
         "current": trim(evidence.get("current")),
         "base_period": evidence.get("base_period"),
         "base_period_aligned": evidence.get("base_period_aligned"),
+        # Which period the current growth figure covers, so the renderer can
+        # name it instead of implying it is trailing twelve months.
+        "current_growth_kind": evidence.get("current_growth_kind"),
+        "current_growth_label": evidence.get("current_growth_label"),
     }
 
 
@@ -3874,10 +4199,16 @@ def build_compact_synthesis_payload(result: AnalysisResult) -> dict:
         # Section 1/4: the canonical packet, trimmed. Research roles read
         # `current.*` and `historical.*` from here rather than reaching into
         # provider-shaped structures where the same name means two things.
+        "guidance_matrix": _compact_guidance_matrix(facts.get("guidance_matrix")),
+        "business_model_evidence": _compact_business_model_evidence(
+            facts.get("business_model_evidence")),
+        "valuation_method_status": facts.get("valuation_method_status"),
+        "growth_bridge": _compact_growth_bridge(facts.get("growth_bridge")),
         "canonical_evidence": _compact_canonical_evidence(
             facts.get("canonical_evidence")),
         "research_readiness": facts.get("research_readiness"),
         "dcf_suitability": facts.get("dcf_suitability"),
+        "business_model": facts.get("business_model"),
         "data_provenance": bounded_provenance,
         "plan": {
             "mode": result.plan.mode,
@@ -4350,15 +4681,31 @@ def _snapshot_rows(compact: dict) -> List[Tuple[str, str]]:
     add("Market Cap", _fmt_currency(company.get("market_capitalisation"), currency))
     revenue_value, revenue_suffix = flow_row("revenue", latest_income_values.get("revenue"))
     add(f"Revenue{revenue_suffix}", _fmt_currency(revenue_value, currency))
+    # Phase H.11, sections 6 and 10. The label states which period the rate
+    # covers, and the value comes from the canonical current slot rather than
+    # from the annual statements. A live report printed a trailing-twelve-
+    # month revenue base and, two rows below it, the PRIOR FISCAL YEAR's
+    # growth under a bare "Revenue Growth" heading -- both correct, only one
+    # of them describing the period the report claimed.
     growth_metric = canonical_current.get("revenue_growth") or {}
+    growth_label = (compact.get("canonical_evidence") or {}).get("current_growth_label")
     if growth_metric.get("value") is not None:
-        add("Revenue Growth (TTM)", _fmt_pct(growth_metric["value"]))
-    else:
-        add("Revenue Growth", _fmt_pct(fm("revenue_growth_yoy").get("value")))
+        heading = f"Revenue Growth ({growth_label})" if growth_label else "Revenue Growth"
+        add(heading, _fmt_pct(growth_metric["value"]))
+    elif fm("revenue_growth_yoy").get("value") is not None:
+        # Nothing current could be built at all. Say which period this is.
+        add("Revenue Growth (last fiscal year YoY)",
+            _fmt_pct(fm("revenue_growth_yoy").get("value")))
     income_value, income_suffix = flow_row("net_income", latest_income_values.get("net_income"))
     add(f"Net Income{income_suffix}", _fmt_currency(income_value, currency))
     fcf_value, fcf_suffix = flow_row("free_cash_flow", fm("free_cash_flow").get("value"))
-    add(f"FCF{fcf_suffix}", _fmt_currency(fcf_value, currency))
+    # Phase H.12, section 31. "FCF" asserts owner economics. Where the
+    # business model does not support that claim the row is named for the
+    # subtraction that was actually performed, so the Snapshot and the
+    # Valuation section cannot describe one number two different ways.
+    fcf_label = ((compact.get("business_model_evidence") or {}).get("cash_flow_label")
+                 or "FCF")
+    add(f"{fcf_label}{fcf_suffix}", _fmt_currency(fcf_value, currency))
     state_net_debt = ((canonical_current.get("net_debt") or {}).get("value")
                       if canonical_current.get("net_debt")
                       else (compact.get("current_financial_state") or {}).get("net_debt"))
@@ -4374,12 +4721,33 @@ def _snapshot_rows(compact: dict) -> List[Tuple[str, str]]:
         add("Operating Margin (TTM)", _fmt_pct(operating_margin_metric["value"]))
     else:
         add("Operating Margin", _fmt_pct(fm("operating_margin").get("value")))
-    add("Current Ratio", _fmt_ratio(fm("current_ratio").get("value")))
+    # Phase H.11, sections 7-9. Derived from the CURRENT balance sheet's own
+    # components when they exist. A live report stated a balance-sheet date of
+    # the latest quarter and a current ratio of 5.92 carried over from the
+    # prior fiscal year, while that quarter's own current assets and
+    # liabilities -- both already selected -- gave 4.78.
+    def instant_ratio_row(label, key, formatter):
+        current = canonical_current.get(key) or {}
+        if current.get("value") is not None:
+            add(label, formatter(current["value"]))
+            return True
+        return False
+
+    if not instant_ratio_row("Current Ratio", "current_ratio", _fmt_ratio):
+        annual = fm("current_ratio")
+        if annual.get("value") is not None:
+            add("Current Ratio (FY)", _fmt_ratio(annual.get("value")))
 
     for label, metric_name, formatter in (
         ("ROE", "roe_ending_equity", _fmt_pct),
         ("Debt-to-Equity", "debt_to_equity", _fmt_ratio),
     ):
+        # The current-date form wins wherever one could be derived; the
+        # annual entry below stays as the fallback for issuers with no
+        # newer components.
+        if metric_name == "debt_to_equity" and instant_ratio_row(
+                "Debt-to-Equity", "debt_to_equity", _fmt_ratio):
+            continue
         entry = fm(metric_name)
         if entry.get("status") == STATUS_NOT_MEANINGFUL:
             reason = _NOT_MEANINGFUL_REASON_TEXT.get(entry.get("reason"), "not meaningful")
@@ -4513,6 +4881,18 @@ def _valuation_basis_lines(compact: dict) -> List[str]:
         guided = sorted(name for name in metrics)
         if guided:
             lines.append(f"  (guided metrics: {', '.join(guided)})")
+        coverage_matrix = compact.get("guidance_matrix") or {}
+        if coverage_matrix.get("dcf_rows_missing"):
+            lines.append(f"  Coverage: "
+                         f"{guidance_module.guidance_summary_line(coverage_matrix)}")
+    elif (compact.get("guidance_matrix") or {}).get("current_rows"):
+        # Phase H.11, section 12. Partial coverage is not absence. A live
+        # issuer published current capital-expenditure guidance and no
+        # revenue guidance, and the report said guidance was unavailable --
+        # which also cost the assumption builder a figure it could have used.
+        coverage_matrix = compact["guidance_matrix"]
+        lines.append("Management guidance: partial")
+        lines.append(f"  {guidance_module.guidance_summary_line(coverage_matrix)}")
     else:
         # DIS/CASY corrective patch: "unavailable" asserted that the company
         # published no guidance. What is actually known is that the extractor
@@ -4550,6 +4930,45 @@ def _valuation_basis_lines(compact: dict) -> List[str]:
     suitability = (compact.get("dcf_suitability") or {}).get("dcf_suitability")
     if suitability and suitability != "SUITABLE":
         lines.append(f"DCF suitability: {suitability.replace('_', ' ').lower()}")
+
+    # Phase H.10, section 20. A missing valuation is not a failed analysis,
+    # and the difference has to be visible or a reader will read the absence
+    # as a malfunction. When the model was declined because it cannot
+    # represent this business, the report says so and says why -- and the
+    # cash-flow figure is relabelled rather than withheld (section 18).
+    # A DCF that was declined for a stated reason says so. Without this the
+    # reader sees a Valuation section with no valuation and no explanation,
+    # which reads as a malfunction -- and for a euro-reporting issuer the
+    # underlying message was worse than silence: the old text claimed revenue
+    # "was not reported" when the issuer had filed complete accounts this
+    # project simply cannot convert.
+    # Phase H.12, sections 16/43/44. ONE statement about the valuation method.
+    # Two separate blocks used to render here, and a live insurer got the same
+    # paragraph twice at different lengths. The wording also said the model was
+    # "invalid" when it had simply never applied -- a different claim, and a
+    # harsher one, than the true statement that a standard FCFF valuation does
+    # not fit this business.
+    model = compact.get("business_model") or {}
+    unavailable = compact.get("dcf") or {}
+    method_status = compact.get("valuation_method_status")
+    method_line = metric_policy.VALUATION_STATUS_WORDING.get(method_status)
+    if method_line and not unavailable.get("available"):
+        lines.append(method_line)
+        profile = (model.get("profile") or "").replace("_", " ").lower()
+        if profile and model.get("standard_fcff_suitability") == "NOT_SUITABLE":
+            lines.append(
+                f"  This issuer is classified as {profile} (SEC SIC {model.get('sic')}, "
+                f"{model.get('sic_description')}); for that business model operating cash "
+                f"flow less capital expenditure is not owner free cash flow. The figure is "
+                f"still reported, under that definition.")
+        lines.append("  Research therefore relies on operating, capital, guidance and "
+                     "market evidence.")
+        lines.append("")
+    elif not unavailable.get("available") and unavailable.get("reason"):
+        lines.append(f"Valuation model: no discounted-cash-flow valuation was produced. "
+                     f"{unavailable['reason']}")
+        lines.append("")
+
 
     share = basis.get("share_reconciliation") or {}
     if share.get("status") in ("MATERIAL_DIFFERENCE", "INCOMPATIBLE_BASIS"):
