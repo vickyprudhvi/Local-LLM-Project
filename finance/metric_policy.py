@@ -337,6 +337,13 @@ class ValuationMethodStatus:
     VALID_AND_APPLICABLE = "VALID_AND_APPLICABLE"
     VALID_BUT_NOT_APPLICABLE = "VALID_BUT_NOT_APPLICABLE"
     LIMITED = "LIMITED"
+    # Phase 27/28. The model ran correctly and the arithmetic is sound; this
+    # company's own forecast path does not support a perpetuity. A business
+    # whose terminal-year free cash flow to the firm is negative cannot be
+    # valued by growing that figure forever, and refusing to is the model
+    # working -- not failing. Kept distinct from INVALID, which is reserved
+    # for the model breaking its own checks.
+    NOT_VALID_FOR_CURRENT_FORECAST_PATH = "NOT_VALID_FOR_CURRENT_FORECAST_PATH"
     INVALID = "INVALID"
 
 
@@ -349,15 +356,32 @@ VALUATION_STATUS_WORDING = {
         "Standard FCFF DCF: not applicable to this business model.",
     ValuationMethodStatus.LIMITED:
         "Standard FCFF DCF: usable here only with substantial caveats.",
+    ValuationMethodStatus.NOT_VALID_FOR_CURRENT_FORECAST_PATH: (
+        "Standard FCFF DCF: not valid for this company's current forecast path. "
+        "The projected terminal-year cash flow is negative, so a perpetuity value "
+        "cannot be computed from it. The model is working; the forecast does not "
+        "support this valuation method."),
     ValuationMethodStatus.INVALID:
         "Standard FCFF DCF: ran but failed its own validation checks.",
 }
 
+# Validation statuses that describe the FORECAST rather than the model.
+_FORECAST_PATH_FAILURES = frozenset({"DCF_NEGATIVE_TERMINAL_FCFF"})
+
 
 def valuation_method_status(classification, dcf_available: bool,
-                            dcf_validation_failed: bool = False) -> str:
-    """Which of the four states this run is actually in."""
+                            dcf_validation_failed: bool = False,
+                            dcf_validation_status: Optional[str] = None) -> str:
+    """Which state this run is actually in.
+
+    `dcf_validation_status` separates a model that broke from a forecast the
+    model correctly declined to extrapolate (Phase 27-28). Without it every
+    failure read as "model invalid", which is the wrong claim for a
+    loss-making company whose terminal cash flow is simply negative.
+    """
     if dcf_validation_failed:
+        if dcf_validation_status in _FORECAST_PATH_FAILURES:
+            return ValuationMethodStatus.NOT_VALID_FOR_CURRENT_FORECAST_PATH
         return ValuationMethodStatus.INVALID
     profile = getattr(classification, "profile", None)
     fcff = getattr(classification, "standard_fcff_suitability", None)

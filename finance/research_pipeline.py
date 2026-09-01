@@ -377,23 +377,16 @@ def _evidence_list(d, key, index, min_items=1, max_items=15):
     ok, unknown = validate_evidence_citations(v, index)
     if not ok:
         raise _Invalid(f"'{key}' cites unknown evidence ID(s): {unknown}")
-    # Phase H.9, section 5. Citing last fiscal year's figure when a current
-    # one exists under `current.<name>` is what let one live report state two
-    # different free cash flows, in two sections, both cited. The repair
-    # prompt gets the exact id to use instead, so this is correctable rather
-    # than merely rejected.
-    stale = conflicting_historical_citations(v, index)
-    if stale:
-        detail = "; ".join(
-            f"'fundamental.{name}' is {old_value:,.4g} for a completed fiscal period while "
-            f"'current.{name}' is {new_value:,.4g} for the current one"
-            for name, old_value, new_value in stale)
-        raise _Invalid(
-            f"'{key}' cites a superseded historical figure where a current one exists: "
-            f"{detail}. Cite "
-            + ", ".join(f"'current.{name}'" for name, _, _ in stale)
-            + " for claims about the company today, and cite the 'fundamental.*' id only "
-              "when the claim is explicitly about that completed fiscal period.")
+    # The stale-citation check (Phase H.9) used to RAISE here. It is now a
+    # quarantinable finding instead -- see `_stale_citation_findings`.
+    #
+    # Raising was measurably worse than the problem. Two live runs on
+    # different issuers and different business models each lost a REQUIRED
+    # researcher stage to it: the model retried three times, cited the same
+    # id each time, and the stage died, taking `rebuttal_round` with it by
+    # prerequisite. A report with no bull case is a worse outcome than one
+    # sentence resting on last year's figure, and the failure was
+    # reproducible rather than incidental.
     return v
 
 
@@ -424,7 +417,7 @@ def _claims_list(d, key, index, min_items, max_items):
         seen_ids.add(claim_id)
         out.append({
             "claim_id": claim_id,
-            "claim": _str_field(item, "claim", max_len=600),
+            "claim": _claim_text(item, "claim", max_len=600),
             "evidence_ids": _evidence_list(item, "evidence_ids", index, min_items=1, max_items=6),
             "claim_type": _enum_field(item, "claim_type", _CLAIM_TYPE_LEVELS),
             "assumptions": _string_list(item, "assumptions", max_items=5),
@@ -433,13 +426,63 @@ def _claims_list(d, key, index, min_items, max_items):
     return out
 
 
+# The shortest string that can carry a claim. Anything below this is a
+# placeholder -- a stray character, an ellipsis, a bare "N/A" -- and renders
+# as a bullet that says nothing while occupying the space of one that would.
+_MIN_CLAIM_CHARS = 12
+
+
+def _carries_content(text) -> bool:
+    """Is this string a claim, or is it a placeholder?
+
+    One rule, used by BOTH claim shapes. Two had grown up side by side:
+    `_string_list` dropped anything shorter than `_MIN_CLAIM_CHARS`, while
+    `_str_field` -- which validates every `claim`, `risk`, `thesis` and
+    `statement`, the fields a reader actually reads -- accepted anything that
+    was not whitespace. A live report rendered a blank Bull Case bullet
+    through the second while the first was working perfectly.
+    """
+    return isinstance(text, str) and len(text.strip()) >= _MIN_CLAIM_CHARS
+
+
+def _claim_text(container, key, max_len):
+    """A claim-bearing string field. Empty and placeholder both fail.
+
+    Separate from `_str_field` because not every string in a stage's output
+    is a claim -- an enum-ish label or an id has no business being held to a
+    twelve-character minimum. This is for the fields that render as prose.
+    """
+    value = _str_field(container, key, max_len=max_len)
+    if not _carries_content(value):
+        raise _Invalid(
+            f"'{key}' must carry actual content; {value!r} is a placeholder and would "
+            "render as a bullet that says nothing")
+    return value
+
+
 def _string_list(d, key, min_items=0, max_items=6, max_len=400):
+    """Phase H.14, sections 25/27.
+
+    `min_items` used to be checked BEFORE the empty entries were filtered
+    out, so a three-bullet list containing two blanks passed a min_items=3
+    schema and then rendered one bullet. The count is now taken on what
+    actually survives, which is the only count a reader ever sees.
+
+    Entries too short to carry a claim are dropped for the same reason an
+    empty one is: the schema exists to guarantee content, and a bullet
+    reading "-" meets it only on a technicality.
+    """
     v = d.get(key)
     if not isinstance(v, list):
         raise _Invalid(f"'{key}' must be a list")
-    if len(v) < min_items:
-        raise _Invalid(f"'{key}' must have at least {min_items} item(s)")
-    return [str(x)[:max_len] for x in v[:max_items] if isinstance(x, str) and x.strip()]
+    kept = [str(x).strip()[:max_len] for x in v[:max_items]
+            if isinstance(x, str) and len(x.strip()) >= _MIN_CLAIM_CHARS]
+    if len(kept) < min_items:
+        raise _Invalid(
+            f"'{key}' must have at least {min_items} item(s) with actual content; "
+            f"{len(v) if isinstance(v, list) else 0} were supplied and {len(kept)} "
+            "carried enough text to be a claim")
+    return kept
 
 
 def _has_material_omissions(index) -> bool:
@@ -476,6 +519,37 @@ def _cap_confidence_for_omissions(confidence: float, index) -> float:
     if not _has_material_omissions(index):
         return confidence
     return min(confidence, config.research_reduced_mode_confidence_cap())
+
+
+# The stages whose absence materially weakens a synthesis. A missing bull or
+# bear case means the view was never argued against; a missing rebuttal means
+# the two sides were never tested on each other. Research can still proceed
+# -- see below -- but it cannot claim the same confidence.
+_ADVERSARIAL_STAGES = ("bull_researcher", "bear_researcher", "rebuttal_round")
+
+# Ceiling applied when any of them is missing. Deliberately a CAP and not a
+# fixed value: a synthesis that was already less sure than this stays where
+# it is. Never raises confidence.
+DEGRADED_PIPELINE_CONFIDENCE_CAP = 0.55
+
+
+def cap_confidence_for_degraded_pipeline(confidence, degraded_stages) -> float:
+    """Phase 35: the cost of a stage that did not complete.
+
+    Before this, a failed bull or bear stage had NO effect on the number the
+    report printed next to the recommendation -- the synthesis ran on
+    whatever evidence survived and reported its own confidence unchanged.
+    A reader could not tell a fully argued view from a half-argued one.
+
+    Not a forced HOLD and not a refusal to recommend: Phase 37 is explicit
+    that the recommendation stays the model's to choose from the evidence
+    that IS valid. Only the confidence attached to it is bounded.
+    """
+    if not degraded_stages:
+        return confidence
+    if not any(stage in _ADVERSARIAL_STAGES for stage in degraded_stages):
+        return confidence
+    return min(confidence, DEGRADED_PIPELINE_CONFIDENCE_CAP)
 
 
 def _require_omission_disclosure(validated: dict, index) -> dict:
@@ -533,7 +607,8 @@ def _require_valid_stance_when_dcf_invalid(validated: dict, index) -> dict:
         # the second one true. The state is checked against the evidence, so
         # this is an objective correction rather than a judgment call.
         _profile, method_status = _business_model_policy_from_index(index)
-        if (method_status == "VALID_BUT_NOT_APPLICABLE"
+        if (method_status in ("VALID_BUT_NOT_APPLICABLE",
+                              "NOT_VALID_FOR_CURRENT_FORECAST_PATH")
                 and validated.get("valuation_view") == "model_invalid"):
             # CORRECTED deterministically rather than raised. Which of the
             # two states this run is in is an objective fact read from
@@ -547,11 +622,25 @@ def _require_valid_stance_when_dcf_invalid(validated: dict, index) -> dict:
             validated = dict(validated)
             validated["valuation_view"] = "insufficient_data"
             validated["valuation_view_correction"] = (
-                "The standard discounted-cash-flow model does not apply to this business "
-                "model, so no valuation view was established. The model did not fail.")
+                "No valuation view was established: the standard discounted-cash-flow "
+                "model either does not apply to this business model or cannot value this "
+                "company's current forecast path. The model itself did not fail.")
         return validated
     validated = dict(validated)
-    validated["valuation_view"] = "model_invalid"
+    # Phase 27/28. WHICH failure decides the wording. A negative terminal-year
+    # cash flow means the model refused to grow a negative figure into a
+    # perpetuity -- correct behaviour on an unusual forecast, not a broken
+    # model -- and a loss-making growth company hits it routinely. Calling
+    # that "model invalid" describes the wrong thing as broken.
+    _profile, method_status = _business_model_policy_from_index(index)
+    if method_status == "NOT_VALID_FOR_CURRENT_FORECAST_PATH":
+        validated["valuation_view"] = "insufficient_data"
+        validated["valuation_view_correction"] = (
+            "No valuation view was established: this company's projected terminal-year "
+            "cash flow is negative, so a perpetuity value cannot be computed from it. "
+            "The model itself did not fail.")
+    else:
+        validated["valuation_view"] = "model_invalid"
     has_other_data = any(eid.startswith("fundamental.") or eid.startswith("technical.")
                          for eid in index)
     if has_other_data and validated["research_stance"] == "insufficient_data":
@@ -853,7 +942,9 @@ def _validate_claim_fidelity(validated: dict, index) -> dict:
     # These are stubbed rather than dropped or raised, so the offending
     # sentence is replaced by a withheld marker while the element -- and the
     # stage -- survives.
-    findings = findings + _business_model_claim_findings(validated, index)
+    findings = (findings
+                + _business_model_claim_findings(validated, index)
+                + _stale_citation_findings(validated, index))
 
     # Phase H.5, Phase 2: OVERSTATEMENT findings quarantine their field; only
     # FABRICATION (and overstatement on a FAIL-policy field) still fails the
@@ -1029,6 +1120,56 @@ _BUSINESS_MODEL_RULE_IDS = {
     "VALUATION_APPLICABILITY_MISSTATED": "BM-003",
     "VALUATION_LIMITATION_AS_COMPANY_RISK": "BM-004",
 }
+
+
+# Where a stage keeps the TEXT of a claim, alongside the ids that support it.
+# A stale citation is only worth acting on because the sentence next to it
+# quotes the stale number; quarantine replaces that sentence, not the id.
+_CLAIM_TEXT_KEYS = ("claim", "risk", "point", "statement", "response",
+                    "concern", "trigger", "condition")
+_EVIDENCE_LIST_KEYS = ("evidence_ids", "evidence_cited")
+
+
+def _stale_citation_findings(validated, index) -> list:
+    """Claims that cite a superseded figure where a current one exists.
+
+    Phase H.9 established the rule and enforced it by rejection. This keeps
+    the rule and changes the consequence: the offending passage is stubbed
+    and the stage survives, which is the same treatment every other
+    semantic misuse gets.
+    """
+    from finance.canonical import conflicting_historical_citations
+    from finance.content_policy import Finding, Severity
+
+    findings = []
+
+    def walk(node, path):
+        if isinstance(node, dict):
+            cited = []
+            for key in _EVIDENCE_LIST_KEYS:
+                value = node.get(key)
+                if isinstance(value, list):
+                    cited.extend(x for x in value if isinstance(x, str))
+            stale = conflicting_historical_citations(cited, index) if cited else []
+            if stale:
+                text_key = next((k for k in _CLAIM_TEXT_KEYS
+                                 if isinstance(node.get(k), str)), None)
+                if text_key:
+                    names = ", ".join(name for name, _old, _new in stale)
+                    findings.append(Finding(
+                        rule_id="BM-005",
+                        label="STALE_METRIC_CITATION",
+                        severity=Severity.SEMANTIC_MISUSE,
+                        field_path=f"{path}.{text_key}" if path else text_key,
+                        matched_span=names[:40]))
+            for key, value in node.items():
+                walk(value, f"{path}.{key}" if path else key)
+        elif isinstance(node, (list, tuple)):
+            for i, item in enumerate(node):
+                walk(item, f"{path}[{i}]")
+
+    walk(validated, "")
+    return findings
 
 
 def _business_model_claim_findings(validated, index) -> list:
@@ -1229,11 +1370,23 @@ def _risk_reviewer_prompt(evidence_text, research_manager_output):
         "computed) or treat the omission as a red flag on its own; cite total_debt, "
         "net_debt, debt_to_fcf, net_debt_to_fcf, current_ratio, or operating_cash_flow "
         "for leverage risk instead, and shareholder_equity's own (possibly negative) "
-        "value if it is relevant to the risk."
+        "value if it is relevant to the risk.\n"
+        "CATEGORY -- every risk needs one, and the distinction matters. COMPANY_RISK is "
+        "something the ISSUER carries: earnings deterioration, leverage, regulatory "
+        "exposure, margin pressure, claims costs, competition. Everything else is a "
+        "limitation of THIS ANALYSIS and must NOT be labelled COMPANY_RISK: a valuation "
+        "this system could not produce or that does not apply to the business model is "
+        "VALUATION_METHOD_LIMITATION; missing guidance, stale or thin data and an "
+        "unresolved share count are DATA_QUALITY_RISK; a research stage that did not "
+        "validate is ANALYSIS_LIMITATION; a model that failed its own checks is "
+        "MODEL_RISK. A company does not become riskier because this system declined to "
+        "value it."
     )
     schema = (
         'JSON schema:\n'
         '{"key_risks": [{"risk": "<specific risk>", "severity": "low"|"medium"|"high", '
+        '"category": "COMPANY_RISK"|"ANALYSIS_LIMITATION"|"VALUATION_METHOD_LIMITATION"'
+        '|"DATA_QUALITY_RISK"|"MODEL_RISK", '
         '"evidence_cited": ["<evidence id>", ...]}, ... 1 to 6 items], '
         '"data_quality_concerns": ["<string>", ... 0 to 6 items], '
         '"evidence_cited": ["<evidence id>", ...]}'
@@ -1288,6 +1441,84 @@ def aggregate_risk_level(severities) -> Optional[str]:
     return "low"
 
 
+class RiskCategory:
+    """What KIND of risk a finding is (section 17).
+
+    A live insurer's report carried "[HIGH] Valuation evidence is
+    unavailable because the discounted cash flow model produced no output"
+    at the top of its risk list, and that HIGH then aggregated into the
+    company's overall risk level. But the company had not become riskier;
+    this project had declined to value it. Mixing the two means a
+    limitation of the analysis is read as a fact about the issuer, and it
+    moves the recommendation.
+    """
+
+    COMPANY_RISK = "COMPANY_RISK"
+    ANALYSIS_LIMITATION = "ANALYSIS_LIMITATION"
+    VALUATION_METHOD_LIMITATION = "VALUATION_METHOD_LIMITATION"
+    DATA_QUALITY_RISK = "DATA_QUALITY_RISK"
+    MODEL_RISK = "MODEL_RISK"
+
+    ALL = (COMPANY_RISK, ANALYSIS_LIMITATION, VALUATION_METHOD_LIMITATION,
+           DATA_QUALITY_RISK, MODEL_RISK)
+
+    # Everything that is NOT a risk the issuer carries.
+    NON_COMPANY = (ANALYSIS_LIMITATION, VALUATION_METHOD_LIMITATION,
+                   DATA_QUALITY_RISK, MODEL_RISK)
+
+
+# A risk ABOUT the analysis names the analysis. These markers are what the
+# live reports actually said, and each describes this system's own state
+# rather than the company's -- no DCF was produced, no guidance was
+# extracted, a share count did not reconcile, a stage did not validate.
+_VALUATION_LIMITATION_MARKERS = re.compile(
+    r"(?i)\b(?:no|absent|missing|unavailable|lack\s+of|without)\b[^.]{0,60}?"
+    r"\b(?:dcf|discounted[\s-]cash[\s-]flow|valuation\s+(?:model|evidence|output))\b"
+    r"|\b(?:dcf|discounted[\s-]cash[\s-]flow|valuation\s+model|"
+    r"(?:standard\s+)?fcff(?:\s+(?:dcf|model|valuation))?)\b[^.]{0,60}?"
+    r"\b(?:produced\s+no|not\s+applicable|could\s+not\s+be\s+(?:produced|computed)|"
+    r"unavailable|failed\s+validation|not\s+suitable)\b"
+    r"|\bvaluation\s+evidence\s+is\s+unavailable\b")
+
+_DATA_QUALITY_MARKERS = re.compile(
+    r"(?i)\b(?:no|missing|absent|unavailable|not)\b[^.]{0,50}?"
+    r"\b(?:management\s+guidance|guidance\s+was\s+extracted|guidance\s+is\s+available)\b"
+    r"|\b(?:stale|incomplete|thin|truncated|unreconciled|could\s+not\s+be\s+reconciled)\b"
+    r"[^.]{0,50}?\b(?:data|history|filings?|share\s+count|balance\s+sheet)\b"
+    r"|\b(?:share\s+count|share\s+basis)\b[^.]{0,40}?\bunresolved\b"
+    r"|\brelies\s+on\s+historical\s+trends\s+rather\s+than\s+company\s+guidance\b")
+
+_ANALYSIS_LIMITATION_MARKERS = re.compile(
+    r"(?i)\b(?:research\s+stage|pipeline|schema\s+validation|could\s+not\s+be\s+validated|"
+    r"reduced\s+evidence\s+set|analysis\s+(?:is\s+)?limited\s+by)\b")
+
+
+def classify_risk_category(text: str, model_category: Optional[str] = None) -> str:
+    """Which category a stated risk belongs to.
+
+    The model is ASKED for a category and its answer is used -- but only
+    where the text does not contradict it. A risk whose own wording says the
+    valuation could not be produced is a limitation of this analysis
+    whatever label came back, because the alternative is letting a stage
+    move company risk by relabelling its own output (the same reason metric
+    suitability is not left to prose).
+
+    Reclassification is one-directional: it can move a risk OUT of
+    COMPANY_RISK, never into it. Nothing here should be able to invent
+    company risk that the reviewer did not find.
+    """
+    text = text or ""
+    if _VALUATION_LIMITATION_MARKERS.search(text):
+        return RiskCategory.VALUATION_METHOD_LIMITATION
+    if _DATA_QUALITY_MARKERS.search(text):
+        return RiskCategory.DATA_QUALITY_RISK
+    if _ANALYSIS_LIMITATION_MARKERS.search(text):
+        return RiskCategory.ANALYSIS_LIMITATION
+    if model_category in RiskCategory.ALL:
+        return model_category
+    return RiskCategory.COMPANY_RISK
+
+
 def _validate_risk_reviewer_output(raw, index) -> dict:
     if not isinstance(raw, dict):
         raise _Invalid("response was not a JSON object")
@@ -1298,13 +1529,32 @@ def _validate_risk_reviewer_output(raw, index) -> dict:
     for i, item in enumerate(raw_risks[:6]):
         if not isinstance(item, dict):
             raise _Invalid(f"'key_risks[{i}]' must be an object")
+        risk_text = _claim_text(item, "risk", max_len=500)
         key_risks.append({
-            "risk": _str_field(item, "risk", max_len=500),
+            "risk": risk_text,
             "severity": _enum_field(item, "severity", ("low", "medium", "high")),
             "evidence_cited": _evidence_list(item, "evidence_cited", index, min_items=1, max_items=6),
+            # Section 17. Taken from the model where its own text does not
+            # contradict it, and corrected deterministically where it does.
+            "category": classify_risk_category(risk_text, item.get("category")),
         })
+    # Sections 18-19: the two dimensions kept apart.
+    company_risks = [r for r in key_risks if r["category"] == RiskCategory.COMPANY_RISK]
+    analysis_limitations = [r for r in key_risks
+                            if r["category"] in RiskCategory.NON_COMPANY]
+
     validated = {
         "key_risks": key_risks,
+        "company_risks": company_risks,
+        "analysis_limitations": analysis_limitations,
+        # Section 20: the level the final synthesis is held to. Aggregated
+        # over the ISSUER's risks only -- a valuation this project declined
+        # to produce is not something the company did.
+        "company_risk_level": aggregate_risk_level([r["severity"] for r in company_risks]),
+        "analysis_risk_level": aggregate_risk_level(
+            [r["severity"] for r in analysis_limitations]),
+        "valuation_method_status": (
+            getattr((index or {}).get("business_model.valuation_method_status"), "value", None)),
         "data_quality_concerns": _string_list(raw, "data_quality_concerns", max_items=6),
         "evidence_cited": _evidence_list(raw, "evidence_cited", index, min_items=1, max_items=15),
         # TSLA DCF validation patch (section 10): set DETERMINISTICALLY from
@@ -1316,8 +1566,20 @@ def _validate_risk_reviewer_output(raw, index) -> dict:
         "model_risk": "high" if _dcf_validation_failed(index) else "not_applicable",
         # MLI corrective patch: the authoritative overall risk, aggregated
         # deterministically from this stage's OWN per-risk severities. The
-        # final synthesis is forced to match it -- see `aggregate_risk_level`.
-        "aggregated_risk": aggregate_risk_level([r["severity"] for r in key_risks]),
+        # final synthesis is held to it -- see `aggregate_risk_level`.
+        #
+        # Phase H.12b: aggregated over COMPANY risks only. It used to cover
+        # every entry, so a HIGH "no DCF was produced" propagated into the
+        # issuer's overall risk and from there into the recommendation.
+        #
+        # No fallback to the full list. An earlier version fell back when no
+        # company risk was found, which put the analysis limitations straight
+        # back into the number the synthesis is held to -- and a live run
+        # then died reconciling a 'moderate' company view against a 'high'
+        # aggregate built entirely from limitations. When the reviewer finds
+        # no company risk there is nothing to hold the synthesis to, and
+        # `analysis_risk_level` carries that dimension separately.
+        "aggregated_risk": aggregate_risk_level([r["severity"] for r in company_risks]),
     }
     return _validate_claim_fidelity(validated, index)
 
@@ -2155,6 +2417,72 @@ def is_already_satisfied(text: str, current_metrics) -> bool:
     return False
 
 
+CONDITION_REFERENCES_NONEXISTENT_ISSUE = "CONDITION_REFERENCES_NONEXISTENT_ISSUE"
+
+# Conditions that promise the resolution of a specific DIAGNOSTIC -- not a
+# business development, but a problem this analysis reported. Each maps to
+# the diagnostic codes that would have to be present for the condition to
+# mean anything.
+#
+# The failure this catches: a report listed "the share-count conflict is
+# resolved" as a reassessment trigger for a company whose share counts
+# reconciled cleanly. A reader cannot act on it, cannot verify it, and is
+# left believing the analysis found a problem it did not report -- which is
+# worse than the condition simply being absent.
+_ISSUE_CONDITIONS = (
+    (re.compile(r"(?i)\bshare[\s-]count\b[^.]{0,40}?\b(?:conflict|discrepanc\w+|"
+                r"mismatch|reconcil\w+)\b"),
+     ("SHARE_COUNT_CONFLICT", "MARKET_CAP_RECONCILIATION_FAILURE",
+      "SHARE_BASIS_INCOMPATIBLE")),
+    (re.compile(r"(?i)\b(?:net[\s-])?debt\b[^.]{0,40}?\b(?:conflict|discrepanc\w+|"
+                r"does\s+not\s+reconcile|reconciliation)\b"),
+     ("DCF_NET_DEBT_COMPONENT_OVERLAP", "INCOMPATIBLE_DEBT_BASIS")),
+    (re.compile(r"(?i)\bcurrency\b[^.]{0,40}?\b(?:conversion|translat\w+)\b[^.]{0,30}?"
+                r"\b(?:resolv\w+|support\w+|available)\b"),
+     ("DCF_REPORTING_CURRENCY_UNSUPPORTED",)),
+    (re.compile(r"(?i)\bperiod\b[^.]{0,30}?\b(?:mismatch|misalign\w+|conflict)\b"),
+     ("TTM_BASE_PERIOD_MISMATCH", "DCF_CANONICAL_PERIOD_CONFLICT",
+      "PERIOD_FREQUENCY_MISMATCH", "DERIVED_RATIO_PERIOD_MISMATCH")),
+)
+
+
+def condition_references_nonexistent_issue(text: str, issue_codes) -> bool:
+    """Section 30: does this condition promise to fix something not reported?
+
+    Returns True only when the condition names a diagnostic class AND none
+    of the codes that would produce it are present. A condition naming
+    nothing diagnostic is left alone -- this checks references, it does not
+    police vocabulary.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return False
+    present = {c for c in (issue_codes or ()) if c}
+    for pattern, codes in _ISSUE_CONDITIONS:
+        if pattern.search(text) and not (present & set(codes)):
+            return True
+    return False
+
+
+def drop_conditions_referencing_absent_issues(validated: dict, issue_codes=None) -> dict:
+    """Sections 30-31, applied to every condition bucket.
+
+    As elsewhere, the last remaining condition in a bucket is never removed:
+    an empty list tells a reader less than one imperfect entry, and this
+    check is about a reference being unverifiable rather than the condition
+    being harmful.
+    """
+    validated = dict(validated)
+    for key in ("conditions_that_strengthen_the_view", "conditions_that_weaken_the_view",
+                "reassessment_triggers"):
+        conditions = validated.get(key) or []
+        if len(conditions) <= 1:
+            continue
+        kept = [c for c in conditions
+                if not condition_references_nonexistent_issue(c, issue_codes)]
+        validated[key] = kept or conditions[:1]
+    return validated
+
+
 def validate_conditions_against_current_state(validated: dict,
                                               current_metrics=None) -> dict:
     """Drop conditions that are vacuous or built on internal thresholds.
@@ -2215,7 +2543,7 @@ def drop_stale_availability_triggers(validated: dict, guidance_metrics=None) -> 
 
 
 def _route_conditions_by_direction(validated: dict, current_metrics=None,
-                                   guidance_metrics=None) -> dict:
+                                   guidance_metrics=None, issue_codes=None) -> dict:
     """Spec 9: upgrade -> FAVORABLE, downgrade -> UNFAVORABLE, reassessment
     -> BIDIRECTIONAL. A misfiled condition is MOVED to the bucket its
     direction actually implies -- never rejected.
@@ -2237,6 +2565,9 @@ def _route_conditions_by_direction(validated: dict, current_metrics=None,
     validated = _filter_limiting_factors(validated)
     validated = validate_conditions_against_current_state(validated, current_metrics)
     validated = drop_stale_availability_triggers(validated, guidance_metrics)
+    # Sections 30-31: a condition may not promise to resolve a problem this
+    # analysis never reported.
+    validated = drop_conditions_referencing_absent_issues(validated, issue_codes)
     routed = {key: [] for key in _CONDITION_BUCKETS.values()}
     for expected, source_key in (
             (CONDITION_FAVOURABLE, "conditions_that_strengthen_the_view"),
@@ -2321,14 +2652,21 @@ def _require_recommendation_consistent_with_stance(recommendation: str, validate
 def _validate_final_synthesizer_output(raw, index, risk_output=None,
                                        readiness_status=None,
                                        current_metrics=None,
-                                       guidance_metrics=None) -> dict:
+                                       guidance_metrics=None,
+                                       degraded_stages=None,
+                                       issue_codes=None) -> dict:
     if not isinstance(raw, dict):
         raise _Invalid("response was not a JSON object")
     validated = {
         "research_stance": _enum_field(raw, "research_stance", _RESEARCH_STANCE_LEVELS),
         "valuation_view": _enum_field(raw, "valuation_view", _VALUATION_VIEW_LEVELS),
         "overall_risk": _enum_field(raw, "overall_risk", _OVERALL_RISK_LEVELS),
-        "confidence": _cap_confidence_for_omissions(_float_field(raw, "confidence"), index),
+        # Two independent ceilings, both downward only: material datasets
+        # that were never retrieved, and required stages that did not
+        # complete. Whichever binds harder wins.
+        "confidence": cap_confidence_for_degraded_pipeline(
+            _cap_confidence_for_omissions(_float_field(raw, "confidence"), index),
+            degraded_stages),
         "primary_reason": _str_field(raw, "primary_reason", max_len=600),
         "supporting_factors": _string_list(raw, "supporting_factors", max_items=3),
         "limiting_factors": _string_list(raw, "limiting_factors", max_items=3),
@@ -2402,7 +2740,8 @@ def _validate_final_synthesizer_output(raw, index, risk_output=None,
     # satisfies, or one built on an internal model bound, is not a future
     # development and is dropped here rather than shown as one.
     validated = _route_conditions_by_direction(
-        validated, current_metrics=current_metrics, guidance_metrics=guidance_metrics)
+        validated, current_metrics=current_metrics, guidance_metrics=guidance_metrics,
+        issue_codes=issue_codes)
 
     # Sections 29-30: the RiskReviewer's aggregate stands unless the
     # synthesizer gives an evidence-backed reconciliation.
@@ -2806,7 +3145,8 @@ def _correction_for(kind: str, error: Optional[str],
 def run_research_pipeline(evidence_index: Dict[str, EvidenceItem], ask_local_fn,
                           readiness_status: Optional[str] = None,
                           current_metrics: Optional[dict] = None,
-                          guidance_metrics: Optional[dict] = None
+                          guidance_metrics: Optional[dict] = None,
+                          issue_codes: Optional[list] = None
                           ) -> ResearchPipelineResult:
     """Run the full staged pipeline. `evidence_index` is built ONCE by the
     caller (`finance.evidence.build_evidence_index`) and rendered to an
@@ -2918,7 +3258,16 @@ def run_research_pipeline(evidence_index: Dict[str, EvidenceItem], ask_local_fn,
             lambda raw: _validate_final_synthesizer_output(
                 raw, evidence_index, risk_checkpoint.output, readiness_status,
                 current_metrics=current_metrics,
-                guidance_metrics=guidance_metrics), ask_local_fn)
+                guidance_metrics=guidance_metrics,
+                # Phase 35: which required stages did not complete, so the
+                # synthesis cannot report full confidence over a partial
+                # argument.
+                degraded_stages=[c.stage for c in checkpoints
+                                 if c.status != StageStatus.COMPLETED],
+                # Sections 30-31: the diagnostics this analysis actually
+                # found, so a condition cannot promise to resolve one it did
+                # not report.
+                issue_codes=issue_codes), ask_local_fn)
     else:
         final_checkpoint = _skipped(
             "final_investment_synthesizer", "requires research_manager and risk_reviewer to have completed")

@@ -423,3 +423,180 @@ def test_a_fabrication_finding_is_still_fatal():
                         "rationale[0].statement", "position size")]
     _result, _records, fatal = apply_quarantine({"rationale": [{"statement": "x"}]}, findings)
     assert len(fatal) == 1
+
+
+# ---------------------------------------------------------------------------
+# Sections 17-20, 42 — company risk and analysis risk are separate
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text, expected", [
+    # The live insurer's top risk, and the reason this split exists.
+    ("Valuation evidence is unavailable because the discounted cash flow model "
+     "produced no output", "VALUATION_METHOD_LIMITATION"),
+    ("No DCF available for this company", "VALUATION_METHOD_LIMITATION"),
+    ("The standard FCFF model is not applicable to this business model",
+     "VALUATION_METHOD_LIMITATION"),
+    ("Forward-looking analysis relies on historical trends rather than company guidance",
+     "DATA_QUALITY_RISK"),
+    ("Share count is unresolved against reported market capitalisation", "DATA_QUALITY_RISK"),
+    ("One research stage could not be validated", "ANALYSIS_LIMITATION"),
+    # Genuine issuer risks stay where they belong.
+    ("Net income contracted by 16.3% in the most recent fiscal year", "COMPANY_RISK"),
+    ("Elevated leverage relative to a small equity base", "COMPANY_RISK"),
+    ("Claims costs rose faster than premiums", "COMPANY_RISK"),
+])
+def test_risk_categories(text, expected):
+    from finance.research_pipeline import classify_risk_category
+
+    assert classify_risk_category(text) == expected
+
+
+def test_a_mislabelled_limitation_is_corrected_downward():
+    """Section 19/33: a stage cannot move company risk by relabelling."""
+    from finance.research_pipeline import classify_risk_category, RiskCategory
+
+    assert classify_risk_category("No DCF available", RiskCategory.COMPANY_RISK) ==         RiskCategory.VALUATION_METHOD_LIMITATION
+
+
+def test_classification_never_invents_company_risk():
+    """Reclassification is one-directional.
+
+    Nothing here may promote a limitation INTO company risk -- the reviewer
+    is the only source of what the issuer carries.
+    """
+    from finance.research_pipeline import classify_risk_category, RiskCategory
+
+    for label in RiskCategory.NON_COMPANY:
+        result = classify_risk_category("Margin pressure from competition", label)
+        assert result == label
+
+
+def _risk_output(risks):
+    """Run the reviewer validator over synthetic risks."""
+    from finance.evidence import build_evidence_index
+    from finance.research_pipeline import _validate_risk_reviewer_output
+
+    index = build_evidence_index({
+        "symbol": "ZZ",
+        "valuation_method_status": V.VALID_BUT_NOT_APPLICABLE,
+        "business_model_evidence": {"business_model": P.INSURER},
+        "fundamental_metrics": {"net_income": {"value": 1.0}},
+    })
+    raw = {"key_risks": [dict(r, evidence_cited=["fundamental.net_income"]) for r in risks],
+           "data_quality_concerns": [],
+           "evidence_cited": ["fundamental.net_income"]}
+    return _validate_risk_reviewer_output(raw, index)
+
+
+def test_a_valuation_limitation_does_not_raise_company_risk():
+    """The whole point: a HIGH limitation must not become HIGH company risk."""
+    output = _risk_output([
+        {"risk": "Valuation evidence is unavailable because the discounted cash flow "
+                 "model produced no output", "severity": "high"},
+        {"risk": "Net income contracted modestly year over year", "severity": "medium"},
+    ])
+    assert output["company_risk_level"] == "moderate"
+    assert output["analysis_risk_level"] == "high"
+    assert len(output["company_risks"]) == 1
+    assert len(output["analysis_limitations"]) == 1
+    # Section 20: what the final synthesis is held to.
+    assert output["aggregated_risk"] == "moderate"
+
+
+def test_a_genuine_high_company_risk_still_aggregates_high():
+    """The split must not soften real issuer risk."""
+    output = _risk_output([
+        {"risk": "Claims costs rose faster than premiums", "severity": "high"},
+        {"risk": "No DCF available", "severity": "high"},
+    ])
+    assert output["company_risk_level"] == "high"
+    assert output["aggregated_risk"] == "high"
+
+
+def test_a_run_with_only_limitations_does_not_invent_a_company_level():
+    """No company risk found is not the same as low company risk."""
+    output = _risk_output([
+        {"risk": "Valuation evidence is unavailable because no DCF was produced",
+         "severity": "high"},
+    ])
+    assert output["company_risks"] == []
+    assert output["company_risk_level"] is None
+    # And nothing is forced onto the synthesis. An earlier version fell back
+    # to aggregating the FULL list here, which put the analysis limitations
+    # straight back into the number the synthesis is held to -- a live run
+    # then died reconciling a 'moderate' company view against a 'high'
+    # aggregate built entirely from limitations. The limitation dimension is
+    # reported separately and does not masquerade as company risk.
+    assert output["aggregated_risk"] is None
+    assert output["analysis_risk_level"] == "high"
+
+
+def test_the_valuation_method_status_travels_with_the_risk_output():
+    output = _risk_output([{"risk": "Margin pressure", "severity": "low"}])
+    assert output["valuation_method_status"] == V.VALID_BUT_NOT_APPLICABLE
+
+
+def _risk_model(pipeline_result):
+    """The report model for a risk section.
+
+    The company-risk / analysis-limitation split is a finance judgement
+    (spec 18) and now lives in `finance/report_model.py`; the renderer only
+    prints the two lists it is handed. The assertions below are unchanged --
+    they still read the rendered text -- but what they exercise is the
+    classification, which is where the decision moved.
+    """
+    from finance.report_model import (ReportStatus, StockAnalysisReportModel,
+                                      risks_from)
+    company, limitations, note = risks_from(pipeline_result)
+    return StockAnalysisReportModel(
+        symbol="TEST", status=ReportStatus(headline="**COMPLETE**."),
+        company_risk=company, analysis_limitations=limitations,
+        risk_unavailable_note=note)
+
+
+def test_the_report_separates_the_two_dimensions():
+    from finance.report_model import StockAnalysisReportModel, ReportStatus, risks_from
+    from finance.workflow import _compact_risk_section
+
+    class _Pipeline:
+        _output = {
+            "key_risks": [], "data_quality_concerns": [],
+            "company_risks": [{"risk": "Claims costs rose", "severity": "high"}],
+            "analysis_limitations": [
+                {"risk": "Valuation evidence is unavailable", "severity": "high"}],
+        }
+        status = "completed"
+
+        def by_stage(self, name):
+            return self
+
+        def output(self, name):
+            return self._output
+
+    lines = _compact_risk_section(_risk_model(_Pipeline()))
+    text = "\n".join(lines)
+    assert "**[HIGH]** Claims costs rose" in text
+    assert "Analysis limitations" in text
+    assert "not a risk the company carries" in text
+    # The limitation is not rendered as a severity-ranked company risk.
+    assert "**[HIGH]** Valuation evidence" not in text
+
+
+def test_older_stage_output_without_categories_still_renders():
+    """A replayed artifact predates the split and must not break."""
+    from finance.report_model import StockAnalysisReportModel, ReportStatus, risks_from
+    from finance.workflow import _compact_risk_section
+
+    class _Pipeline:
+        _output = {"key_risks": [{"risk": "Leverage is elevated", "severity": "high"}],
+                   "data_quality_concerns": []}
+        status = "completed"
+
+        def by_stage(self, name):
+            return self
+
+        def output(self, name):
+            return self._output
+
+    text = "\n".join(_compact_risk_section(_risk_model(_Pipeline())))
+    assert "**[HIGH]** Leverage is elevated" in text

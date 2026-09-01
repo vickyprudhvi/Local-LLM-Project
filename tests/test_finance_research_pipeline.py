@@ -1361,7 +1361,7 @@ assert "dcf.value_per_share.bull" not in INVALID_DCF_INDEX  # fixture sanity
 
 
 def _risk_raw(evidence_id="quote.price"):
-    return {"key_risks": [{"risk": "Some risk.", "severity": "medium",
+    return {"key_risks": [{"risk": "Margins may compress if input costs persist.", "severity": "medium",
                           "evidence_cited": [evidence_id]}],
            "data_quality_concerns": [], "evidence_cited": [evidence_id]}
 
@@ -1698,16 +1698,16 @@ def test_risk_aggregation_of_lower_severities():
 
 def test_risk_reviewer_publishes_its_aggregated_risk():
     raw = {"key_risks": [
-        {"risk": "A.", "severity": "high", "evidence_cited": [EV1]},
-        {"risk": "B.", "severity": "high", "evidence_cited": [EV1]},
-        {"risk": "C.", "severity": "medium", "evidence_cited": [EV1]},
+        {"risk": "Leverage is elevated relative to cash generation.", "severity": "high", "evidence_cited": [EV1]},
+        {"risk": "Customer concentration is material in the reported period.", "severity": "high", "evidence_cited": [EV1]},
+        {"risk": "Input costs rose faster than realised pricing.", "severity": "medium", "evidence_cited": [EV1]},
     ], "data_quality_concerns": [], "evidence_cited": [EV1]}
     assert rp._validate_risk_reviewer_output(raw, INDEX)["aggregated_risk"] == "high"
 
 
 _TWO_HIGH_RISKS = json.dumps({"key_risks": [
-    {"risk": "A.", "severity": "high", "evidence_cited": [EV3]},
-    {"risk": "B.", "severity": "high", "evidence_cited": [EV3]},
+    {"risk": "Leverage is elevated relative to cash generation.", "severity": "high", "evidence_cited": [EV3]},
+    {"risk": "Customer concentration is material in the reported period.", "severity": "high", "evidence_cited": [EV3]},
 ], "data_quality_concerns": [], "evidence_cited": [EV3]})
 
 

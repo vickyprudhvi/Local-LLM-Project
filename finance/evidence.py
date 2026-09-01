@@ -24,6 +24,13 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from finance.dcf import DcfValidationStatus
+from finance.dcf_packet import (
+    STATUS_EXPLANATION,
+    VALUATION_DERIVED_CONCLUSIONS,
+    ValuationStatus,
+    build_valuation_research_evidence,
+    classify_valuation,
+)
 
 # Curated subsets — deliberately not "every field in the payload": an evidence
 # ID should name something a research stage would actually reason about, not
@@ -226,6 +233,107 @@ def _add_dcf_assumption_evidence(index: Dict[str, EvidenceItem], dcf: dict) -> N
             provenance_entry=provenance_entry, calculation_version=calculation_version)
 
 
+
+# ---------------------------------------------------------------------------
+# Parts 4-5 - the valuation evidence gate
+# ---------------------------------------------------------------------------
+#
+# Before this, the index read the DCF result directly and decided for itself,
+# in three separate places and on three different criteria, whether each
+# valuation figure was safe to expose: the scenario values consulted
+# `validation_status`, the gap consulted `dcf_suitability` and the share
+# reconciliation, and the scenario spread consulted nothing at all. Three
+# gates disagreeing about one question is the same as no gate.
+#
+# There is now one status for the run and one function that decides what it
+# licenses, and every numeric valuation id in this index is behind it.
+
+
+# A status under which the DIRECTION of the price-versus-value comparison
+# survives while its magnitude does not. LIMITED means the valuation is
+# usable with substantial caveats -- "the price is above the modelled value"
+# is a statement those inputs still support, and a percentage rendered to one
+# decimal place is not. Every other non-VALID status withholds the direction
+# too, because under those the modelled value is not established at all.
+_DIRECTION_SURVIVES = (ValuationStatus.LIMITED,)
+
+# A share count that does not reconcile against the reported market
+# capitalisation puts the per-share numerator and the market-price
+# denominator on different bases. The valuation may be arithmetically
+# perfect and still not comparable with a price.
+_UNRESOLVED_SHARE_BASIS = ("MATERIAL_DIFFERENCE", "INCOMPATIBLE_BASIS")
+
+
+def valuation_evidence_status(compact_payload: dict) -> str:
+    """The ONE valuation status this index gates on.
+
+    Prefers the status the analysis itself decided (`valuation_status`, set
+    by finance/workflow.py once, from the packet failure, the model's own
+    validation and the business model). A payload without that field -- a
+    replayed artifact, or a hand-built fixture -- is classified here from the
+    same inputs rather than being assumed valid.
+    """
+    dcf = compact_payload.get("dcf") or {}
+    suitability_record = compact_payload.get("dcf_suitability") or {}
+    # An unassessed suitability is not a limited one -- see
+    # finance/workflow.py::_valuation_status.
+    suitability = (suitability_record.get("dcf_suitability")
+                   if suitability_record.get("assessed", True) else None)
+    share_basis = ((compact_payload.get("dcf_financial_basis") or {})
+                   .get("share_reconciliation") or {})
+
+    status = compact_payload.get("valuation_status")
+    if status not in ValuationStatus.ALL:
+        status = classify_valuation(
+            packet_failure=compact_payload.get("dcf_packet_failure"),
+            # A payload that carries a usable comparison carries a valuation,
+            # whichever key it arrived under.
+            dcf_available=bool(dcf.get("available")
+                               or (compact_payload.get("valuation_gap") or {}).get("available")),
+            dcf_validation_status=dcf.get("validation_status"),
+            suitability_status=suitability)
+
+    # Applied after classification rather than inside it: an unresolved share
+    # basis does not make the enterprise valuation wrong, it makes the
+    # per-share comparison incomparable, and LIMITED is exactly that claim.
+    if status == ValuationStatus.VALID_FOR_RESEARCH \
+            and share_basis.get("status") in _UNRESOLVED_SHARE_BASIS:
+        return ValuationStatus.LIMITED
+    return status
+
+
+def _valuation_root_cause(compact_payload: dict, status: str):
+    """The specific reason behind the status, when one was recorded."""
+    failure = compact_payload.get("dcf_packet_failure") or {}
+    reasons = failure.get("reasons") or []
+    if reasons:
+        return reasons[0]
+    dcf = compact_payload.get("dcf") or {}
+    if dcf.get("validation_reasons"):
+        return "; ".join(dcf["validation_reasons"])
+    return dcf.get("reason") or STATUS_EXPLANATION.get(status)
+
+
+def _add_valuation_status_evidence(index, compact_payload, status, gate) -> None:
+    """The status vocabulary is ALWAYS citable; the numbers are not.
+
+    A role that cannot see why a valuation is absent will explain the absence
+    itself, and the explanations it invents are worse than the true one --
+    "the model failed" for a business the model never applied to.
+    """
+    _add(index, "valuation.status", "Valuation status for research use", status)
+    if gate.get("explanation"):
+        _add(index, "valuation.explanation", "Why the valuation is not fully usable",
+             gate["explanation"])
+    if gate.get("root_cause"):
+        _add(index, "valuation.root_cause", "The specific cause behind the valuation status",
+             gate["root_cause"])
+    if status != ValuationStatus.VALID_FOR_RESEARCH:
+        _add(index, "valuation.conclusions_withheld",
+             "Valuation conclusions that may NOT be stated for this analysis",
+             ", ".join(VALUATION_DERIVED_CONCLUSIONS))
+
+
 def build_evidence_index(compact_payload: dict) -> Dict[str, EvidenceItem]:
     """Flatten a compact synthesis payload into ID -> EvidenceItem.
 
@@ -357,6 +465,20 @@ def build_evidence_index(compact_payload: dict) -> Dict[str, EvidenceItem]:
                  metric["value"])
 
     dcf = compact_payload.get("dcf") or {}
+    # Parts 4-5. Decided ONCE, here, and consulted by every valuation id
+    # below. `gate` holds what may be published; anything it does not return
+    # is not indexed, so a role cannot cite it -- which is a stronger
+    # guarantee than instructing a role not to use it.
+    valuation_status = valuation_evidence_status(compact_payload)
+    gate = build_valuation_research_evidence(
+        valuation_status,
+        valuation={"dcf": dcf,
+                   "scenario_spread": compact_payload.get("dcf_scenario_spread") or {},
+                   "valuation_gap": compact_payload.get("valuation_gap") or {}},
+        root_cause=_valuation_root_cause(compact_payload, valuation_status))
+    _add_valuation_status_evidence(index, compact_payload, valuation_status, gate)
+    valuation_publishable = valuation_status == ValuationStatus.VALID_FOR_RESEARCH
+
     if not dcf.get("available") and dcf.get("reason") == DcfValidationStatus.ASSUMPTION_REQUIRED:
         # HOOD corrective patch: a DCF that was never even ATTEMPTED (missing
         # history for automatic assumption generation -- finance/workflow.py::
@@ -409,7 +531,7 @@ def build_evidence_index(compact_payload: dict) -> Dict[str, EvidenceItem]:
             # reasons above are indexed; every scenario/assumption/net-debt
             # field below is withheld entirely for this analysis.
             pass
-        else:
+        elif valuation_publishable:
             for field in _DCF_TOP_FIELDS:
                 _add(index, f"dcf.{field}", f"DCF {field.replace('_', ' ')}", dcf.get(field))
             for scenario in dcf.get("scenarios") or []:
@@ -471,19 +593,16 @@ def build_evidence_index(compact_payload: dict) -> Dict[str, EvidenceItem]:
     # will not state is not evidence a research role may state either, so it
     # is WITHHELD from the index rather than merely discouraged, exactly as
     # a failed DCF's scenario values are.
-    suitability = (compact_payload.get("dcf_suitability") or {}).get("dcf_suitability")
-    share_basis = ((compact_payload.get("dcf_financial_basis") or {})
-                   .get("share_reconciliation") or {})
-    comparison_withheld = (
-        suitability in ("LIMITED", "NOT_SUITABLE")
-        or share_basis.get("status") in ("MATERIAL_DIFFERENCE", "INCOMPATIBLE_BASIS"))
-
+    # Part 5: the same status decides this, rather than a second opinion
+    # assembled from suitability and the share reconciliation. Those two
+    # inputs still matter -- they are what `valuation_evidence_status` reads
+    # -- but they are read once, in one place, for the whole index.
     gap = compact_payload.get("valuation_gap") or {}
-    if gap.get("available") and not comparison_withheld:
+    if gap.get("available") and valuation_publishable:
         for field in _VALUATION_GAP_FIELDS:
             _add(index, f"valuation_gap.{field}", f"Valuation gap: {field.replace('_', ' ')}",
                  gap.get(field))
-    elif gap.get("available"):
+    elif gap.get("available") and valuation_status in _DIRECTION_SURVIVES:
         # The direction survives -- "the price is above the modeled value" is
         # a statement the inputs do support. Only the magnitude goes.
         _add(index, "valuation_gap.direction", "Valuation gap: direction",
@@ -494,8 +613,11 @@ def build_evidence_index(compact_payload: dict) -> Dict[str, EvidenceItem]:
               "price. State the direction only; do not quote or estimate a percentage "
               "premium, discount, or implied return."))
 
+    # The spread IS three modelled per-share values. Publishing it while
+    # withholding `dcf.value_per_share.*` would hand a role the same numbers
+    # under a different name.
     spread = compact_payload.get("dcf_scenario_spread") or {}
-    if spread.get("available"):
+    if spread.get("available") and valuation_publishable:
         for field in _SCENARIO_SPREAD_FIELDS:
             _add(index, f"scenario_spread.{field}", f"Scenario spread: {field.replace('_', ' ')}",
                  spread.get(field))

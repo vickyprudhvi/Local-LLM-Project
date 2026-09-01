@@ -142,6 +142,19 @@ class ForwardPath:
 # ---------------------------------------------------------------------------
 
 
+# A guidance record's own period vocabulary, mapped to the semantic one. The
+# extractor says "annual"/"quarter"; `finance.semantics` reasons in
+# frequencies, and the translation belongs in one place.
+_PERIOD_TYPE_FREQUENCY = {
+    "annual": sem.PeriodFrequency.ANNUAL,
+    "fiscal_year": sem.PeriodFrequency.ANNUAL,
+    "quarter": sem.PeriodFrequency.QUARTER,
+    "quarterly": sem.PeriodFrequency.QUARTER,
+    "half_year": sem.PeriodFrequency.HALF_YEAR,
+    "multi_year": sem.PeriodFrequency.MULTI_YEAR,
+}
+
+
 @dataclass
 class GrowthEvidence:
     """Every growth signal available, each labelled by KIND.
@@ -190,6 +203,12 @@ class GrowthEvidence:
     # becomes the five-year anchor by default.
     guidance_implied_next_period_growth: Optional[float] = None
     guidance_implied_comparison_period: Optional[str] = None
+    # The horizon that derivation actually covers. Stored rather than
+    # inferred: everything downstream that decides what this figure may be
+    # used for reads it, and a field that has to be guessed from which
+    # attribute happens to be populated is the kind of implicit rule this
+    # architecture exists to remove.
+    guidance_implied_period_frequency: str = sem.PeriodFrequency.QUARTER
 
     # Phase H.10. Every guidance-to-growth derivation the semantic validator
     # refused, with the two identities and the reason. Held here so readiness
@@ -210,6 +229,58 @@ class GrowthEvidence:
     # are enough comparable years left to measure one.
     post_break_cagr: Optional[float] = None
     post_break_periods: Tuple[str, ...] = ()
+
+    # -- forecast-horizon eligibility, as structured metadata ------------
+    #
+    # Each forward signal answers the same question for itself: may it set an
+    # assumption's MAGNITUDE, or only corroborate a DIRECTION? Computed from
+    # the horizon the figure covers, never asserted in prose.
+
+    @property
+    def guidance_period_frequency(self) -> str:
+        return _PERIOD_TYPE_FREQUENCY.get(
+            (self.guidance_period_type or "").lower(), sem.PeriodFrequency.UNKNOWN)
+
+    @property
+    def guidance_eligibility(self) -> "sem.ForecastEligibility":
+        """What the CONSOLIDATED revenue guidance may do to the assumption."""
+        return sem.forecast_compatibility(
+            evidence_metric=sem.MetricIdentity.REVENUE,
+            evidence_frequency=self.guidance_period_frequency,
+            assumption_metric=sem.MetricIdentity.REVENUE,
+            assumption_frequency=sem.PeriodFrequency.ANNUAL)
+
+    @property
+    def guidance_forecast_compatibility(self) -> str:
+        return self.guidance_eligibility.status
+
+    @property
+    def implied_growth_eligibility(self) -> "sem.ForecastEligibility":
+        """What the growth DERIVED from a guided level may do.
+
+        Always the shorter horizon in practice -- the twelve-month derivation
+        lands in `guidance_low` instead -- but read from the stored frequency
+        so a future derivation over a different window is classified by what
+        it covers rather than by where it was put.
+        """
+        return sem.forecast_compatibility(
+            evidence_metric=sem.MetricIdentity.REVENUE,
+            evidence_frequency=self.guidance_implied_period_frequency,
+            assumption_metric=sem.MetricIdentity.REVENUE,
+            assumption_frequency=sem.PeriodFrequency.ANNUAL)
+
+    @property
+    def implied_growth_forecast_compatibility(self) -> str:
+        return self.implied_growth_eligibility.status
+
+    @property
+    def ttm_eligibility(self) -> "sem.ForecastEligibility":
+        """Trailing twelve months against a twelve-month assumption."""
+        return sem.forecast_compatibility(
+            evidence_metric=sem.MetricIdentity.REVENUE,
+            evidence_frequency=sem.PeriodFrequency.TTM,
+            assumption_metric=sem.MetricIdentity.REVENUE,
+            assumption_frequency=sem.PeriodFrequency.ANNUAL)
 
     @property
     def guidance_midpoint(self) -> Optional[float]:
@@ -261,7 +332,42 @@ def collect_growth_evidence(state: "fr.CurrentFinancialState",
     if isinstance(revenue_growth, dict) and revenue_growth.get("low") is not None:
         source_metric = revenue_growth.get("name") or \
             gm.GuidanceMetricName.CONSOLIDATED_REVENUE_GROWTH
-        if gm.may_anchor_revenue_growth(source_metric):
+        # Phase 12/15. A long-term framework or an aspiration may not set a
+        # forecast for a named period, however precisely it is stated. Both
+        # remain in the evidence as context; neither becomes the number a
+        # valuation is built on for a specific year.
+        forward_kind = revenue_growth.get("forward_kind")
+        anchorable = (gm.may_anchor_period_forecast(forward_kind)
+                      if forward_kind else True)
+        if not anchorable:
+            evidence.semantic_rejections.append({
+                "code": "GUIDANCE_NOT_PERIOD_COMMITMENT",
+                "operation": sem.Operation.DCF_INPUT,
+                "left": f"revenue_growth guidance ({forward_kind})",
+                "right": "year-1 revenue growth assumption",
+                "reason": (
+                    f"This forward statement is a {forward_kind.replace('_', ' ').lower()} "
+                    "rather than guidance for a named period, so it does not commit the "
+                    "company to a figure for any particular year and cannot anchor the "
+                    "forecast."),
+                "context": "guidance -> year-1 revenue growth",
+            })
+        # Phase 2/3/12. The metric IDENTITY is checked before any value is
+        # assigned, and the rejection happens here -- before a number exists
+        # for a clamp to act on. A clamp must never repair a semantic error:
+        # it would turn a measurement of the wrong quantity into a plausible
+        # one, which is harder to notice than the original mistake.
+        metric_ok, metric_reason = gm.validate_revenue_growth_source(source_metric)
+        if anchorable and not metric_ok:
+            evidence.semantic_rejections.append({
+                "code": gm.GUIDANCE_METRIC_MISMATCH,
+                "operation": sem.Operation.DCF_INPUT,
+                "left": f"guidance metric {source_metric!r}",
+                "right": "year-1 revenue growth assumption",
+                "reason": metric_reason,
+                "context": "guidance -> year-1 revenue growth",
+            })
+        if anchorable and metric_ok and gm.may_anchor_revenue_growth(source_metric):
             evidence.guidance_low = float(revenue_growth["low"])
             evidence.guidance_high = float(revenue_growth["high"])
             evidence.guidance_fiscal_year = revenue_growth.get("fiscal_year")
@@ -613,6 +719,15 @@ def _no_annual_guidance_clause(evidence) -> str:
     does not exist and guidance that exists but does not answer this
     question, and the derivation now says which.
     """
+    if evidence.guidance_midpoint is not None             and not evidence.guidance_eligibility.may_set_magnitude:
+        # Guidance EXISTS and covers a shorter period than the assumption.
+        # Naming the horizon rather than the absence is the difference
+        # between "the company said nothing" and "the company said something
+        # about a different span of time".
+        period = evidence.guidance_period_label or "a shorter period"
+        return (f"Current revenue guidance targets {period}, which covers a shorter period "
+                "than an annual growth assumption, so it corroborates the near-term "
+                "direction but was not used to set the year-1 rate. ")
     if evidence.guidance_implied_next_period_growth is not None:
         return ("Current guidance covers the NEXT QUARTER only and cannot by itself set a "
                 "multi-year annual growth path, so it was not used as the anchor. ")
@@ -654,7 +769,12 @@ def build_growth_path(evidence: GrowthEvidence, forecast_years: int,
     long_run = long_run_growth if long_run_growth is not None else config.dcf_long_run_growth()
     path = ForwardPath(field="revenue_growth")
 
-    if evidence.guidance_midpoint is not None:
+    # Forecast-horizon eligibility, checked BEFORE the value is read. A
+    # quarterly guide is real evidence about the near term and is not a
+    # twelve-month rate; anchoring a year-1 annual assumption on it and then
+    # explaining the mismatch in prose left the NUMBER wrong and the sentence
+    # right, which is the harder failure to notice.
+    if evidence.guidance_midpoint is not None and evidence.guidance_eligibility.may_set_magnitude:
         anchor = evidence.guidance_midpoint
         path.anchor_source = AssumptionSourceType.MANAGEMENT_GUIDANCE
         period = evidence.guidance_period_label or f"fiscal {evidence.guidance_fiscal_year}"
@@ -663,9 +783,6 @@ def build_growth_path(evidence: GrowthEvidence, forecast_years: int,
             f"{evidence.guidance_low:.1%} to {evidence.guidance_high:.1%} "
             f"(midpoint {anchor:.2%}) for {period}. source_metric="
             f"{evidence.guidance_source_metric}.")
-        if evidence.guidance_period_type == "quarter":
-            derivation += (" This is guidance for ONE QUARTER, treated as near-term evidence "
-                           "about the current trajectory rather than as a multi-year forecast.")
         if evidence.guidance_bound_type == "at_least":
             derivation += (" Management stated a MINIMUM rather than a range; the figure is a "
                            "floor, not a midpoint expectation.")
@@ -1615,26 +1732,33 @@ def detect_model_bound_conflict(evidence, raw_value, applied_value, bounds,
     if abs(raw_value - applied_value) < MATERIAL_BOUND_EFFECT:
         return None
 
+    # -- what may ESTABLISH the conflict ----------------------------------
+    #
+    # Only evidence measured in the same units as the assumption. An annual
+    # bound is a statement about twelve months, so a figure compared against
+    # it has to cover twelve months too.
+    #
+    # The live failure this rule exists for: an annual bound of 25%, trailing
+    # twelve-month growth of 32%, next-quarter guidance implying 84%. The
+    # conflict was REAL -- 32% > 25% -- and the sentence said the model was
+    # 59 percentage points wrong, because the quarterly figure supplied the
+    # magnitude. Right conclusion, wrong period, and a reader sent to look at
+    # a discrepancy that does not exist.
+    comparable, directional = _bound_conflict_candidates(evidence)
+
     corroboration = None
-    if evidence is not None:
-        guided = evidence.guidance_midpoint
-        implied = evidence.guidance_implied_next_period_growth
-        for candidate, source in ((guided, "current management guidance"),
-                                  (implied, "management's next-quarter guidance")):
-            if candidate is None:
-                continue
-            # Corroborating means pointing the SAME WAY past the bound, not
-            # merely being a number that exists.
-            if (raw_value > high and candidate > high) or \
-                    (raw_value < low and candidate < low):
-                corroboration = (candidate, source)
-                break
+    for value, source, eligibility in comparable:
+        # Corroborating means pointing the SAME WAY past the bound, not
+        # merely being a number that exists.
+        if (raw_value > high and value > high) or (raw_value < low and value < low):
+            corroboration = (value, source, eligibility)
+            break
     if corroboration is None:
         return None
 
-    value, source = corroboration
+    value, source, eligibility = corroboration
     bound = high if raw_value > high else low
-    return {
+    conflict = {
         "code": DCF_MODEL_BOUND_CONFLICT,
         "severity": "error",
         "assumption": label,
@@ -1643,6 +1767,8 @@ def detect_model_bound_conflict(evidence, raw_value, applied_value, bounds,
         "applied_value": applied_value,
         "corroborating_value": value,
         "corroborating_source": source,
+        "corroborating_forecast_compatibility": eligibility.status,
+        "corroborating_horizon": eligibility.compatible_horizon,
         "message": (
             f"Validated evidence supports a year-1 {label} of {raw_value:.1%} and {source} "
             f"corroborates it at {value:.1%}, but the model's configured bound of "
@@ -1652,6 +1778,68 @@ def detect_model_bound_conflict(evidence, raw_value, applied_value, bounds,
             "deliberately NOT raised; the conflict is recorded so the valuation's standing "
             "reflects it."),
     }
+
+    # -- what may only ACCOMPANY it ---------------------------------------
+    #
+    # Shorter-horizon evidence is preserved in full and attached as context.
+    # It does not decide whether the conflict exists, does not supply its
+    # magnitude and does not change its severity -- and its number stays out
+    # of the message, because a figure printed beside a bound is a figure a
+    # reader will compare against that bound.
+    if directional:
+        support_value, support_source, support_eligibility, period = directional[0]
+        conflict["directional_support"] = {
+            "value": support_value,
+            "source": support_source,
+            "comparison_period": period,
+            "forecast_compatibility": support_eligibility.status,
+            "horizon": support_eligibility.compatible_horizon,
+            "reason": support_eligibility.reason,
+        }
+        conflict["directional_support_note"] = (
+            f"{support_source} covers a shorter period than the annual assumption and "
+            "corroborates the DIRECTION of this conflict only; it is not comparable with "
+            "the annual bound and does not set the size of the gap.")
+    return conflict
+
+
+def _bound_conflict_candidates(evidence):
+    """(comparable, directional) forward signals, each with its eligibility.
+
+    Split by what each may DO rather than by where it came from, so a caller
+    cannot reach for a number without also seeing the verdict on it.
+    """
+    comparable, directional = [], []
+    if evidence is None:
+        return comparable, directional
+
+    # A twelve-month actual is the same kind of quantity as an annual
+    # assumption, and it is the figure the assumption was derived from --
+    # which is why it can show that a bound, rather than the company, is
+    # setting the forecast.
+    if evidence.ttm_yoy is not None:
+        comparable.append((evidence.ttm_yoy, "the trailing twelve-month growth rate",
+                           evidence.ttm_eligibility))
+
+    guided = evidence.guidance_midpoint
+    if guided is not None:
+        eligibility = evidence.guidance_eligibility
+        entry = (guided, "current management guidance", eligibility)
+        if eligibility.may_set_magnitude:
+            comparable.append(entry)
+        elif eligibility.may_corroborate_direction:
+            directional.append(entry + (evidence.guidance_period_label,))
+
+    implied = evidence.guidance_implied_next_period_growth
+    if implied is not None:
+        eligibility = evidence.implied_growth_eligibility
+        entry = (implied, "management's next-period revenue guidance", eligibility)
+        if eligibility.may_set_magnitude:
+            comparable.append(entry)
+        elif eligibility.may_corroborate_direction:
+            directional.append(entry + (evidence.guidance_implied_comparison_period,))
+
+    return comparable, directional
 
 
 def build_forward_assumptions(state: "fr.CurrentFinancialState", forecast_years: int,

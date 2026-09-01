@@ -163,6 +163,94 @@ def detect_reporting_period(text: str) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Phase 12 — WHAT KIND of forward statement this is
+# ---------------------------------------------------------------------------
+#
+# The target PERIOD is not the whole story. "We expect gross margin of 55-60%
+# over the long term" and "we expect gross margin of 55-60% this year" name
+# the same metric and the same range, and only one of them is a commitment
+# about the current year. A framework, an aspiration and a guidance figure
+# carry very different weight, and collapsing them means a multi-year
+# ambition can be read as this year's outlook -- and then compared against
+# this year's actuals.
+
+class ForwardInformationKind:
+    CURRENT_QUARTER_GUIDANCE = "CURRENT_QUARTER_GUIDANCE"
+    CURRENT_FY_GUIDANCE = "CURRENT_FY_GUIDANCE"
+    NEXT_FY_GUIDANCE = "NEXT_FY_GUIDANCE"
+    MULTI_YEAR_GUIDANCE = "MULTI_YEAR_GUIDANCE"
+    LONG_TERM_FRAMEWORK = "LONG_TERM_FRAMEWORK"
+    MANAGEMENT_TARGET = "MANAGEMENT_TARGET"
+    ASPIRATIONAL_TARGET = "ASPIRATIONAL_TARGET"
+    OTHER_FORWARD_INFORMATION = "OTHER_FORWARD_INFORMATION"
+
+    ALL = (CURRENT_QUARTER_GUIDANCE, CURRENT_FY_GUIDANCE, NEXT_FY_GUIDANCE,
+           MULTI_YEAR_GUIDANCE, LONG_TERM_FRAMEWORK, MANAGEMENT_TARGET,
+           ASPIRATIONAL_TARGET, OTHER_FORWARD_INFORMATION)
+
+    # Kinds that are a commitment about a NAMED, BOUNDED period. Only these
+    # may anchor a forecast for that period; the rest are context.
+    PERIOD_GUIDANCE = (CURRENT_QUARTER_GUIDANCE, CURRENT_FY_GUIDANCE,
+                       NEXT_FY_GUIDANCE, MULTI_YEAR_GUIDANCE)
+
+
+# "over the long term", "long-range model", "through the cycle" -- an
+# open-ended horizon rather than a period the company will be held to.
+_LONG_TERM_FRAMEWORK_RE = re.compile(
+    r"(?i)\b(?:long[\s-]term(?:\s+(?:model|framework|target|outlook|algorithm))?|"
+    r"long[\s-]range|through[\s-]the[\s-]cycle|over\s+time|"
+    r"multi[\s-]year\s+(?:framework|model|algorithm)|steady[\s-]state)\b")
+
+# An explicit goal the company has set itself, which is a weaker statement
+# than an outlook for a period.
+_MANAGEMENT_TARGET_RE = re.compile(
+    r"(?i)\b(?:our\s+(?:goal|target|ambition)|we\s+(?:aim|target|aspire)|"
+    r"targeting|committed\s+to\s+(?:achieving|reaching)|"
+    r"on\s+track\s+to\s+(?:achieve|reach))\b")
+
+_ASPIRATIONAL_RE = re.compile(
+    r"(?i)\b(?:aspir\w*|ambition|aim\s+to\s+eventually|"
+    r"over\s+the\s+coming\s+years|in\s+the\s+years\s+ahead)\b")
+
+
+def classify_forward_information(context: str, target_type: str) -> str:
+    """Phase 12: what kind of forward statement this is.
+
+    The surrounding language decides, and it OVERRIDES the period: a
+    sentence naming a long-term framework is a framework even when a year
+    appears nearby, because the year in that sentence is describing when the
+    framework applies rather than a period being guided.
+
+    Falls through to the period-based kind, which is what an ordinary
+    guidance sentence gets.
+    """
+    text = context or ""
+    if _LONG_TERM_FRAMEWORK_RE.search(text):
+        return ForwardInformationKind.LONG_TERM_FRAMEWORK
+    if _ASPIRATIONAL_RE.search(text):
+        return ForwardInformationKind.ASPIRATIONAL_TARGET
+    if _MANAGEMENT_TARGET_RE.search(text):
+        return ForwardInformationKind.MANAGEMENT_TARGET
+
+    return {
+        GuidanceTargetType.NEXT_QUARTER: ForwardInformationKind.CURRENT_QUARTER_GUIDANCE,
+        GuidanceTargetType.CURRENT_FISCAL_YEAR: ForwardInformationKind.CURRENT_FY_GUIDANCE,
+        GuidanceTargetType.NEXT_FISCAL_YEAR: ForwardInformationKind.NEXT_FY_GUIDANCE,
+        GuidanceTargetType.MULTI_YEAR: ForwardInformationKind.MULTI_YEAR_GUIDANCE,
+    }.get(target_type, ForwardInformationKind.OTHER_FORWARD_INFORMATION)
+
+
+def may_anchor_period_forecast(kind: str) -> bool:
+    """Phase 12/15: may this statement set a forecast for its named period?
+
+    A framework or an aspiration may not. Both are real information and both
+    stay in the evidence -- they simply cannot become the number a valuation
+    is built on for a specific year.
+    """
+    return kind in ForwardInformationKind.PERIOD_GUIDANCE
+
+
 def classify_target_type(period: "GuidancePeriod",
                          reporting_period: Optional[str]) -> str:
     """Which kind of future period a guidance figure targets (section 11)."""
@@ -238,8 +326,32 @@ class GuidanceMetricName:
     # income, and GAAP separate from adjusted.
     EBITDA = "ebitda"
     ADJUSTED_EBITDA = "adjusted_ebitda"
+    # Phase H.14. Each of these was ABSENT, and an absent identity is not a
+    # neutral gap: the nearest GENERAL pattern claims the text instead.
+    # "subscription revenue growth of 11% to 12%" was extracted as
+    # CONSOLIDATED revenue growth -- a component of revenue anchoring the
+    # whole company's growth assumption -- because no subscription identity
+    # existed for it to match. "free cash flow growth", "operating cash flow
+    # growth" and "EPS growth" had the opposite failure and matched nothing
+    # at all, so real guidance was silently dropped and the report said none
+    # was available.
+    SUBSCRIPTION_REVENUE = "subscription_revenue"
+    SUBSCRIPTION_REVENUE_GROWTH = "subscription_revenue_growth"
+    FREE_CASH_FLOW_GROWTH = "free_cash_flow_growth"
+    OPERATING_CASH_FLOW_GROWTH = "operating_cash_flow_growth"
+    EPS_GROWTH = "earnings_per_share_growth"
+    NET_INCOME_GROWTH = "net_income_growth"
+
     EBITDA_GROWTH = "ebitda_growth"
     ADJUSTED_EBITDA_GROWTH = "adjusted_ebitda_growth"
+    # An EBITDA MARGIN is a third quantity, and it was missing. A release
+    # guiding "Adjusted EBITDA of 28% to 30% of projected revenue" matched
+    # the absolute ADJUSTED_EBITDA pattern and stored 0.28 under a currency
+    # unit -- the same "an absent identity is claimed by the nearest general
+    # pattern" failure that made subscription revenue growth into
+    # consolidated revenue growth.
+    EBITDA_MARGIN = "ebitda_margin"
+    ADJUSTED_EBITDA_MARGIN = "adjusted_ebitda_margin"
 
     # Per share
     EPS = "earnings_per_share"
@@ -293,6 +405,7 @@ NON_REVENUE_METRICS = frozenset({
     GuidanceMetricName.ADJUSTED_OPERATING_EXPENSES,
     GuidanceMetricName.EBITDA, GuidanceMetricName.ADJUSTED_EBITDA,
     GuidanceMetricName.EBITDA_GROWTH, GuidanceMetricName.ADJUSTED_EBITDA_GROWTH,
+    GuidanceMetricName.EBITDA_MARGIN, GuidanceMetricName.ADJUSTED_EBITDA_MARGIN,
     GuidanceMetricName.EPS, GuidanceMetricName.ADJUSTED_EPS,
     GuidanceMetricName.CAPEX, GuidanceMetricName.OPERATING_CASH_FLOW,
     GuidanceMetricName.FREE_CASH_FLOW, GuidanceMetricName.SHARE_REPURCHASES,
@@ -308,6 +421,71 @@ def is_consolidated_revenue_metric(name: str) -> bool:
 
 def is_revenue_component_metric(name: str) -> bool:
     return name in REVENUE_COMPONENT_METRICS
+
+
+GUIDANCE_METRIC_MISMATCH = "GUIDANCE_METRIC_MISMATCH"
+
+# Phase 2. Metrics that are a RATE OF CHANGE of something other than revenue.
+# Each is real guidance and each is worth recording; none of them describes
+# how fast the top line grows, and a valuation that treats one as if it did
+# is not approximately right, it is measuring a different quantity.
+#
+# Free cash flow can grow 25% on flat revenue through working capital alone.
+# Earnings per share can grow on a buyback with no revenue change at all.
+FORBIDDEN_REVENUE_GROWTH_SOURCES = frozenset({
+    GuidanceMetricName.FREE_CASH_FLOW_GROWTH,
+    GuidanceMetricName.OPERATING_CASH_FLOW_GROWTH,
+    GuidanceMetricName.EPS_GROWTH,
+    GuidanceMetricName.NET_INCOME_GROWTH,
+    GuidanceMetricName.EBITDA_GROWTH,
+    GuidanceMetricName.ADJUSTED_EBITDA_GROWTH,
+    GuidanceMetricName.GROSS_MARGIN,
+    GuidanceMetricName.ADJUSTED_GROSS_MARGIN,
+    GuidanceMetricName.OPERATING_MARGIN,
+    GuidanceMetricName.ADJUSTED_OPERATING_MARGIN,
+    GuidanceMetricName.EBITDA_MARGIN,
+    GuidanceMetricName.ADJUSTED_EBITDA_MARGIN,
+    # Components of revenue. Real, and not the consolidated total.
+    GuidanceMetricName.SUBSCRIPTION_REVENUE_GROWTH,
+    GuidanceMetricName.SERVICE_REVENUE_GROWTH,
+    GuidanceMetricName.PRODUCT_REVENUE_GROWTH,
+    GuidanceMetricName.SEGMENT_REVENUE_GROWTH,
+})
+
+# The only two provenances a revenue-growth assumption may carry.
+ALLOWED_REVENUE_GROWTH_SOURCES = frozenset({
+    GuidanceMetricName.CONSOLIDATED_REVENUE_GROWTH,   # stated directly
+    GuidanceMetricName.CONSOLIDATED_REVENUE,          # derived, period-checked
+})
+
+
+def validate_revenue_growth_source(source_metric):
+    """Phase 2/3: may this guidance metric support a revenue-growth assumption?
+
+    Returns (ok, reason). Defence in depth rather than a second opinion: the
+    extractor's own vocabulary is what normally keeps these apart, and this
+    exists because a GAP in that vocabulary is not a neutral absence -- the
+    nearest general pattern claims the text instead. "Subscription revenue
+    growth" was read as consolidated revenue growth for exactly that reason,
+    and anchored a valuation.
+
+    Fails closed on an unrecognised metric. A source this function has never
+    heard of has not been shown to be revenue growth, and assuming it is
+    would reproduce the failure this guards.
+    """
+    if not source_metric:
+        return False, "no source metric was recorded for this assumption"
+    if source_metric in FORBIDDEN_REVENUE_GROWTH_SOURCES:
+        return False, (
+            f"{source_metric!r} is not consolidated revenue growth. It is real guidance and "
+            "is kept as evidence, but it measures a different quantity -- a rate of change "
+            "of cash flow, earnings or a part of revenue -- and cannot set how fast the "
+            "top line grows.")
+    if source_metric in ALLOWED_REVENUE_GROWTH_SOURCES:
+        return True, ""
+    return False, (
+        f"{source_metric!r} has not been established as consolidated revenue growth, so it "
+        "may not anchor a revenue-growth assumption.")
 
 
 def may_anchor_revenue_growth(name: str) -> bool:
@@ -346,6 +524,10 @@ class GuidanceMetric:
     # target overstates how near-term the outlook is.
     issued_with_reporting_period: Optional[str] = None
     target_period_type: str = GuidanceTargetType.OTHER
+    # Phase 12: what KIND of forward statement this is. A long-term framework
+    # and this year's outlook can name the same metric and the same range;
+    # only one of them may set a forecast for a named period.
+    forward_kind: str = ForwardInformationKind.OTHER_FORWARD_INFORMATION
     scope: str = "consolidated"               # consolidated | service | product | segment
     source_accession: Optional[str] = None
     source_evidence_ids: Tuple[str, ...] = ()
@@ -355,6 +537,13 @@ class GuidanceMetric:
     bound_type: str = GuidanceBound.RANGE
     status: str = GuidanceStatus.CURRENT
     status_reason: Optional[str] = None
+    # WHY this figure qualified as prospective: the text that established it
+    # as forward-looking. Recorded rather than asserted, because "there was a
+    # forward-looking word nearby" is exactly the reasoning that turned a
+    # historical share-count table into guided share count -- and a boolean
+    # would have recorded that verdict just as confidently. A reader who
+    # disagrees can read the sentence the verdict was made from.
+    prospective_evidence: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -369,6 +558,8 @@ class GuidanceMetric:
             "period_type": self.period_type,
             "issued_with_reporting_period": self.issued_with_reporting_period,
             "target_period_type": self.target_period_type,
+            "forward_kind": self.forward_kind,
+            "may_anchor_forecast": may_anchor_period_forecast(self.forward_kind),
             "midpoint": self.midpoint,
             "units": self.unit,
             "scope": self.scope,
@@ -377,6 +568,7 @@ class GuidanceMetric:
             "bound_type": self.bound_type,
             "status": self.status,
             "status_reason": self.status_reason,
+            "prospective_evidence": self.prospective_evidence,
         }
 
     @property
@@ -526,14 +718,26 @@ _NUM = r"\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?"
 # annually" among them. The scale itself is recorded on the metric (`scale`),
 # not folded into the value, so a figure stays in the units the release used.
 _SCALE = r"(?:\s*(?:billion|million|bn|mm)s?)?"
+
+# A PERCENT MARKER is the sign or the word. Only the sign was recognised, so
+# "5.0 to 6.0 percent" parsed as a unitless 5.0-6.0 and was stored as an
+# absolute dollar amount -- on a live issuer, a $5-$6 adjusted EPS where the
+# company had guided 5-6% GROWTH. Two spellings of one measurement, and a
+# unit that depends on which one the writer chose is not a unit.
+#
+# The word is matched only where the SIGN would have been: immediately after
+# the number, before any scale word. "6.0 percent" is a percentage; "6.0
+# billion, up 3 percent" is not.
+_PCT = r"(%|\s*percentage\s+points?|\s*percent(?:age)?)?"
+
 _RANGE_PATTERNS = (
     # "between $3.60 and $3.75", "between 2% and 3%", "between $23 billion and $24 billion"
-    re.compile(rf"(?i)between\s*\$?\s*({_NUM})\s*(%?){_SCALE}\s*(?:and|to)\s*"
-               rf"\$?\s*({_NUM})\s*(%?){_SCALE}"),
+    re.compile(rf"(?i)between\s*\$?\s*({_NUM})\s*{_PCT}{_SCALE}\s*(?:and|to)\s*"
+               rf"\$?\s*({_NUM})\s*{_PCT}{_SCALE}"),
     # "$3.60 to $3.75", "2% to 3%", "a range of 2% to 3%", "$23 billion to $24 billion"
-    re.compile(rf"(?i)\$?\s*({_NUM})\s*(%?){_SCALE}\s*to\s*\$?\s*({_NUM})\s*(%?){_SCALE}"),
+    re.compile(rf"(?i)\$?\s*({_NUM})\s*{_PCT}{_SCALE}\s*to\s*\$?\s*({_NUM})\s*{_PCT}{_SCALE}"),
     # "$ 3.60-3.75", "2%-3%"
-    re.compile(rf"(?i)\$?\s*({_NUM})\s*(%?){_SCALE}\s*-\s*\$?\s*({_NUM})\s*(%?){_SCALE}"),
+    re.compile(rf"(?i)\$?\s*({_NUM})\s*{_PCT}{_SCALE}\s*-\s*\$?\s*({_NUM})\s*{_PCT}{_SCALE}"),
 )
 
 # A POINT WITH AN EXPLICIT TOLERANCE — the other accepted guidance shape, and
@@ -546,9 +750,9 @@ _RANGE_PATTERNS = (
 # is nothing distinguishing a forward figure from a reported actual, which is
 # the guard the range requirement exists to provide.
 _TOLERANCE_PATTERN = re.compile(
-    rf"(?i)\$?\s*({_NUM})\s*(%?)\s*(billion|million)?\s*,?\s*"
+    rf"(?i)\$?\s*({_NUM})\s*{_PCT}\s*(billion|million)?\s*,?\s*"
     r"(?:plus\s*or\s*minus|\+/-|±)\s*"
-    rf"({_NUM})\s*(%|basis\s*points|bps)")
+    rf"({_NUM})\s*(%|percent(?:age)?|basis\s*points|bps)")
 
 # "GAAP and non-GAAP gross margins are expected to be 74.9% and 75.0%,
 # respectively" — two POINT values for two different bases, which must never
@@ -557,8 +761,8 @@ _TOLERANCE_PATTERN = re.compile(
 _DUAL_BASIS_PATTERN = re.compile(
     rf"(?i)GAAP\s+and\s+non-?GAAP\b[^.]{{0,80}}?"
     rf"(?:are\s+)?expected\s+to\s+be\s+"
-    rf"(?:approximately\s+)?\$?\s*({_NUM})\s*(%?)\s*(billion|million)?\s*"
-    rf"and\s+(?:approximately\s+)?\$?\s*({_NUM})\s*(%?)\s*(billion|million)?")
+    rf"(?:approximately\s+)?\$?\s*({_NUM})\s*{_PCT}\s*(billion|million)?\s*"
+    rf"and\s+(?:approximately\s+)?\$?\s*({_NUM})\s*{_PCT}\s*(billion|million)?")
 
 # A ONE-SIDED FLOOR — "Free cash flow* of $18 billion+ in 2026", "expected
 # growth of 5%+ in 2026", "$45 billion+ to shareholders". AT&T states most of
@@ -570,8 +774,8 @@ _DUAL_BASIS_PATTERN = re.compile(
 # stated a minimum, so nothing downstream can treat the number as a midpoint
 # forecast — which would be reading "at least $18B" as "we expect $18B".
 _FLOOR_PATTERN = re.compile(
-    rf"(?i)\$?\s*({_NUM})\s*(%?)\s*(billion|million)?\s*\+"
-    rf"|(?:at\s+least|no\s+less\s+than|or\s+better|or\s+more)\s*\$?\s*({_NUM})\s*(%?)")
+    rf"(?i)\$?\s*({_NUM})\s*{_PCT}\s*(billion|million)?\s*\+"
+    rf"|(?:at\s+least|no\s+less\s+than|or\s+better|or\s+more)\s*\$?\s*({_NUM})\s*{_PCT}")
 
 # How far after a metric name a one-sided floor may begin. Roughly "of", "in
 # the", "at least" — a connector, not a clause.
@@ -595,7 +799,7 @@ _FLOOR_ADJACENCY = 25
 # entirely.
 _APPROXIMATE_PATTERN = re.compile(
     rf"(?i)\b(?:approximately|about|around|roughly|estimated|expected)\s+"
-    rf"(?:[a-z]+\s+){{0,2}}?(?:of\s+)?\$?\s*({_NUM})\s*(%?)\s*"
+    rf"(?:[a-z]+\s+){{0,2}}?(?:of\s+)?\$?\s*({_NUM})\s*{_PCT}\s*"
     rf"(billion|million|bn|mm)?")
 
 _BASIS_POINTS_PER_PERCENT = 100.0
@@ -618,6 +822,10 @@ _SCOPE_CONSOLIDATED = "consolidated"
 _SCOPE_SERVICE = "service"
 _SCOPE_PRODUCT = "product"
 _SCOPE_SEGMENT = "segment"
+# A named part of revenue that is not a reporting segment -- a product line,
+# a delivery model. Distinct from CONSOLIDATED because the company's total
+# can move quite differently from it.
+_SCOPE_COMPONENT = "component"
 
 _METRIC_PATTERNS = (
     # -- revenue: components FIRST in the file for readability only --------
@@ -639,6 +847,39 @@ _METRIC_PATTERNS = (
      re.compile(r"(?i)\b(?:advanced\s+connectivity|legacy|mobility|business\s+wireline|"
                 r"consumer\s+wireline|data\s+center|gaming|automotive|segment)\s+"
                 r"(?:service\s+)?revenues?\s+growth\b")),
+
+    (GuidanceMetricName.SUBSCRIPTION_REVENUE_GROWTH, GuidanceUnit.RATIO, True,
+     _SCOPE_COMPONENT, None,
+     re.compile(r"(?i)\b(?:subscription|recurring|saas|software)\s+"
+                r"(?:and\s+support\s+)?revenues?\s+growth\b")),
+    (GuidanceMetricName.SUBSCRIPTION_REVENUE, GuidanceUnit.CURRENCY, False,
+     _SCOPE_COMPONENT, None,
+     re.compile(r"(?i)\b(?:subscription|recurring|saas)\s+"
+                r"(?:and\s+support\s+)?revenues?\b")),
+
+    # -- cash-flow and earnings GROWTH ------------------------------------
+    #
+    # These exist so the extractor can say what they ARE. None of them may
+    # anchor a revenue-growth assumption -- see `may_anchor_revenue_growth`
+    # and `FORBIDDEN_REVENUE_GROWTH_SOURCES` -- but recording them keeps
+    # real guidance out of the "none extracted" bucket and lets the coverage
+    # matrix count what management actually said.
+    (GuidanceMetricName.FREE_CASH_FLOW_GROWTH, GuidanceUnit.RATIO, True,
+     _SCOPE_CONSOLIDATED, None,
+     re.compile(r"(?i)\b(?:adjusted\s+)?free\s+cash\s+flows?\s+growth\b|"
+                r"\bgrowth\s+in\s+(?:adjusted\s+)?free\s+cash\s+flows?\b")),
+    (GuidanceMetricName.OPERATING_CASH_FLOW_GROWTH, GuidanceUnit.RATIO, True,
+     _SCOPE_CONSOLIDATED, None,
+     re.compile(r"(?i)\boperating\s+cash\s+flows?\s+growth\b|"
+                r"\bgrowth\s+in\s+operating\s+cash\s+flows?\b")),
+    (GuidanceMetricName.EPS_GROWTH, GuidanceUnit.RATIO, True,
+     _SCOPE_CONSOLIDATED, None,
+     re.compile(r"(?i)\b(?:adjusted\s+)?(?:eps|earnings\s+per\s+share)\s+growth\b|"
+                r"\bgrowth\s+in\s+(?:adjusted\s+)?"
+                r"(?:eps|earnings\s+per\s+share)\b")),
+    (GuidanceMetricName.NET_INCOME_GROWTH, GuidanceUnit.RATIO, True,
+     _SCOPE_CONSOLIDATED, None,
+     re.compile(r"(?i)\b(?:adjusted\s+)?net\s+income\s+growth\b")),
 
     # -- revenue: consolidated --------------------------------------------
     (GuidanceMetricName.CONSOLIDATED_REVENUE_GROWTH, GuidanceUnit.RATIO, True,
@@ -675,6 +916,11 @@ _METRIC_PATTERNS = (
                 r"\bgrowth\s+in\s+(?:adjusted|non-?GAAP)\s+EBITDA\b")),
     (GuidanceMetricName.EBITDA_GROWTH, GuidanceUnit.RATIO, True, _SCOPE_CONSOLIDATED, None,
      re.compile(r"(?i)\bEBITDA\s*\*?\s+growth\b|\bgrowth\s+in\s+EBITDA\b")),
+    (GuidanceMetricName.ADJUSTED_EBITDA_MARGIN, GuidanceUnit.RATIO, True,
+     _SCOPE_CONSOLIDATED, BASIS_ADJUSTED,
+     re.compile(r"(?i)\b(?:adjusted|non-?GAAP)\s+EBITDA\s+margins?\b")),
+    (GuidanceMetricName.EBITDA_MARGIN, GuidanceUnit.RATIO, True, _SCOPE_CONSOLIDATED, None,
+     re.compile(r"(?i)\bEBITDA\s+margins?\b")),
     (GuidanceMetricName.ADJUSTED_EBITDA, GuidanceUnit.CURRENCY, False,
      _SCOPE_CONSOLIDATED, BASIS_ADJUSTED,
      re.compile(r"(?i)\b(?:adjusted|non-?GAAP)\s+EBITDA\b")),
@@ -747,6 +993,150 @@ _METRIC_PATTERNS = (
      re.compile(r"(?i)\bcash\s+contributions\b|\bpension\s+contributions\b|"
                 r"\bbenefit\s+plan\s+contributions\b")),
 )
+
+# ---------------------------------------------------------------------------
+# Units and denominator as part of metric identity (spec section 3)
+# ---------------------------------------------------------------------------
+#
+# A live release guided "non-GAAP operating income ... approximately 21% of
+# projected revenue" and it was extracted as `operating_income` -- an
+# absolute currency metric -- holding 0.21.
+#
+# The arithmetic was not wrong; the IDENTITY was. "Operating income of $2.1
+# billion" and "operating income equal to 21% of revenue" are two different
+# quantities: one is a dollar amount, the other is a ratio whose denominator
+# is revenue. A metric_id that cannot tell them apart is not an identity, and
+# everything downstream -- the coverage matrix, the forward-assumption
+# builder, the report -- reads the name and the unit and believes them.
+#
+# So the unit and the DENOMINATOR participate in identity. A metric whose
+# taxonomy unit is an absolute amount, matched against a percentage of
+# revenue, resolves to that metric's margin identity. Where no margin
+# identity exists the figure is refused, because a percentage of something
+# that was never established is not a measurement of anything.
+
+# "of revenue", "of projected revenue", "of net sales", "as a percentage of
+# our full-year revenues". The qualifiers between "of" and the noun are
+# forward-looking adjectives a release routinely uses; none of them changes
+# what the denominator IS.
+_PERCENT_OF_REVENUE = re.compile(
+    r"(?i)\b(?:as\s+a\s+percent(?:age)?\s+of|of)\s+"
+    r"(?:its\s+|our\s+|the\s+|a\s+)?"
+    r"(?:projected\s+|expected\s+|anticipated\s+|estimated\s+|forecast(?:ed)?\s+|"
+    r"guided\s+|full[\s-]?year\s+|quarterly\s+|total\s+|consolidated\s+|net\s+|"
+    r"worldwide\s+)*"
+    r"(?:revenues?|sales)\b")
+
+# The OTHER denominator a percentage can have: the prior period. "Free cash
+# flow growth of 9.0 to 10.0 percent year-over-year" is a rate of change, and
+# the vocabulary already had an identity for it -- nothing routed the figure
+# there, so it was stored as $9-$10 of absolute free cash flow against a real
+# figure roughly twice that.
+#
+# Matched on the metric's own surroundings, not on the whole paragraph: a
+# release that reports one metric's growth beside another's level would
+# otherwise make both growth rates.
+_PERCENT_YEAR_OVER_YEAR = re.compile(
+    r"(?i)\byear[\s-]over[\s-]year\b|\byear\s+on\s+year\b|\by/y\b|\byoy\b"
+    r"|\bgrowth\b|\bgrow(?:s|th|ing)?\b|\bincreas\w*\s+(?:by\s+)?\d"
+    r"|\bcompared\s+(?:with|to)\s+(?:fiscal\s+)?\d{4}\b"
+    r"|\bversus\s+(?:fiscal\s+)?\d{4}\b")
+
+# (absolute metric, basis) -> the identity a percentage YEAR-OVER-YEAR names.
+# Every one of these already existed; the gap was the routing.
+_PERCENT_GROWTH_IDENTITY = {
+    GuidanceMetricName.FREE_CASH_FLOW: GuidanceMetricName.FREE_CASH_FLOW_GROWTH,
+    GuidanceMetricName.OPERATING_CASH_FLOW: GuidanceMetricName.OPERATING_CASH_FLOW_GROWTH,
+    GuidanceMetricName.EPS: GuidanceMetricName.EPS_GROWTH,
+    GuidanceMetricName.ADJUSTED_EPS: GuidanceMetricName.EPS_GROWTH,
+    GuidanceMetricName.EBITDA: GuidanceMetricName.EBITDA_GROWTH,
+    GuidanceMetricName.ADJUSTED_EBITDA: GuidanceMetricName.ADJUSTED_EBITDA_GROWTH,
+    GuidanceMetricName.CONSOLIDATED_REVENUE: GuidanceMetricName.CONSOLIDATED_REVENUE_GROWTH,
+    GuidanceMetricName.SERVICE_REVENUE: GuidanceMetricName.SERVICE_REVENUE_GROWTH,
+    GuidanceMetricName.PRODUCT_REVENUE: GuidanceMetricName.PRODUCT_REVENUE_GROWTH,
+    GuidanceMetricName.SUBSCRIPTION_REVENUE: GuidanceMetricName.SUBSCRIPTION_REVENUE_GROWTH,
+    # Deliberately absent: capital expenditure, share repurchases, cash taxes,
+    # pension contributions, operating expenses. None has a growth identity in
+    # this vocabulary, and a percentage against one of them is refused rather
+    # than given a name that does not exist yet.
+}
+
+# (absolute metric, basis) -> the identity a percentage OF REVENUE actually
+# names. Keyed on basis as well as name because GAAP and non-GAAP margins are
+# two statements and merging them loses the distinction (section 6).
+_PERCENT_OF_REVENUE_IDENTITY = {
+    (GuidanceMetricName.OPERATING_INCOME, BASIS_GAAP):
+        GuidanceMetricName.OPERATING_MARGIN,
+    (GuidanceMetricName.OPERATING_INCOME, BASIS_ADJUSTED):
+        GuidanceMetricName.ADJUSTED_OPERATING_MARGIN,
+    (GuidanceMetricName.EBITDA, BASIS_GAAP):
+        GuidanceMetricName.EBITDA_MARGIN,
+    (GuidanceMetricName.EBITDA, BASIS_ADJUSTED):
+        GuidanceMetricName.ADJUSTED_EBITDA_MARGIN,
+    (GuidanceMetricName.ADJUSTED_EBITDA, BASIS_ADJUSTED):
+        GuidanceMetricName.ADJUSTED_EBITDA_MARGIN,
+    (GuidanceMetricName.ADJUSTED_EBITDA, BASIS_GAAP):
+        GuidanceMetricName.ADJUSTED_EBITDA_MARGIN,
+    # Deliberately NOT listed: operating expenses as a percentage of
+    # revenue. That ratio has no identity in this vocabulary, and inventing
+    # one here to avoid a refusal is how the gaps above were created. Until
+    # an identity exists, the figure is refused and the refusal is recorded.
+}
+
+# Units that describe an ABSOLUTE amount. A percentage carried under one of
+# these is the mismatch this machinery exists to catch.
+_ABSOLUTE_UNITS = (GuidanceUnit.CURRENCY, GuidanceUnit.CURRENCY_PER_SHARE,
+                   GuidanceUnit.SHARES)
+
+# Named codes, so a refusal is greppable and the spec's failure-status list
+# names something that exists rather than something that was described.
+PERCENTAGE_DENOMINATOR_UNRESOLVED = "GUIDANCE_PERCENTAGE_DENOMINATOR_UNRESOLVED"
+SOURCE_NOT_PROSPECTIVE = "GUIDANCE_SOURCE_NOT_PROSPECTIVE"
+
+
+def percentage_denominator_stated(context: str) -> bool:
+    """Does the text say what a percentage here would be a percentage OF?
+
+    The one question that decides whether an absolute metric may carry a
+    percentage at all. Asked before the value is read, so a figure whose
+    denominator was never established is not parsed and then discarded -- it
+    is refused at the point the ambiguity exists.
+    """
+    context = context or ""
+    return bool(_PERCENT_OF_REVENUE.search(context)
+                or _PERCENT_YEAR_OVER_YEAR.search(context))
+
+
+def resolve_percentage_identity(name: str, unit: str, basis: str, context: str):
+    """(identity, unit) for a percentage value, or None to refuse it.
+
+    Returns the metric unchanged when it is already a ratio. When an ABSOLUTE
+    metric carries a percentage, the denominator decides what the figure is,
+    and it has to be established from the text before any identity can be
+    assigned:
+
+        % OF REVENUE      -> that metric's margin
+        % YEAR-OVER-YEAR  -> that metric's growth rate
+        anything else     -> refused
+
+    Revenue is checked first because "operating income of 21% of projected
+    revenue" also contains growth-ish vocabulary in most releases, and the
+    stated denominator is the more specific reading.
+    """
+    if unit not in _ABSOLUTE_UNITS:
+        return name, unit
+    context = context or ""
+    if _PERCENT_OF_REVENUE.search(context):
+        resolved = _PERCENT_OF_REVENUE_IDENTITY.get((name, basis))
+        if resolved is not None and resolved in _METRIC_BY_NAME:
+            return resolved, GuidanceUnit.RATIO
+        return None
+    if _PERCENT_YEAR_OVER_YEAR.search(context):
+        resolved = _PERCENT_GROWTH_IDENTITY.get(name)
+        if resolved is not None and resolved in _METRIC_BY_NAME:
+            return resolved, GuidanceUnit.RATIO
+    return None
+
 
 _METRIC_BY_NAME = {entry[0]: entry for entry in _METRIC_PATTERNS}
 
@@ -1149,7 +1539,7 @@ def _is_increment_phrase(window: str, position: int) -> bool:
 # then its implied rate. The rate IS the guidance; it is simply not written
 # as a range.
 _MIDPOINT_PATTERN = re.compile(
-    rf"(?i)\bor\s+\$?\s*({_NUM})\s*(%?)\s*(billion|million)?\s+at\s+the\s+midpoint")
+    rf"(?i)\bor\s+\$?\s*({_NUM})\s*{_PCT}\s*(billion|million)?\s+at\s+the\s+midpoint")
 
 
 # A forward qualifier can sit before the METRIC NAME rather than before the
@@ -1168,7 +1558,7 @@ _FORWARD_QUALIFIER = re.compile(
     r"(?i)\b(?:estimated|expected|approximately|about|around|roughly|guidance|"
     r"outlook|forecast|projected|anticipated)\b")
 _BARE_FIGURE_PATTERN = re.compile(
-    rf"(?i)^[^0-9%$]{{0,{_BARE_FIGURE_ADJACENCY}}}?\$?\s*({_NUM})\s*(%?)\s*"
+    rf"(?i)^[^0-9%$]{{0,{_BARE_FIGURE_ADJACENCY}}}?\$?\s*({_NUM})\s*{_PCT}\s*"
     rf"(billion|million|bn|mm)?")
 
 
@@ -1206,6 +1596,23 @@ def _qualified_bare_figure(window: str, lookbehind: str, require_percent: bool):
         return None
     return (value, value, is_percent, match.group(0).strip(),
             GuidanceBound.APPROXIMATELY)
+
+
+# A unit written ONCE, at the end of a range, applies to both ends: "9.0 to
+# 10.0 percent" is a percentage range, and reading the first number as
+# unitless is how a 5-6% growth guide became a $5-$6 per-share figure.
+#
+# This does NOT relax the guard it sits next to. That guard exists for
+# "6.6% to $25.3 Billion" -- a growth RATE and a sales LEVEL joined by the
+# word "to" -- where the two ends carry DIFFERENT units. A unit distributes
+# only when the other end carries no unit at all: no currency sign and no
+# scale word anywhere in the matched span.
+_CURRENCY_OR_SCALE = re.compile(r"(?i)\$|(?:billion|million|bn|mm)s?")
+
+
+def _percent_unit_distributes(matched: str) -> bool:
+    """Is the single percent marker in this range the unit for both ends?"""
+    return not _CURRENCY_OR_SCALE.search(matched or "")
 
 
 def _find_range(window: str, require_percent: bool, lookbehind: str = ""
@@ -1248,8 +1655,11 @@ def _find_range(window: str, require_percent: bool, lookbehind: str = ""
             # that then anchored the DCF's year-1 assumption. A range whose
             # ends disagree about their unit is not a range.
             if left_percent != right_percent:
-                continue
-            is_percent = left_percent
+                if not _percent_unit_distributes(match.group(0)):
+                    continue
+                is_percent = True
+            else:
+                is_percent = left_percent
             if require_percent != is_percent:
                 continue
             if high < low or low == high:
@@ -1322,9 +1732,231 @@ def _outlook_block_spans(text):
             for m in _OUTLOOK_BLOCK_RE.finditer(text)]
 
 
+# ---------------------------------------------------------------------------
+# Blocks a release itself labels as REPORTED RESULTS
+# ---------------------------------------------------------------------------
+#
+# An earnings release is mostly history: condensed statements, a
+# reconciliation, the share-count table behind the EPS denominators. The
+# forward qualification for a figure was a forward-looking WORD within reach
+# of it -- and those words are everywhere in the prose wrapped around those
+# tables. A live run published a historical weighted-average diluted share
+# count as management guidance because "expects" appeared in a paragraph
+# above the table.
+#
+# Proximity is not qualification. A release states, in its own headings,
+# which of its numbers already happened; a figure inside such a heading's
+# block is a reported actual unless the release re-qualifies it explicitly.
+_REPORTED_BLOCK_RE = re.compile(
+    r"(?i)\b(?:condensed\s+)?consolidated\s+"
+    r"(?:statements?|balance\s+sheets?|results)\b"
+    r"|\bstatements?\s+of\s+(?:operations|earnings|income|cash\s+flows)\b"
+    r"|\breconciliation\s+of\s+(?:gaap|reported|net|non-?gaap)"
+    # Deliberately NOT a bare "GAAP to Non-GAAP". Releases print that phrase
+    # inline as a cross-reference -- "See accompanying GAAP to Non-GAAP
+    # reconciliations" -- in the middle of their HIGHLIGHTS prose, and
+    # reading it as a table heading laid a 700-character historical block
+    # over the paragraph carrying the company's own narrowed full-year
+    # outlook. A real reconciliation table is headed "Reconciliation of ...",
+    # which the alternative above already matches.
+    r"|\bweighted[\s-]average\s+shares\s+used\b"
+    r"|\b(?:three|six|nine|twelve)\s+months\s+ended\b"
+    r"|\b(?:second|third|fourth|first)[\s-]quarter\s+(?:and\s+)?"
+    r"(?:full[\s-]year\s+)?results\b")
+
+# How far a reported-results heading governs when nothing else ends it.
+_REPORTED_BLOCK_REACH = 700
+
+# What ENDS a reported-results block. Deliberately broader than
+# `_OUTLOOK_BLOCK_RE`, and deliberately not the same list: that pattern
+# decides what QUALIFIES as forward-looking and must stay narrow, while this
+# one only decides where a historical block stops. Erring wide here can only
+# shorten a block -- a figure past the terminator still has to qualify on its
+# own -- whereas erring wide there would qualify figures directly.
+#
+# A live release heads its guidance table with the single word "Outlook",
+# which `_OUTLOOK_BLOCK_RE` does not match; without this the preceding
+# "Three Months Ended" block reached over the whole table and the company's
+# own full-year outlook was refused as reported results.
+_REPORTED_BLOCK_TERMINATOR_RE = re.compile(
+    r"(?i)outlook|guidance|we\s+expect|the\s+company\s+expects")
+
+
+def _reported_block_spans(text):
+    """(start, end) spans a reported-results heading governs.
+
+    Each span ends at the earlier of the next outlook/guidance heading and
+    `_REPORTED_BLOCK_REACH`, so a release that puts its outlook directly
+    below its statements does not have the outlook swallowed by them.
+    """
+    outlook_starts = sorted(m.start() for m in _REPORTED_BLOCK_TERMINATOR_RE.finditer(text))
+    spans = []
+    for match in _REPORTED_BLOCK_RE.finditer(text):
+        start = match.start()
+        stop = start + _REPORTED_BLOCK_REACH
+        following = next((o for o in outlook_starts if o > start), None)
+        if following is not None:
+            stop = min(stop, following)
+        spans.append((start, stop))
+    return spans
+
+
+def _inside_reported_block(position, blocks) -> bool:
+    return any(start <= position <= end for start, end in blocks)
+
+
 def _inside_outlook_block(position, declarations, blocks):
     """Is this metric keyword inside a declared outlook block?"""
     return any(start <= position <= end for start, end in blocks)
+
+
+def _metric_from_row_label(label: str):
+    """A table row label to a canonical metric identity, or None.
+
+    Reuses `_metric_keyword_hits` -- the same longest-match resolution the
+    sentence path uses -- so a row reading "Subscription revenue" and a
+    sentence saying "subscription revenue" cannot be classified differently.
+    A label that matches nothing returns None and the row is left alone;
+    inventing an identity for an unrecognised label is how a component
+    became consolidated revenue in the first place.
+    """
+    hits = _metric_keyword_hits(label or "")
+    if not hits:
+        return None
+    # The hit covering the most of the label. A row label is short and names
+    # one metric; the widest match is the most specific reading of it.
+    _start, _end, entry = max(hits, key=lambda h: h[1] - h[0])
+    return entry
+
+
+def _table_guidance_metrics(text, symbol, accession, filed, existing):
+    """Sections 10-11: guidance recovered from a TABLE, keyed by row+column.
+
+    Only ADDS. Where the sentence path already produced an entry for a
+    metric, that entry stands -- it carries the surrounding prose, the
+    bound type and the supersession context that a bare cell does not, and
+    overwriting it would trade richer evidence for a tidier parse.
+
+    What this recovers is everything the sentence path could not see: the
+    second column, the rows below the first, and the GAAP/non-GAAP pair.
+    """
+    from finance import guidance_tables
+
+    table = guidance_tables.parse_guidance_table(text)
+    if not table.ok:
+        return {}, []
+
+    recovered, warnings = {}, []
+    for cell in table.cells:
+        entry = _metric_from_row_label(cell.metric_label)
+        if entry is None:
+            continue
+        name, unit, is_growth, scope, _basis_hint, _pattern = entry
+
+        # A percentage cell under a metric measured in currency (or the
+        # reverse) means the row and the column disagree about what this
+        # number is. Refuse rather than coerce -- section 11's whole point.
+        if is_growth and not cell.is_percent:
+            continue
+        basis = _basis_for_label(cell.metric_label)
+        if not is_growth and cell.is_percent:
+            # ...unless the ROW LABEL itself states the denominator ("Non-GAAP
+            # operating income (% of revenue)"), in which case the cell is a
+            # margin and has a margin identity. Same rule as the sentence
+            # path, applied to the row label because that is where a table
+            # states what its numbers are.
+            resolved = resolve_percentage_identity(name, unit, basis,
+                                                   cell.metric_label)
+            if resolved is None:
+                continue
+            name, unit = resolved
+
+        period = parse_guidance_period(cell.period_label, filed)
+        if period is None:
+            continue
+        key = name
+        if key in existing or key in recovered:
+            continue
+
+        low = cell.low / 100.0 if cell.is_percent else cell.low
+        high = cell.high / 100.0 if cell.is_percent else cell.high
+        evidence_id = f"dcf.guidance.{name}.current"
+        target_type = classify_target_type(period, None)
+        recovered[key] = GuidanceMetric(
+            name=name, low=low, high=high, unit=unit,
+            basis=basis,
+            fiscal_year=period.fiscal_year,
+            evidence_id=evidence_id,
+            source_excerpt=f"{cell.metric_label} | {cell.period_label} | {cell.raw}",
+            scale=cell.scale,
+            guidance_id=_guidance_id(symbol, accession, name, period.label),
+            issued_at=filed,
+            fiscal_period=period.label,
+            period_type=period.period_type,
+            issued_with_reporting_period=None,
+            target_period_type=target_type,
+            forward_kind=classify_forward_information(cell.metric_label, target_type),
+            scope=scope,
+            source_accession=accession,
+            source_evidence_ids=(evidence_id,),
+            bound_type=(GuidanceBound.RANGE if cell.low != cell.high
+                        else GuidanceBound.APPROXIMATELY),
+            status=GuidanceStatus.CURRENT,
+            status_reason=None,
+            # A guidance TABLE qualifies its own rows: the header states that
+            # the columns are periods being guided, which is a stronger
+            # statement than any word in the prose around it.
+            prospective_evidence=(
+                f"Guidance table row {cell.metric_label!r} under the column "
+                f"{cell.period_label!r}"))
+
+    if table.skipped_rows:
+        warnings.append(
+            f"{len(table.skipped_rows)} guidance table row(s) did not align with the "
+            "column headers and were not read; their values are not reported rather "
+            "than being attached to a period that may be wrong.")
+    return recovered, warnings
+
+
+def _basis_for_label(label: str) -> str:
+    """GAAP unless the row says otherwise. Adjacent rows in one table differ
+    only by this word, and merging them loses the distinction entirely."""
+    lowered = (label or "").lower()
+    if "non-gaap" in lowered or "non gaap" in lowered or "adjusted" in lowered:
+        return BASIS_ADJUSTED
+    return BASIS_GAAP
+
+
+# How much of the qualifying statement is kept. Enough for a reader to judge
+# the verdict, short enough that a release's whole paragraph does not travel
+# with every metric.
+_PROSPECTIVE_EVIDENCE_CHARS = 180
+
+
+def _prospective_evidence(text: str, keyword_start: int, forward_marker,
+                          in_outlook_block: bool) -> str:
+    """The text that established this figure as forward-looking.
+
+    Prefers the sentence carrying the forward-looking verb. An outlook block
+    qualifies its own rows, so where no marker sits near the figure the block
+    heading is what is recorded -- naming the actual reason rather than a
+    nearby word that happens to look like one.
+    """
+    if forward_marker is not None:
+        window_start = max(0, keyword_start - _WINDOW)
+        absolute = window_start + forward_marker.start()
+        start = max(0, absolute - 60)
+        return " ".join(text[start:absolute + _PROSPECTIVE_EVIDENCE_CHARS].split())
+    if in_outlook_block:
+        heading = None
+        for match in _OUTLOOK_BLOCK_RE.finditer(text):
+            if match.start() <= keyword_start:
+                heading = match
+        if heading is not None:
+            return " ".join(
+                text[heading.start():
+                     heading.start() + _PROSPECTIVE_EVIDENCE_CHARS].split())
+    return ""
 
 
 def extract_guidance_from_text(text: str, symbol: str, accession: str, document: str,
@@ -1354,6 +1986,7 @@ def extract_guidance_from_text(text: str, symbol: str, accession: str, document:
     boundaries = [start for start, _end, _entry in hits]
     declarations = _period_declarations(text)
     outlook_blocks = _outlook_block_spans(text)
+    reported_blocks = _reported_block_spans(text)
     reporting_period = detect_reporting_period(text)
 
     for index, (start, end, entry) in enumerate(hits):
@@ -1380,12 +2013,47 @@ def extract_guidance_from_text(text: str, symbol: str, accession: str, document:
         # expenses, other income, tax rate, EPS and share count, and only tax
         # rate and EPS survived. The block header is the marker for its own
         # rows, exactly as it is for their period.
-        if not _FORWARD_MARKERS.search(context) and not _inside_outlook_block(
-                start, declarations, outlook_blocks):
+        in_outlook_block = _inside_outlook_block(start, declarations, outlook_blocks)
+        forward_marker = _FORWARD_MARKERS.search(context)
+        if not forward_marker and not in_outlook_block:
             continue
 
-        found = _find_range(window, require_percent,
-                            lookbehind=text[max(0, start - _QUALIFIER_LOOKBEHIND):start])
+        # A figure inside a block the release itself labels as reported
+        # results is a reported actual. An outlook heading re-qualifies it --
+        # `_reported_block_spans` already ends each block at the next one --
+        # and nothing else does, because the forward-looking words in the
+        # prose around a statements table are about the company, not about
+        # the number in row four.
+        if _inside_reported_block(start, reported_blocks) and not in_outlook_block:
+            warnings.append(
+                f"{SOURCE_NOT_PROSPECTIVE}: ignored a {name} value inside a "
+                "reported-results section. The release presents that block as results "
+                "already reported, so a figure in it is not a forward-looking statement "
+                "however the surrounding prose reads.")
+            continue
+
+        prospective_evidence = _prospective_evidence(
+            text, start, forward_marker, in_outlook_block)
+
+        lookbehind = text[max(0, start - _QUALIFIER_LOOKBEHIND):start]
+        found = _find_range(window, require_percent, lookbehind=lookbehind)
+        if found is None and unit in _ABSOLUTE_UNITS:
+            # An absolute metric normally refuses a percentage outright, and
+            # that refusal is right whenever the percentage means something
+            # this vocabulary cannot name. But a release that states the
+            # DENOMINATOR is not ambiguous: "operating income of 21% OF
+            # PROJECTED REVENUE" is a margin, and dropping it loses real
+            # guidance. The percentage is accepted only when the denominator
+            # is present, and the identity is corrected below.
+            if percentage_denominator_stated(context):
+                found = _find_range(window, True, lookbehind=lookbehind)
+            if found is None and _find_range(window, True, lookbehind=lookbehind):
+                warnings.append(
+                    f"{PERCENTAGE_DENOMINATOR_UNRESOLVED}: ignored a {name} value. The "
+                    f"figure is a percentage, {name} is measured as an absolute amount, "
+                    "and the text does not say what the percentage is a percentage OF, "
+                    "so no identity could be assigned to it.")
+                continue
         if found is None:
             found = _dual_basis_value(text, end, name, require_percent)
             if found is None:
@@ -1442,6 +2110,25 @@ def extract_guidance_from_text(text: str, symbol: str, accession: str, document:
                 "The text around this figure states that the outlook was withdrawn or "
                 "suspended, so it is retained for history and never used as current guidance.")
 
+        # Units and denominator participate in identity. A percentage found
+        # under a metric whose taxonomy unit is an absolute amount is not
+        # that metric: it is either that metric's MARGIN, when the text
+        # establishes revenue as the denominator, or it is unidentifiable.
+        # Storing it under the absolute name is what put 0.21 into
+        # `operating_income` on a live run.
+        if is_percent:
+            resolved = resolve_percentage_identity(name, unit, basis, context)
+            if resolved is None:
+                warnings.append(
+                    f"{PERCENTAGE_DENOMINATOR_UNRESOLVED}: ignored a {name} value "
+                    f"({matched}). It is a percentage, {name} is measured as an absolute "
+                    "amount, and no denominator could be established, so the figure was "
+                    "not assigned an identity.")
+                continue
+            name, unit = resolved
+            if name in metrics:
+                continue
+
         scale_match = _SCALE_RE.search(context)
         if is_percent:
             low, high = low / 100.0, high / 100.0
@@ -1460,12 +2147,24 @@ def extract_guidance_from_text(text: str, symbol: str, accession: str, document:
             period_type=period.period_type,
             issued_with_reporting_period=reporting_period,
             target_period_type=classify_target_type(period, reporting_period),
+            forward_kind=classify_forward_information(
+                _excerpt(text, start, end + limit),
+                classify_target_type(period, reporting_period)),
             scope=scope,
             source_accession=accession,
             source_evidence_ids=(evidence_id,),
             bound_type=bound_type,
             status=status,
-            status_reason=status_reason)
+            status_reason=status_reason,
+            prospective_evidence=prospective_evidence)
+
+    # Sections 10-11. Whatever the sentence path could not see, recovered
+    # from the table with its row and column identity intact. Additive only:
+    # an entry the sentence path already produced stands.
+    table_metrics, table_warnings = _table_guidance_metrics(
+        text, symbol, accession, filed, metrics)
+    metrics.update(table_metrics)
+    warnings.extend(table_warnings)
 
     return GuidanceRelease(symbol=symbol, fiscal_year=expected_fiscal_year,
                            accession=accession, document=document, filed=filed,
@@ -1654,6 +2353,19 @@ def validate_guidance_metric(metric: GuidanceMetric) -> List[str]:
     if expected_unit is not None and metric.unit != expected_unit:
         problems.append(f"units {metric.unit!r} do not match the {metric.name!r} taxonomy "
                         f"entry ({expected_unit!r})")
+    # Prospective semantics. A guidance item is a statement about a period
+    # that has not happened yet, and every one of these is part of saying so:
+    # without the target period type nothing downstream can tell a
+    # next-quarter outlook from a multi-year framework, and without the
+    # qualifying text there is no way to check that the figure was forward-
+    # looking at all rather than a reported actual standing near the word
+    # "expects".
+    if metric.target_period_type not in GuidanceTargetType.ALL:
+        problems.append(f"unrecognized target period type {metric.target_period_type!r}")
+    if not metric.prospective_evidence:
+        problems.append(
+            "no prospective evidence: nothing in the source establishes this figure as "
+            "forward-looking, so it is a reported value rather than guidance")
     return problems
 
 
@@ -1783,6 +2495,101 @@ def _row_status(present_names, metrics, superseded_names) -> str:
     if any(name in (superseded_names or set()) for name in present_names):
         return GuidanceMetricStatus.SUPERSEDED
     return GuidanceMetricStatus.UNAVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# Parts 9-10 — supersession resolved per metric AND target period
+# ---------------------------------------------------------------------------
+#
+# "Latest filing wins" is the wrong rule and produces two distinct errors.
+# It drops a still-current full-year outlook because a later release guided
+# only the next quarter, and it keeps a revised figure and the figure it
+# revised side by side when both arrive in one document. Guidance is
+# superseded by NEWER GUIDANCE FOR THE SAME THING, and "the same thing" is
+# the metric and the period it targets -- not the document it arrived in.
+
+
+def guidance_identity(entry) -> tuple:
+    """What makes two guidance items the same statement.
+
+    Basis is part of the identity: a GAAP margin outlook and an adjusted one
+    for the same period are two statements, and neither supersedes the
+    other. Merging them would silently drop whichever arrived first.
+    """
+    def read(name, default=None):
+        if isinstance(entry, dict):
+            return entry.get(name, default)
+        return getattr(entry, name, default)
+
+    return (read("name") or read("metric_id"),
+            read("fiscal_period") or read("target_period"),
+            read("target_period_type"),
+            read("basis"))
+
+
+def resolve_guidance_status(entries) -> list:
+    """Assign CURRENT / SUPERSEDED to a set of guidance items.
+
+    Within one identity the newest issue date is CURRENT and everything
+    older is SUPERSEDED. Across identities nothing is touched: a long-term
+    framework is not superseded by this year's outlook, and a Q3 figure is
+    not superseded by an FY figure -- they are different forward statements
+    about different periods, and section 10 is explicit that both may stand.
+
+    WITHDRAWN survives untouched and never becomes CURRENT again. A company
+    that pulled its guidance has said something, and the newest remaining
+    figure is not a replacement for it.
+
+    Returns the entries with `status` and `status_reason` set. Input order
+    is preserved so a caller can zip results back to its own records.
+    """
+    entries = list(entries or [])
+
+    def read(entry, name, default=None):
+        if isinstance(entry, dict):
+            return entry.get(name, default)
+        return getattr(entry, name, default)
+
+    def write(entry, name, value):
+        if isinstance(entry, dict):
+            entry[name] = value
+        else:
+            setattr(entry, name, value)
+
+    groups = {}
+    for entry in entries:
+        if read(entry, "status") == GuidanceStatus.WITHDRAWN:
+            continue
+        groups.setdefault(guidance_identity(entry), []).append(entry)
+
+    for identity, group in groups.items():
+        if len(group) == 1:
+            write(group[0], "status", GuidanceStatus.CURRENT)
+            continue
+        # Newest issue date wins within the identity. A missing date sorts
+        # oldest: an item that cannot say when it was issued cannot claim to
+        # be the most recent one.
+        ordered = sorted(group, key=lambda e: (read(e, "issued_at") or ""))
+        newest = ordered[-1]
+        for entry in ordered[:-1]:
+            write(entry, "status", GuidanceStatus.SUPERSEDED)
+            write(entry, "status_reason",
+                  f"Superseded by guidance for the same metric and target period issued "
+                  f"{read(newest, 'issued_at') or 'later'}.")
+        write(newest, "status", GuidanceStatus.CURRENT)
+        write(newest, "status_reason", None)
+    return entries
+
+
+def current_guidance_only(entries) -> list:
+    """The items that may be presented as this company's current outlook."""
+    def read(entry, name):
+        if isinstance(entry, dict):
+            return entry.get(name)
+        return getattr(entry, name, None)
+
+    return [e for e in resolve_guidance_status(entries)
+            if read(e, "status") == GuidanceStatus.CURRENT]
 
 
 def build_guidance_matrix(metrics, superseded=None, releases_examined=None,

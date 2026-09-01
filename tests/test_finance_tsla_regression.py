@@ -350,11 +350,20 @@ def test_fundamentals_and_technicals_remain_indexed_despite_invalid_dcf(wired):
 
 # ---- 8: compact report rendering (sections 12/14) ----
 
-def test_compact_report_states_model_invalid_status(wired):
+def test_compact_report_states_the_valuation_status_by_cause(wired):
+    """Spec 14. TSLA's DCF declined to grow a NEGATIVE terminal cash flow
+    into a perpetuity, which is the model working, not the model failing.
+
+    The report said "Status: MODEL_INVALID" for it -- the specific rendering
+    the spec forbids. What withholds the numbers is unchanged; only the
+    claim made about the cause is corrected, and the model's own reason code
+    is still printed so the status stays checkable.
+    """
     result = run_tsla(wired)
     compact = build_compact_synthesis_payload(result)
     text = render_compact_report(result, compact, pipeline_result=None)
-    assert "Status: MODEL_INVALID" in text
+    assert "Status: FORECAST_PATH_INVALID" in text
+    assert "MODEL_INVALID" not in text
     assert "DCF_NEGATIVE_TERMINAL_FCFF" in text
 
 

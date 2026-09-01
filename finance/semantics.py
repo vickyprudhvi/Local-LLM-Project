@@ -177,6 +177,153 @@ def same_duration(left: str, right: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Forecast-horizon compatibility
+# ---------------------------------------------------------------------------
+#
+# Section 4 says compatibility is a property of a PAIR and an OPERATION. This
+# is the pair that was missing: forward evidence against a FORECAST
+# ASSUMPTION, where the operation is "set or check the assumption's numeric
+# MAGNITUDE".
+#
+# A quarterly year-over-year growth rate can be entirely correct -- right
+# metric, right comparison quarter, validated derivation -- and still not be
+# the same KIND of quantity as an annual year-1 growth assumption. A company
+# can grow 84% in a quarter against an easy comparable and 32% over twelve
+# months; both are true, and only one of them is measured in the units a
+# twelve-month forecast is measured in.
+#
+# The live failure: an annual bound of 25%, trailing twelve-month growth of
+# 32%, next-quarter guidance implying 84%. The bound conflict was REAL --
+# 32% > 25% -- and it was reported as though the model were 59 percentage
+# points wrong, because the quarterly figure supplied the magnitude.
+#
+# The answer is not to discard the quarterly figure. It is the most current
+# forward statement the company has made and it belongs in the research
+# evidence. What changes is which OPERATIONS it is eligible for.
+
+
+class ForecastCompatibility:
+    """What a piece of forward evidence may do to a forecast assumption."""
+
+    # Same metric, same horizon: may set or check a magnitude, and may
+    # establish that a model bound is constraining real evidence.
+    ASSUMPTION_COMPARABLE = "ASSUMPTION_COMPARABLE"
+    # Same metric, SHORTER horizon: may support a statement about direction
+    # or trajectory ("near-term growth remains elevated") and may never
+    # supply a number the assumption is set to or measured against.
+    DIRECTIONAL_CORROBORATION = "DIRECTIONAL_CORROBORATION"
+    # Different metric, or a horizon that cannot be placed at all.
+    NOT_COMPARABLE = "NOT_COMPARABLE"
+
+    ALL = (ASSUMPTION_COMPARABLE, DIRECTIONAL_CORROBORATION, NOT_COMPARABLE)
+
+
+FORECAST_HORIZON_NOT_COMPARABLE = "FORECAST_HORIZON_NOT_COMPARABLE"
+
+# Horizons that may CORROBORATE a twelve-month assumption without supplying
+# its magnitude. Each is a real, shorter window over the same metric: it says
+# something about the trajectory and nothing about the annual rate.
+_SHORTER_FLOW_HORIZONS = frozenset({
+    PeriodFrequency.QUARTER, PeriodFrequency.YTD_6M,
+    PeriodFrequency.HALF_YEAR, PeriodFrequency.YTD_9M,
+})
+
+
+@dataclass(frozen=True)
+class ForecastEligibility:
+    """The verdict, as structured metadata rather than prose.
+
+    A consumer reads `status` and the two `may_*` questions. Nothing
+    downstream should be parsing `reason` to decide what it is allowed to do
+    -- the reason exists to explain the verdict to a person.
+    """
+
+    status: str
+    reason: str = ""
+    compatible_assumption_metric: Optional[str] = None
+    compatible_horizon: Optional[str] = None
+    code: Optional[str] = None
+
+    @property
+    def may_set_magnitude(self) -> bool:
+        """May this evidence set, or be numerically compared against, the
+        assumption's value?"""
+        return self.status == ForecastCompatibility.ASSUMPTION_COMPARABLE
+
+    @property
+    def may_corroborate_direction(self) -> bool:
+        """May this evidence support a claim about trajectory?"""
+        return self.status in (ForecastCompatibility.ASSUMPTION_COMPARABLE,
+                               ForecastCompatibility.DIRECTIONAL_CORROBORATION)
+
+    def to_dict(self) -> dict:
+        return {
+            "forecast_compatibility": self.status,
+            "reason": self.reason,
+            "compatible_assumption_metric": self.compatible_assumption_metric,
+            "compatible_horizon": self.compatible_horizon,
+            "code": self.code,
+        }
+
+
+def forecast_compatibility(*, evidence_metric: Optional[str],
+                           evidence_frequency: Optional[str],
+                           assumption_metric: Optional[str],
+                           assumption_frequency: str = PeriodFrequency.ANNUAL
+                           ) -> ForecastEligibility:
+    """May this evidence set an assumption's magnitude, or only its direction?
+
+    Two questions, in order, and BOTH must pass for a magnitude:
+
+      1. is the metric identity compatible?
+      2. is the forecast horizon compatible?
+
+    Metric first, because a twelve-month EBITDA growth rate shares a horizon
+    with a revenue-growth assumption and is still not one. An unrecognised
+    metric or an unplaceable horizon is refused rather than permitted --
+    section 4's rule that a validator allowing what it does not understand
+    guarantees nothing.
+    """
+    if not evidence_metric or not assumption_metric or evidence_metric != assumption_metric:
+        return ForecastEligibility(
+            status=ForecastCompatibility.NOT_COMPARABLE,
+            code=INCOMPATIBLE_METRICS,
+            reason=(f"{evidence_metric or 'an unidentified metric'} is not "
+                    f"{assumption_metric or 'the assumption metric'}, so it cannot inform "
+                    "that assumption at any horizon."),
+            compatible_assumption_metric=assumption_metric)
+
+    if same_duration(evidence_frequency, assumption_frequency):
+        return ForecastEligibility(
+            status=ForecastCompatibility.ASSUMPTION_COMPARABLE,
+            reason=(f"{evidence_frequency} and {assumption_frequency} both span "
+                    f"{duration_months(assumption_frequency)} months, so the two figures "
+                    "measure the same kind of quantity."),
+            compatible_assumption_metric=assumption_metric,
+            compatible_horizon=evidence_frequency)
+
+    if evidence_frequency in _SHORTER_FLOW_HORIZONS             and duration_months(assumption_frequency) is not None:
+        return ForecastEligibility(
+            status=ForecastCompatibility.DIRECTIONAL_CORROBORATION,
+            code=FORECAST_HORIZON_NOT_COMPARABLE,
+            reason=(f"A {evidence_frequency.lower()} figure covers "
+                    f"{duration_months(evidence_frequency)} months against the assumption's "
+                    f"{duration_months(assumption_frequency)}. It is evidence about the "
+                    "near-term trajectory and is not a rate the annual assumption can be "
+                    "set to or measured against."),
+            compatible_assumption_metric=assumption_metric,
+            compatible_horizon=evidence_frequency)
+
+    return ForecastEligibility(
+        status=ForecastCompatibility.NOT_COMPARABLE,
+        code=PERIOD_FREQUENCY_MISMATCH,
+        reason=(f"A {evidence_frequency or 'horizonless'} figure cannot be placed against a "
+                f"{assumption_frequency} assumption."),
+        compatible_assumption_metric=assumption_metric,
+        compatible_horizon=evidence_frequency)
+
+
+# ---------------------------------------------------------------------------
 # Sections 2 and 12/14 — basis vocabularies
 # ---------------------------------------------------------------------------
 

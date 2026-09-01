@@ -110,11 +110,65 @@ _CONCEPT_PROFILES = (
 )
 
 # How many corroborating concepts must appear before filing content alone
-# reclassifies a company whose SIC code says otherwise or is missing. Two,
-# because one tag can appear incidentally (a manufacturer with a captive
-# finance arm reports some receivables concepts) while a pattern of them
-# describes the business.
+# classifies a company. Two, because one tag can appear incidentally while a
+# pattern of them describes the business.
 _CONCEPT_EVIDENCE_THRESHOLD = 2
+
+# ---------------------------------------------------------------------------
+# Which concepts may overturn a NON-FINANCIAL SIC code
+# ---------------------------------------------------------------------------
+#
+# Found by live verification. A large telecom (SEC SIC 4813, Telephone
+# Communications) was classified BANK because it reports
+# `LoansAndLeasesReceivableNetReportedAmount` and
+# `ProvisionForLoanLeaseAndOtherLosses` for its device-payment and
+# equipment-lease book, and its valuation was then refused as not applicable
+# to its business model. The company is not a bank; it sells phone contracts
+# and finances the handsets.
+#
+# Counting harder does not fix this, because the question is not HOW MANY
+# financial concepts a captive finance arm reports. It is WHICH. Some
+# concepts are DEFINITIVE of a business model -- only a bank takes deposits,
+# only a broker-dealer segregates customer cash under the customer
+# protection rule, only an insurer books policyholder benefits. Others merely
+# say the issuer LENDS, and any manufacturer, retailer or carrier with a
+# captive financing operation lends.
+#
+# So: concept evidence may supply a classification where the SIC code is
+# absent, and may refine one within financial services (a nondepository-credit
+# code on an issuer filing customer payables is a broker-dealer). Overturning
+# a code that positively places the issuer OUTSIDE financial services takes a
+# concept that only that business model reports.
+#
+# The module's stated rationale for the override -- "a SIC code is assigned
+# once and can lag what a company has become" -- describes an issuer whose
+# code is absent or already financial. It never described one the Commission
+# has positively placed in Telephone Communications.
+_DEFINITIVE_CONCEPTS = frozenset({
+    # A bank's own funding and balance sheet.
+    "Deposits",
+    "DepositsDomestic",
+    "InterestExpenseDeposits",
+    "InterestAndDividendIncomeOperating",
+    "FederalFundsSoldAndSecuritiesPurchasedUnderAgreementsToResell",
+    # A broker-dealer holding customer property.
+    "PayablesToCustomers",
+    "PayablesToBrokerDealersAndClearingOrganizations",
+    "ReceivablesFromCustomers",
+    "ReceivablesFromBrokerDealersAndClearingOrganizations",
+    "CashAndSecuritiesSegregatedUnderFederalAndOtherRegulations",
+    "SegregatedCashAndSecurities",
+    "SecuritiesBorrowed",
+    "SecuritiesLoaned",
+    "FinancialInstrumentsOwnedAtFairValue",
+    "BrokerageCommissionsRevenue",
+    # An insurer's underwriting obligations.
+    "PolicyholderBenefitsAndClaimsIncurredNet",
+    "LiabilityForFuturePolicyBenefits",
+    "PremiumsEarnedNet",
+    "DeferredPolicyAcquisitionCosts",
+    "UnpaidPolicyClaimsAndClaimsAdjustmentExpense",
+})
 
 # Profiles for which operating cash flow less capital expenditure is not
 # owner free cash flow.
@@ -171,6 +225,22 @@ def _profile_from_sic(sic: Optional[str]) -> Optional[str]:
         if low <= code <= high:
             return profile
     return CashFlowValuationProfile.STANDARD_OPERATING_COMPANY
+
+
+def _concepts_may_overrule_sic(sic_profile: Optional[str], matched) -> bool:
+    """May this filing evidence classify AGAINST the SIC code?
+
+    Supplying a classification where none exists, or refining one within
+    financial services, needs only the ordinary threshold. Overturning a code
+    that positively places the issuer outside financial services needs at
+    least one concept that ONLY that business model reports -- see
+    `_DEFINITIVE_CONCEPTS`.
+    """
+    if len(matched) < _CONCEPT_EVIDENCE_THRESHOLD:
+        return False
+    if sic_profile != CashFlowValuationProfile.STANDARD_OPERATING_COMPANY:
+        return True
+    return any(concept in _DEFINITIVE_CONCEPTS for concept in matched)
 
 
 def _concepts_present(company_facts: Optional[dict]) -> frozenset:
@@ -237,7 +307,7 @@ def classify_business_model(submissions: Optional[dict] = None,
             result.reasons.append(
                 f"Corroborated by {len(matched)} reported concept(s) specific to that model: "
                 f"{', '.join(matched[:4])}.")
-    elif len(matched) >= _CONCEPT_EVIDENCE_THRESHOLD and concept_profile:
+    elif concept_profile and _concepts_may_overrule_sic(sic_profile, matched):
         result.profile = concept_profile
         result.reasons.append(
             f"The issuer reports {len(matched)} concept(s) specific to {concept_profile} "
@@ -246,10 +316,20 @@ def classify_business_model(submissions: Optional[dict] = None,
                f"({result.sic_description or 'no description'})." if result.sic else "."))
     elif sic_profile == CashFlowValuationProfile.STANDARD_OPERATING_COMPANY:
         result.profile = sic_profile
-        result.reasons.append(
-            f"SEC SIC {result.sic} ({result.sic_description or 'no description'}) is outside "
-            "the financial-institution ranges, and the issuer reports no pattern of "
-            "financial-institution concepts.")
+        reason = (f"SEC SIC {result.sic} ({result.sic_description or 'no description'}) is "
+                  "outside the financial-institution ranges")
+        if matched:
+            # Say what was seen and why it did not decide. Silently dropping
+            # the evidence would leave a reader unable to tell this case from
+            # one where nothing financial was filed at all.
+            reason += (f", and the {len(matched)} financial-institution concept(s) it does "
+                       f"report ({', '.join(matched[:4])}) are consistent with a captive "
+                       "financing operation rather than with a financial institution's own "
+                       "balance sheet.")
+        else:
+            reason += (", and the issuer reports no pattern of financial-institution "
+                       "concepts.")
+        result.reasons.append(reason)
     else:
         result.profile = CashFlowValuationProfile.UNKNOWN
         result.reasons.append(

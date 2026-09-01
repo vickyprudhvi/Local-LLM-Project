@@ -97,15 +97,32 @@ def test_a_missing_component_is_excluded_not_zero_filled():
     assert components.current_portion_of_long_term_debt is None
 
 
-def test_a_reported_total_that_disagrees_with_the_components_is_reported():
-    """Section 16's cross-check: NVDA's own `LongTermDebt` of $8,470M is what
-    proves the $1.0B pair is one obligation."""
+def test_a_reported_total_that_disagrees_with_the_components_wins():
+    """Phase H.15 changed the RESOLUTION, and this test's own premise is why.
+
+    The docstring here already said the issuer's reported $8,470M "is what
+    proves the $1.0B pair is one obligation" -- that is, the component sum of
+    $9,470M double-counts and the issuer's total is the correct figure. The
+    old behaviour nonetheless kept the $9,470M and filed a warning beside
+    it, which meant every downstream consumer used the number the test
+    itself described as wrong.
+
+    Sections 5-7: identity is established first (the concept is on the
+    inclusive list and the issuer does not separately report an equal
+    noncurrent portion), and only then does precedence apply -- an issuer's
+    own consolidated total outranks a sum assembled here, which can
+    double-count or omit.
+    """
     components = _components(short_term_debt_concept="ShortTermBorrowings",
                              reported_total=8_470.0,
                              reported_total_concept="LongTermDebt")
-    assert components.total_debt == pytest.approx(9_470.0)
-    assert any(f["code"] == ND.DCF_NET_DEBT_COMPONENT_OVERLAP
-               and f["severity"] == "warning" for f in components.findings)
+    assert components.total_debt == pytest.approx(8_470.0)
+    assert components.total_debt_validity == "VALID"
+    # Recorded as a resolution, not as an unexplained discrepancy.
+    resolution = next(f for f in components.findings
+                      if f["code"] == ND.DCF_NET_DEBT_COMPONENT_OVERLAP)
+    assert resolution["severity"] == "info"
+    assert resolution.get("resolution") == "issuer_reported_total"
 
 
 def test_a_reported_total_that_agrees_produces_no_finding():

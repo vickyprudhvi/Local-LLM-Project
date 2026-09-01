@@ -323,17 +323,68 @@ def _invalid_dcf_compact(quote_price=328.58):
     }
 
 
-def test_valuation_section_states_model_invalid_status():
+class _StubPlan:
+    """The minimum an AnalysisResult needs for the report model.
+
+    These tests are about ONE section each, so the surrounding analysis is a
+    stub -- but the section itself is built by the real model builder from a
+    real compact payload, which is the behaviour under test.
+    """
+
+    mode = "full"
+    reason = ""
+    omitted_datasets = ()
+    omission_effects = {}
+    requested_datasets = ()
+    datasets = ()
+    stale_datasets = ()
+    omission_reasons = {}
+
+
+class _StubResult:
+    def __init__(self, compact):
+        self.symbol = compact.get("symbol") or "TEST"
+        self.plan = _StubPlan()
+        self.facts = {}
+        self.warnings = []
+        self.errors = []
+
+
+def _model_for(compact, pipeline_result=None):
+    """The report model for one compact payload.
+
+    Parts 11-13 moved every decision these tests assert out of the renderer
+    and into `finance/report_model.py`. The assertions are unchanged -- they
+    still read the rendered text -- but the object under test is now the
+    model the renderer consumes, which is where the decision actually lives.
+    """
+    from finance.report_model import build_stock_analysis_report_model
+    return build_stock_analysis_report_model(_StubResult(compact), compact, pipeline_result)
+
+
+def test_valuation_section_states_the_valuation_status_by_cause():
+    """Spec 14. The status names WHICH of four things happened.
+
+    This used to read "Status: MODEL_INVALID (DCF_NEGATIVE_TERMINAL_FCFF)"
+    for every unusable valuation, including this one -- a model that
+    correctly declined to grow a negative terminal cash flow into a
+    perpetuity. That is the exact rendering the spec forbids: the model is
+    working, the forecast does not support the method, and telling a reader
+    the model failed sends them to debug something with nothing wrong
+    with it.
+    """
     from finance.workflow import _valuation_section
-    lines = _valuation_section(_invalid_dcf_compact())
-    text = "\n".join(lines)
-    assert "Status: MODEL_INVALID" in text
+    text = "\n".join(_valuation_section(_model_for(_invalid_dcf_compact())))
+    assert "Status: FORECAST_PATH_INVALID" in text
+    assert "The model is working; the forecast does not support this method." in text
+    assert "MODEL_INVALID" not in text
+    # The model's own reason survives -- it is what makes the status checkable.
     assert "DCF_NEGATIVE_TERMINAL_FCFF" in text
 
 
 def test_valuation_section_never_prints_invalid_bear_base_bull_numbers():
     from finance.workflow import _valuation_section
-    text = "\n".join(_valuation_section(_invalid_dcf_compact()))
+    text = "\n".join(_valuation_section(_model_for(_invalid_dcf_compact())))
     assert "Bear modeled value" not in text
     assert "Base modeled value" not in text
     assert "Bull modeled value" not in text
@@ -344,14 +395,14 @@ def test_valuation_section_never_prints_invalid_bear_base_bull_numbers():
 
 def test_valuation_section_never_prints_a_percentage_gap_for_invalid_dcf():
     from finance.workflow import _valuation_section
-    text = "\n".join(_valuation_section(_invalid_dcf_compact()))
+    text = "\n".join(_valuation_section(_model_for(_invalid_dcf_compact())))
     assert "% above" not in text and "% below" not in text
     assert "Base comparison" not in text
 
 
 def test_valuation_section_states_comparison_is_withheld():
     from finance.workflow import _valuation_section
-    text = "\n".join(_valuation_section(_invalid_dcf_compact()))
+    text = "\n".join(_valuation_section(_model_for(_invalid_dcf_compact())))
     assert "withheld" in text.lower()
     # Market price itself is still a plain fact and IS shown.
     assert "328.58" in text
@@ -373,7 +424,7 @@ def test_valuation_section_normal_rendering_is_unaffected_when_dcf_valid():
                                 "base_value_per_share": 200.0, "bear_value_per_share": 180.0,
                                 "spread_pct_of_base": 0.20},
     }
-    text = "\n".join(_valuation_section(valid_compact))
+    text = "\n".join(_valuation_section(_model_for(valid_compact)))
     assert "Status: MODEL_INVALID" not in text
     assert "Bear modeled value" in text
     assert "Base modeled value" in text
@@ -404,7 +455,7 @@ def test_research_readiness_line_renders_in_research_view_section():
     from finance.workflow import _compact_research_view_section
     compact = {"research_readiness": {"status": "NOT_READY",
                                       "reasons": ["DCF validation failed."]}}
-    lines = _compact_research_view_section(compact, None)
+    lines = _compact_research_view_section(_model_for(compact, None))
     text = "\n".join(lines)
     assert "Research readiness: NOT_READY" in text
     assert "Reason: DCF validation failed." in text
@@ -420,7 +471,8 @@ def test_research_readiness_line_renders_even_when_pipeline_completed():
                     "overall_risk": "high", "confidence": 0.2, "recommendation": "avoid",
                     "primary_reason": "Evidence and valuation point the same way at this confidence level.", "supporting_factors": [], "limiting_factors": [], "rationale": []}
     compact = {"research_readiness": {"status": "NOT_READY", "reasons": ["DCF invalid."]}}
-    lines = _compact_research_view_section(compact, _all_complete_pipeline_result(final_output))
+    lines = _compact_research_view_section(
+        _model_for(compact, _all_complete_pipeline_result(final_output)))
     text = "\n".join(lines)
     assert "Research pipeline: COMPLETE" in text
     assert "Research readiness: NOT_READY" in text
@@ -436,7 +488,8 @@ def test_recommendation_line_renders_in_research_view_section():
                     "overall_risk": "low", "confidence": 0.7, "recommendation": "buy",
                     "primary_reason": "Evidence and valuation point the same way at this confidence level.", "supporting_factors": [], "limiting_factors": [], "rationale": []}
     compact = {"research_readiness": {"status": "READY", "reasons": []}}
-    lines = _compact_research_view_section(compact, _all_complete_pipeline_result(final_output))
+    lines = _compact_research_view_section(
+        _model_for(compact, _all_complete_pipeline_result(final_output)))
     text = "\n".join(lines)
     assert "Recommendation: BUY" in text
 
@@ -445,6 +498,6 @@ def test_recommendation_is_unavailable_when_pipeline_is_none():
     from finance.workflow import _compact_research_view_section
 
     compact = {"research_readiness": {"status": "NOT_READY", "reasons": ["DCF validation failed."]}}
-    lines = _compact_research_view_section(compact, None)
+    lines = _compact_research_view_section(_model_for(compact, None))
     text = "\n".join(lines)
     assert "Recommendation: unavailable" in text

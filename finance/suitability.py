@@ -112,6 +112,14 @@ class SuitabilityAssessment:
     status: str = DcfSuitability.SUITABLE
     signals: List[SuitabilitySignal] = field(default_factory=list)
     summary: str = ""
+    # Whether the question was ANSWERED. "A discounted-cash-flow valuation
+    # suits this company only with caveats" and "nothing was available to
+    # decide that with" are different statements, and only the first is a
+    # finding about the valuation. Both had to be reported as LIMITED because
+    # there was nowhere else to put the second, and the valuation gate then
+    # read the second as though it were the first and withheld a usable
+    # valuation's evidence entirely.
+    assessed: bool = True
 
     @property
     def blocks_valuation_conclusion(self) -> bool:
@@ -120,7 +128,8 @@ class SuitabilityAssessment:
     def to_dict(self) -> dict:
         return {"dcf_suitability": self.status,
                 "signals": [s.to_dict() for s in self.signals],
-                "summary": self.summary}
+                "summary": self.summary,
+                "assessed": self.assessed}
 
 
 def _signal(assessment: SuitabilityAssessment, code: str, severity: str, detail: str,

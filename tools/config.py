@@ -664,6 +664,18 @@ def research_run_artifacts_enabled():
     return _bool("RESEARCH_RUN_ARTIFACTS_ENABLED", False)
 
 
+def finance_audit_trail_enabled():
+    """Whether to build the finance audit trail (Phase 52).
+
+    OFF by default: it is a debugging aid, not a product feature, and it
+    walks every canonical metric to assemble one traceable chain from a
+    filed fact to a valuation input. Turn it on when a number in a report
+    looks wrong and you want to see where it came from without reading a
+    prompt.
+    """
+    return _bool("FINANCE_AUDIT_TRAIL_ENABLED", False)
+
+
 def research_run_artifacts_dir():
     return _str("RESEARCH_RUN_ARTIFACTS_DIR", "logs/research_runs")
 

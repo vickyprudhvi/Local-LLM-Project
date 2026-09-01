@@ -442,15 +442,35 @@ def test_failed_research_manager_is_distinguished_from_skipped_risk_reviewer(wir
     assert cascade["bear_researcher"] == "COMPLETE"
 
 
-def test_actual_failure_reason_appears_in_compact_research_view(wired):
-    """Test 14: the SPECIFIC classified reason, not the vague 'requires
-    research_manager to have completed'."""
+def test_a_degraded_pipeline_is_explained_without_internals(wired):
+    """Test 14, revised by Phase H.13 (phases 24/40).
+
+    This asserted that the compact report named the failing STAGE and its
+    repair count -- "research_manager made an unsupported evidence claim
+    after one repair attempt". That was the right correction at the time:
+    the alternative it replaced was the vague "requires research_manager to
+    have completed", which told a reader nothing.
+
+    The stabilization phase reverses the part of it that leaked internals.
+    A stage name, a schema name and an attempt count describe this
+    pipeline's implementation; none of them changes what a reader should do
+    with the analysis, and all three survive in the run artifact and in
+    full/debug mode where someone debugging the pipeline will look.
+
+    What the reader does need is preserved and is what this now asserts:
+    that the pipeline did not fully complete, and that the synthesis
+    therefore rests on less evidence.
+    """
     result = run_dis(wired)
     compact = build_compact_synthesis_payload(result)
     text = render_compact_report(
         result, compact, _dis_pipeline_result(research_manager_error=DIS_RESEARCH_MANAGER_ERROR))
     assert "Research pipeline: PARTIAL" in text
-    assert "research_manager made an unsupported evidence claim after one repair attempt" in text
+    # The consequence is stated...
+    assert "could not be validated" in text or "reduced evidence" in text
+    # ...and the implementation detail is not.
+    assert "repair attempt" not in text
+    assert "research_manager" not in text
 
 
 def test_no_raw_validation_dump_in_compact_output(wired):

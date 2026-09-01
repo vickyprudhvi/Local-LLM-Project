@@ -47,6 +47,33 @@ from finance import growth as growth_module
 
 CANONICAL_CURRENT_EVIDENCE_CONFLICT = "CANONICAL_CURRENT_EVIDENCE_CONFLICT"
 TTM_BASE_PERIOD_MISMATCH = "TTM_BASE_PERIOD_MISMATCH"
+DCF_CANONICAL_PERIOD_CONFLICT = "DCF_CANONICAL_PERIOD_CONFLICT"
+
+
+class TtmAlignment:
+    """Section 19: whether the metrics sold as one financial base really are.
+
+    "Not all metrics cover the same period" is true and useless -- it names
+    no metric, no date, and nothing to fix. The status carries WHICH metric
+    lags, WHEN it actually ends, and HOW it was built, so a reader can see
+    that (say) free cash flow stops a quarter short of everything else
+    rather than guessing which figure to distrust.
+    """
+
+    ALIGNED = "ALIGNED"
+    PARTIALLY_ALIGNED = "PARTIALLY_ALIGNED"
+    MISALIGNED = "MISALIGNED"
+    UNKNOWN = "UNKNOWN"
+
+
+# Metrics the valuation itself consumes. A lag in one of these is a
+# different problem from a lag in a metric that only decorates the report:
+# the first means the DCF is not built on one base (section 21), the second
+# means one row of the Snapshot is older than its neighbours.
+_DCF_BASE_METRICS = frozenset({
+    "revenue", "operating_income", "free_cash_flow",
+    "operating_cash_flow", "depreciation_and_amortization",
+})
 
 # Phase H.11, section 39.
 DERIVED_METRIC_STALE_SOURCE = "DERIVED_METRIC_STALE_SOURCE"
@@ -116,6 +143,10 @@ class CanonicalFinancialEvidence:
     current_growth_label: Optional[str] = None
     base_period: Optional[str] = None
     base_period_aligned: bool = True
+    # Section 19-20: the status, and the per-metric detail behind it.
+    ttm_alignment_status: str = TtmAlignment.UNKNOWN
+    expected_end_date: Optional[str] = None
+    misaligned_metrics: list = field(default_factory=list)
     findings: List[dict] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
@@ -129,6 +160,9 @@ class CanonicalFinancialEvidence:
             "historical": {k: v.to_dict() for k, v in self.historical.items()},
             "base_period": self.base_period,
             "base_period_aligned": self.base_period_aligned,
+            "ttm_alignment_status": self.ttm_alignment_status,
+            "expected_end_date": self.expected_end_date,
+            "misaligned_metrics": [dict(m) for m in self.misaligned_metrics],
             "current_growth_kind": self.current_growth_kind,
             "current_growth_label": self.current_growth_label,
             "findings": [dict(f) for f in self.findings],
@@ -250,16 +284,59 @@ def build_canonical_evidence(state, historical_metrics: Optional[dict] = None,
     # -- section 7: do these metrics actually share one base period? -------
     distinct = {end for end in end_dates.values() if end}
     evidence.base_period = max(distinct) if distinct else None
+    evidence.expected_end_date = evidence.base_period
+    evidence.ttm_alignment_status = (
+        TtmAlignment.ALIGNED if distinct else TtmAlignment.UNKNOWN)
+
     if len(distinct) > 1:
         evidence.base_period_aligned = False
         lagging = sorted(name for name, end in end_dates.items()
                          if end and end != evidence.base_period)
+
+        # Sections 20-21. WHICH metric, ending WHEN, built HOW. The previous
+        # message named the metrics and nothing else, so a reader could not
+        # tell a metric that stops one quarter short from one that stops a
+        # year short, or which construction produced it.
+        for name in lagging:
+            selection = flows.get(name)
+            record = (getattr(selection, "ttm", None) or {}) if selection is not None else {}
+            evidence.misaligned_metrics.append({
+                "metric_id": name,
+                "actual_end_date": end_dates.get(name),
+                "expected_end_date": evidence.base_period,
+                "construction_method": record.get("construction_method"),
+                "affects_valuation": name in _DCF_BASE_METRICS,
+            })
+
+        # A lag in a metric the valuation consumes means the DCF is not built
+        # on one base -- a different and more serious thing than a Snapshot
+        # row being older than its neighbours.
+        valuation_affected = [m["metric_id"] for m in evidence.misaligned_metrics
+                              if m["affects_valuation"]]
+        evidence.ttm_alignment_status = (TtmAlignment.MISALIGNED if valuation_affected
+                                         else TtmAlignment.PARTIALLY_ALIGNED)
+
+        detail = "; ".join(
+            f"{m['metric_id']} ends {m['actual_end_date']}"
+            + (f" (built as {m['construction_method']})" if m["construction_method"] else "")
+            for m in evidence.misaligned_metrics)
         evidence.findings.append(_finding(
             TTM_BASE_PERIOD_MISMATCH, "warning",
             f"The metrics presented as one trailing-twelve-month base do not share an end "
-            f"date: {', '.join(lagging)} end earlier than {evidence.base_period}. Each is a "
-            "valid twelve months; together they are not one financial base.",
-            base_period=evidence.base_period, lagging=lagging))
+            f"date. Expected {evidence.base_period}; {detail}. Each is a valid twelve "
+            "months; together they are not one financial base.",
+            base_period=evidence.base_period, lagging=lagging,
+            alignment_status=evidence.ttm_alignment_status,
+            misaligned_metrics=list(evidence.misaligned_metrics)))
+
+        if valuation_affected:
+            evidence.findings.append(_finding(
+                DCF_CANONICAL_PERIOD_CONFLICT, "warning",
+                f"The valuation would draw on metrics covering different twelve-month "
+                f"windows ({', '.join(valuation_affected)} against a base of "
+                f"{evidence.base_period}), so it cannot be described as resting on one "
+                "trailing-twelve-month base.",
+                affected_metrics=valuation_affected, base_period=evidence.base_period))
 
     # A flow that is NOT on a TTM basis while the base is must be named, or
     # the whole snapshot silently inherits a label one metric does not meet.
@@ -268,12 +345,31 @@ def build_canonical_evidence(state, historical_metrics: Optional[dict] = None,
         if name in _BASE_PERIOD_METRICS and metric.period_type == PeriodKind.ANNUAL)
     if annual_in_ttm_base and evidence.base_period:
         evidence.base_period_aligned = False
+        # This is the SECOND way a base can fail to be one base: not a
+        # differing end date, but a metric on an annual basis sitting inside
+        # a trailing-twelve-month base. The status has to account for it too
+        # -- a live run reported ALIGNED here while readiness simultaneously
+        # explained that the metrics did not cover one window.
+        for name in annual_in_ttm_base:
+            metric = evidence.current.get(name)
+            evidence.misaligned_metrics.append({
+                "metric_id": name,
+                "actual_end_date": getattr(metric, "period", None),
+                "expected_end_date": evidence.base_period,
+                "construction_method": "annual_filing",
+                "affects_valuation": name in _DCF_BASE_METRICS,
+            })
+        valuation_affected = [m["metric_id"] for m in evidence.misaligned_metrics
+                              if m["affects_valuation"]]
+        evidence.ttm_alignment_status = (TtmAlignment.MISALIGNED if valuation_affected
+                                         else TtmAlignment.PARTIALLY_ALIGNED)
         evidence.findings.append(_finding(
             TTM_BASE_PERIOD_MISMATCH, "warning",
             f"{', '.join(annual_in_ttm_base)} could only be built on an ANNUAL basis while "
             "the rest of the base is a trailing twelve months; the snapshot is not uniformly "
             "TTM and each metric carries its own period.",
-            annual_metrics=annual_in_ttm_base))
+            annual_metrics=annual_in_ttm_base,
+            alignment_status=evidence.ttm_alignment_status))
 
     # -- section 8: derived current margins --------------------------------
     for key, numerator, denominator, definition in _DERIVED_MARGINS:

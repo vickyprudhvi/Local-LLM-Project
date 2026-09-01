@@ -259,13 +259,18 @@ def test_synthesis_prompt_is_compact_for_the_msft_fixture(wired, monkeypatch):
     assert len(calls) == 1
     estimated_tokens = result.instrumentation["estimated_synthesis_tokens"]
     assert estimated_tokens < 20_000, f"compact payload estimated at {estimated_tokens} tokens"
-    # 11_000, not 10_000: the COR corrective patch (Phase 9) added five new
-    # fundamental_metrics (net_debt, net_debt_to_fcf, debt_to_fcf,
-    # interest_coverage, operating_cash_flow), which pushed MSFT's own
-    # compact payload from ~9.9k to ~10.1k estimated tokens -- still well
-    # under the 20k hard limit, so the preferred ceiling moves up rather than
-    # the new, explicitly-requested evidence being cut.
-    assert estimated_tokens < 11_000, \
+    # The ceiling moves when explicitly-requested evidence is added, rather
+    # than the evidence being cut to fit. Two increments so far:
+    #   COR (Phase 9): five new fundamental_metrics (net_debt,
+    #     net_debt_to_fcf, debt_to_fcf, interest_coverage,
+    #     operating_cash_flow), ~9.9k -> ~10.1k;
+    #   the valuation-gate wiring: `valuation_status` (the single status
+    #     every consumer gates on) and `dcf_suitability.assessed` (the
+    #     difference between "limited" and "not assessed", which decides
+    #     whether a valuation's evidence is published at all), ~11.0k ->
+    #     ~11.01k.
+    # Still far under the 20k hard limit asserted above.
+    assert estimated_tokens < 11_500, \
         f"preferred threshold: compact payload estimated at {estimated_tokens} tokens"
 
     # The instrumentation makes the BEFORE/AFTER comparison inspectable.

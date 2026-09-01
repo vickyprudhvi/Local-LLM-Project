@@ -195,10 +195,19 @@ def _state_with(guidance=None, historical_cagr=None):
         historical_metrics={"revenue_cagr": historical_cagr} if historical_cagr else None)
 
 
-def _guidance(low, high):
+def _guidance(low, high, period_type="annual"):
+    """Guidance for a FULL YEAR unless a test says otherwise.
+
+    `period_type` is explicit because forecast-horizon eligibility now reads
+    it: guidance that covers a shorter span than the annual assumption may
+    corroborate the direction but may not set the year-1 rate. A fixture that
+    omitted the field was asserting annual behaviour without stating an
+    annual horizon, and the extractor always records one.
+    """
     return {"fiscal_year": 2026, "guidance_date": "2026-07-30",
             "metrics": {"revenue_growth": {
                 "low": low, "high": high, "fiscal_year": 2026,
+                "period_type": period_type,
                 "evidence_id": "dcf.guidance.revenue_growth.current"}}}
 
 
@@ -269,9 +278,10 @@ def test_a_clamped_assumption_records_what_it_was_clamped_from():
 # Section 10: guidance is an input, not truth
 # ---------------------------------------------------------------------------
 
-def _evidence(low=0.02, high=0.03):
+def _evidence(low=0.02, high=0.03, period_type="annual"):
     return fa.GrowthEvidence(guidance_low=low, guidance_high=high,
-                             guidance_fiscal_year=2026)
+                             guidance_fiscal_year=2026,
+                             guidance_period_type=period_type)
 
 
 def test_a_forecast_inside_guidance_is_accepted_without_special_justification():

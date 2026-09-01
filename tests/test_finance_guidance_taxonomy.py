@@ -269,7 +269,11 @@ def _metric(name="revenue_growth", low=0.02, high=0.03, fiscal_year=2026,
         evidence_id=f"dcf.guidance.{name}.current", source_excerpt="x",
         guidance_id="gd_test", issued_at="2026-07-30", fiscal_period=period,
         period_type=period_type, source_accession=accession,
-        source_evidence_ids=(f"dcf.guidance.{name}.current",), status=status)
+        source_evidence_ids=(f"dcf.guidance.{name}.current",), status=status,
+        # A guidance item now has to SAY why it is prospective; a fixture
+        # that omitted it would be asserting a property the extractor is no
+        # longer allowed to leave unset.
+        prospective_evidence="the company expects full-year revenue growth of")
 
 
 def _release(filed, metrics, accession="a"):

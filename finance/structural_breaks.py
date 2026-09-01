@@ -439,6 +439,16 @@ class PostBalanceSheetEventType:
     INSIDER_SECONDARY_SALE = "INSIDER_SECONDARY_SALE"
     SHAREHOLDER_SECONDARY_SALE = "SHAREHOLDER_SECONDARY_SALE"
     SHARE_REPURCHASE = "SHARE_REPURCHASE"
+    # Phase H.14, section 23. An accelerated repurchase settles most of the
+    # buyback immediately, so its effect on the share count is not a plan
+    # that might happen -- it has largely happened.
+    ACCELERATED_SHARE_REPURCHASE = "ACCELERATED_SHARE_REPURCHASE"
+    # Debt raised to fund a buyback. Both sides are real and they point in
+    # opposite directions: fewer shares AND more debt. Classifying it as
+    # either one alone loses half the economics, and a report that saw only
+    # the debt would call it a deterioration while one that saw only the
+    # buyback would call it a return of capital.
+    DEBT_FINANCED_REPURCHASE = "DEBT_FINANCED_REPURCHASE"
     ACQUISITION = "ACQUISITION"
     DIVESTITURE = "DIVESTITURE"
     REFINANCING = "REFINANCING"
@@ -447,7 +457,8 @@ class PostBalanceSheetEventType:
     UNKNOWN = "UNKNOWN"
     ALL = (ISSUER_EQUITY_ISSUANCE, ISSUER_DEBT_ISSUANCE, CONVERTIBLE_ISSUANCE,
            WARRANT_ISSUANCE, INSIDER_SECONDARY_SALE, SHAREHOLDER_SECONDARY_SALE,
-           SHARE_REPURCHASE, ACQUISITION, DIVESTITURE, REFINANCING,
+           SHARE_REPURCHASE, ACCELERATED_SHARE_REPURCHASE, DEBT_FINANCED_REPURCHASE,
+           ACQUISITION, DIVESTITURE, REFINANCING,
            SPECIAL_DIVIDEND, OTHER_MATERIAL_FINANCING, UNKNOWN)
 
 
@@ -468,6 +479,19 @@ _EVENT_IMPACT = {
         "affects_share_count": False, "affects_debt": True, "affects_cash": True,
         "potential_dilution": False, "affects_equity_bridge": True,
         "affects_enterprise_value_bridge": True, "requires_reassessment": True},
+    PostBalanceSheetEventType.ACCELERATED_SHARE_REPURCHASE: {
+        "affects_share_count": True, "affects_debt": False, "affects_cash": True,
+        "potential_dilution": False, "affects_equity_bridge": True,
+        "affects_enterprise_value_bridge": False, "requires_reassessment": True,
+        "increases_financial_leverage": False},
+    PostBalanceSheetEventType.DEBT_FINANCED_REPURCHASE: {
+        # Both sides preserved. Section 24's requirement: a report may still
+        # conclude leverage rose, but not by mistaking the financing for
+        # operational deterioration.
+        "affects_share_count": True, "affects_debt": True, "affects_cash": True,
+        "potential_dilution": False, "affects_equity_bridge": True,
+        "affects_enterprise_value_bridge": True, "requires_reassessment": True,
+        "increases_financial_leverage": True},
     PostBalanceSheetEventType.CONVERTIBLE_ISSUANCE: {
         "affects_share_count": False, "affects_debt": True, "affects_cash": True,
         # Section 27: debt today, potential equity later. Both, not either.
@@ -529,6 +553,22 @@ _EQUITY_LANGUAGE = re.compile(
 _CONVERTIBLE_LANGUAGE = re.compile(r"(?i)\bconvertible\b")
 _WARRANT_LANGUAGE = re.compile(r"(?i)\bwarrants?\b")
 
+# Phase H.14, section 23. An accelerated repurchase names itself; a plain
+# buyback authorisation does not settle shares on signing and is already
+# covered by SHARE_REPURCHASE.
+_ASR_LANGUAGE = re.compile(
+    r"(?i)\baccelerated\s+share\s+repurchase\b|\bASR\b|"
+    r"\baccelerated\s+(?:stock|share)\s+buy\s?back\b")
+
+# Language tying a debt raise to the buyback it funds. BOTH must appear for
+# the compound classification -- a company that issues debt and separately
+# mentions an existing buyback programme has not done this.
+_REPURCHASE_FUNDING_LANGUAGE = re.compile(
+    r"(?i)\b(?:net\s+)?proceeds\s+[\w\s,]{0,40}?to\s+"
+    r"(?:fund|finance|pay\s+for)\s+[\w\s,]{0,30}?(?:repurchase|buy\s?back)|"
+    r"\bto\s+(?:fund|finance)\s+(?:the\s+)?(?:accelerated\s+)?"
+    r"(?:share|stock)\s+repurchase")
+
 # 8-K item codes that identify an event type on their own.
 _ITEM_EVENT_TYPES = (
     ("2.03", PostBalanceSheetEventType.ISSUER_DEBT_ISSUANCE),
@@ -567,7 +607,16 @@ def classify_security_event(form: str, items: str, description: str = "",
             if event_type == PostBalanceSheetEventType.ISSUER_DEBT_ISSUANCE \
                     and _CONVERTIBLE_LANGUAGE.search(haystack):
                 return PostBalanceSheetEventType.CONVERTIBLE_ISSUANCE, 0.8
+            # Sections 23-24: debt raised to fund a buyback is BOTH, and the
+            # compound type is the only one that keeps both sides. Requires
+            # the funding language -- a debt filing that merely mentions an
+            # existing repurchase programme elsewhere has not done this.
+            if event_type == PostBalanceSheetEventType.ISSUER_DEBT_ISSUANCE                     and _REPURCHASE_FUNDING_LANGUAGE.search(haystack):
+                return PostBalanceSheetEventType.DEBT_FINANCED_REPURCHASE, 0.8
             return event_type, 0.85
+
+    if _ASR_LANGUAGE.search(haystack):
+        return PostBalanceSheetEventType.ACCELERATED_SHARE_REPURCHASE, 0.8
 
     if form.startswith("424") or form == "FWP":
         # A prospectus supplement is a securities offering of SOME kind. Which

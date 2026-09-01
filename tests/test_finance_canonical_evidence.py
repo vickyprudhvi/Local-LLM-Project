@@ -485,13 +485,46 @@ def test_the_evidence_index_exposes_current_and_historical_under_separate_ids():
     assert index["fundamental.free_cash_flow"].source_type == "reported_historical"
 
 
-def test_the_stage_validator_names_the_id_to_use_instead():
-    """A rejection a repair pass can act on, not just a refusal."""
+def test_a_stale_citation_is_quarantined_rather_than_failing_the_stage():
+    """Phase H.13 changed the CONSEQUENCE, not the rule.
+
+    This asserted that `_evidence_list` raised. Rejection turned out to be
+    worse than the problem: two live runs, on different issuers and
+    different business models, each lost a REQUIRED researcher stage to it
+    -- the model retried three times, cited the same id each time, and the
+    stage died, taking the rebuttal with it by prerequisite. A report with
+    no bull case is worse than one sentence resting on last year's figure.
+
+    The rule still holds: the passage does not reach the reader. It is
+    stubbed by the same quarantine every other semantic misuse uses, and
+    the stage survives.
+    """
     index = _index(fundamental__net_debt=-1_443.0, current__net_debt=-1_860.0)
-    with pytest.raises(Exception) as excinfo:
-        R._evidence_list(  # noqa: SLF001
-            {"evidence_cited": ["fundamental.net_debt"]}, "evidence_cited", index)
-    assert "current.net_debt" in str(excinfo.value)
+
+    # The citation itself no longer raises.
+    assert R._evidence_list(  # noqa: SLF001
+        {"evidence_cited": ["fundamental.net_debt"]}, "evidence_cited", index) == [
+        "fundamental.net_debt"]
+
+    output = {"key_risks": [
+        {"risk": "Net debt of -$1.44B is comfortable.",
+         "evidence_cited": ["fundamental.net_debt"]}]}
+    findings = R._stale_citation_findings(output, index)  # noqa: SLF001
+    assert [f.field_path for f in findings] == ["key_risks[0].risk"]
+    assert findings[0].label == "STALE_METRIC_CITATION"
+
+    result, _records, fatal = R.apply_quarantine(output, findings)
+    assert fatal == []
+    assert len(result["key_risks"]) == 1
+    assert "withheld" in result["key_risks"][0]["risk"]
+
+
+def test_a_citation_with_no_current_twin_produces_no_finding():
+    """The rule is unchanged: only a SUPERSEDED figure is caught."""
+    index = _index(fundamental__revenue_cagr=0.072, current__revenue=41_305.0)
+    output = {"key_risks": [{"risk": "The five-year CAGR was 7.2%.",
+                             "evidence_cited": ["fundamental.revenue_cagr"]}]}
+    assert R._stale_citation_findings(output, index) == []  # noqa: SLF001
 
 
 # ---------------------------------------------------------------------------

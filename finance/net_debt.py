@@ -48,6 +48,7 @@ WHAT THIS MODULE GUARANTEES
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
+from finance import validity
 
 # Deterministic guard code (section 16).
 DCF_NET_DEBT_RECONCILIATION_FAILURE = "DCF_NET_DEBT_RECONCILIATION_FAILURE"
@@ -123,6 +124,10 @@ class NetDebtComponents:
     # leaves out rather than having to notice its absence.
     lease_liabilities: Optional[float] = None
     total_debt: Optional[float] = None
+    # Phase H.15: whether `total_debt` may be consumed. INVALID means the
+    # figure is not known to describe total debt, and `total_debt` is None.
+    total_debt_validity: str = "VALID"
+    total_debt_reasons: list = field(default_factory=list)
     reported_total_debt: Optional[float] = None
     # Section 28. Management's OWN net-debt measure, with its own definition.
     # Never overwrites the model figure; the two are reconciled and their
@@ -149,6 +154,10 @@ class NetDebtComponents:
             "current_portion_of_long_term_debt": self.current_portion_of_long_term_debt,
             "long_term_debt": self.long_term_debt,
             "total_debt": self.total_debt,
+            # Spec section 9: the validity travels with the figure, so the
+            # dependency graph can invalidate what depends on it.
+            "total_debt_validity": self.total_debt_validity,
+            "total_debt_reasons": list(self.total_debt_reasons),
             "reported_total_debt": self.reported_total_debt,
             "as_of_date": self.as_of_date,
             "unit": self.unit,
@@ -179,6 +188,10 @@ class NetDebtResult:
             "derivation": self.derivation,
             "reconciled": self.reconciled,
             "components": self.components.to_dict(),
+            # Spec section 9: hoisted to the top level so the dependency
+            # graph can read it without reaching into `components`.
+            "total_debt_validity": self.components.total_debt_validity,
+            "total_debt_reasons": list(self.components.total_debt_reasons),
             "findings": [dict(f) for f in self.findings],
         }
 
@@ -307,21 +320,52 @@ def collect_components(selections: Dict[str, object],
     # taken as proof of what it contains: when the issuer also reports the
     # noncurrent portion separately and the two are equal, the tag is the
     # part, not the whole, and no cross-check is possible.
+    component_sum_before = components.total_debt
     inclusive = _reported_total_is_inclusive(
         reported_total_debt, reported_total_debt_concept, selections)
     if (components.total_debt is not None and reported_total_debt is not None
             and reported_total_debt_concept in TOTAL_DEBT_INCLUSIVE_CONCEPTS
             and inclusive):
         if not _within_tolerance(components.total_debt, reported_total_debt):
-            components.findings.append(_finding(
-                DCF_NET_DEBT_COMPONENT_OVERLAP, "warning",
-                f"Total debt summed from components ({components.total_debt:,.0f}) differs from "
-                f"the issuer's own reported {reported_total_debt_concept} "
-                f"({reported_total_debt:,.0f}). The component sum is used; the difference is "
-                "reported so it can be explained rather than assumed away.",
-                component_total=components.total_debt,
+            # Phase H.15, sections 4-7. This used to keep the component sum
+            # and file a warning beside it. Measured on a synthetic issuer,
+            # an $80.0B sum against a $95B reported total produced exactly
+            # that -- and net debt, leverage, the equity bridge, the modelled
+            # value per share and the risk that followed all consumed the
+            # 80B without ever reading the finding.
+            #
+            # Identity has already been established above (`inclusive`), so
+            # precedence may now apply: the issuer's own consolidated total
+            # outranks a sum assembled here, which can omit a component the
+            # issuer included. That is a resolution, not a preference for a
+            # provider, and it is stated on the metric.
+            resolved = validity.resolve_or_invalidate(
+                "total_debt",
+                component_sum=components.total_debt,
                 reported_total=reported_total_debt,
-                concept=reported_total_debt_concept))
+                reported_is_authoritative=True,
+                reported_concept=reported_total_debt_concept)
+            components.total_debt_validity = resolved.validity
+            components.total_debt_reasons = list(resolved.reasons)
+            if resolved.usable:
+                components.total_debt = resolved.raw_value
+                components.findings.append(_finding(
+                    DCF_NET_DEBT_COMPONENT_OVERLAP, "info",
+                    resolved.reasons[0] if resolved.reasons else
+                    "The issuer's reported total debt was used in place of the component sum.",
+                    component_total=component_sum_before,
+                    reported_total=reported_total_debt,
+                    concept=reported_total_debt_concept,
+                    resolution="issuer_reported_total"))
+            else:
+                components.total_debt = None
+                components.findings.append(_finding(
+                    validity.TOTAL_DEBT_CONFLICT, "error",
+                    resolved.reasons[0] if resolved.reasons else
+                    "Total debt could not be reconciled and is not used.",
+                    component_total=component_sum_before,
+                    reported_total=reported_total_debt,
+                    concept=reported_total_debt_concept))
     return components
 
 

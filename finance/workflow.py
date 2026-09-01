@@ -35,12 +35,17 @@ import tools.config as config
 from finance.dcf import AssumptionSourceType, DcfValidationStatus, NetDebtPolicy
 from finance import taxonomy as taxonomy_module
 from finance import metric_policy
+from finance import validity
+from finance import diagnostics
 from finance import business_model as business_model_module
 from finance import business_model as bm
 from finance import guidance as guidance_module
 from finance import growth_quality
 from finance import growth as growth_module
 from finance import canonical as canonical_module
+from finance import dcf_packet
+from finance import ttm as ttm_module
+from finance import report_model as report_model_module
 from finance import entity as entity_module
 from finance import suitability as suitability_module
 from finance.evidence import build_evidence_index
@@ -1520,6 +1525,7 @@ DCF_DEBT_BASIS_INVALID = "DCF_DEBT_BASIS_INVALID"
 DCF_CASH_FLOW_NOT_STANDARD_FCFF = "DCF_CASH_FLOW_NOT_STANDARD_FCFF"
 DCF_CANONICAL_EVIDENCE_CONFLICT = "DCF_CANONICAL_EVIDENCE_CONFLICT"
 DCF_INPUT_NORMALIZATION_UNRESOLVED = "DCF_INPUT_NORMALIZATION_UNRESOLVED"
+DCF_EQUITY_BRIDGE_INPUT_INVALID = "DCF_EQUITY_BRIDGE_INPUT_INVALID"
 
 
 DCF_REPORTING_CURRENCY_UNSUPPORTED = "DCF_REPORTING_CURRENCY_UNSUPPORTED"
@@ -1604,6 +1610,21 @@ def _dcf_inputs_from_facts(symbol, facts, forecast_years):
     # a non-SEC provider (Alpha Vantage) where no raw XBRL facts exist to
     # plan over. See finance/freshness.py.
     state = facts.get("_current_financial_state")
+
+    # Spec section 9/13. An invalid net debt or share basis cannot reach the
+    # equity bridge -- the bridge would produce a per-share figure, and that
+    # figure would go on to a market comparison, a valuation-derived risk and
+    # a recommendation rationale, all resting on a number the system already
+    # knows is wrong.
+    graph = facts.get("_validity_graph") or {}
+    for required in ("total_debt", "net_debt"):
+        metric = graph.get(required)
+        if metric is not None and metric.validity == validity.Validity.INVALID:
+            facts["dcf_unavailable_code"] = DCF_EQUITY_BRIDGE_INPUT_INVALID
+            return None, (
+                f"The equity bridge cannot be built: {required} is not valid for this "
+                f"analysis. "
+                + (metric.reasons[0] if metric.reasons else ""))
 
     # Section 19: the business-model gate runs before anything is assembled.
     blocked = _business_model_blocks_dcf(facts)
@@ -1743,7 +1764,16 @@ def _dcf_inputs_from_facts(symbol, facts, forecast_years):
     minority_interest = 0.0
 
     if state is not None and state.financial_as_of:
-        total_debt = state.total_debt.value or 0.0
+        # Part 16 - a legacy bypass, and an expensive one. This read
+        # `state.total_debt.value or 0.0`, so an issuer whose total debt could
+        # not be established at all (no component reported on the current
+        # balance sheet, or a conflict the reconciler refused to resolve) was
+        # valued as though it carried NO DEBT. The equity bridge then added
+        # the whole enterprise value to equity, the per-share figure went to
+        # the market comparison, and nothing downstream could tell the
+        # difference between a debt-free company and one whose debt was
+        # unknown. Absence stays absent; the packet refuses on it.
+        total_debt = state.total_debt.value
         cash_and_cash_equivalents = state.value("cash_and_cash_equivalents") or 0.0
         short_term_investments = state.value("short_term_investments") or 0.0
         preferred_equity = state.value("preferred_equity") or 0.0
@@ -1755,7 +1785,11 @@ def _dcf_inputs_from_facts(symbol, facts, forecast_years):
                 and state.financial_as_of == state.latest_quarterly_period)
             else "annual_sec_filing")
     else:
-        total_debt = balance_values.get("total_debt") or 0.0
+        # The same rule on the non-SEC path. `_derive_balance_sheet_aggregates`
+        # sums only the components it actually found, so a missing figure here
+        # means "no debt component was reported", not "this company has none",
+        # and the two must not render as the same number in an equity bridge.
+        total_debt = balance_values.get("total_debt")
         cash_and_cash_equivalents = balance_values.get("cash_and_cash_equivalents") or 0.0
         short_term_investments = balance_values.get("short_term_investments") or 0.0
         balance_sheet_as_of = balance[0].get("fiscal_date") if balance else None
@@ -1774,7 +1808,7 @@ def _dcf_inputs_from_facts(symbol, facts, forecast_years):
     # independent derivations of the same figure, so it catches a component
     # defect rather than an arithmetic one.
     net_debt_reconciliation = None
-    if state is not None and state.net_debt_detail:
+    if state is not None and state.net_debt_detail and total_debt is not None:
         from finance import net_debt as net_debt_module
         expected = total_debt - cash_and_cash_equivalents - eligible_sti
         recalculated = state.net_debt_detail.get("net_debt")
@@ -1855,6 +1889,249 @@ def _dcf_inputs_from_facts(symbol, facts, forecast_years):
             "security_identity": security.to_dict(),
         },
     }, None
+
+
+# ---------------------------------------------------------------------------
+# Parts 1-3 - the packet boundary
+# ---------------------------------------------------------------------------
+#
+# `_dcf_inputs_from_facts` above assembles the equity-bridge inputs. It does
+# not decide whether they may be valued, and it never calls the model. Both
+# of those happen here, once, so that "the DCF ran" and "the inputs passed"
+# cannot come apart.
+
+
+def _year_one(value):
+    """A forecast path reduced to the year it starts from.
+
+    An assumption is a path (one value per forecast year) or a scalar. The
+    required-input check is about whether a forecast exists at all, and an
+    assumption whose FIRST year is missing has none.
+    """
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else None
+    return value
+
+
+def _packet_values(symbol: str, facts: dict, dcf_inputs: dict,
+                   proposed: List[dict], arguments: dict) -> dict:
+    """The named inputs `build_dcf_input_packet` validates.
+
+    Deliberately named for what each figure IS rather than for the tool
+    argument that happens to carry it: the packet's contract is about
+    revenue, margin, tax, debt, liquidity, shares and the discount rate, and
+    the engine's argument spelling is an implementation detail.
+    """
+    primary = next((sc for sc in proposed if sc.get("name") == "base"),
+                   proposed[0] if proposed else {})
+    basis = facts.get("dcf_financial_basis") or {}
+    reconciliation = basis.get("net_debt_reconciliation") or {}
+    evidence_ids = reconciliation.get("evidence_ids")
+    net_debt = ((dcf_inputs.get("total_debt") or 0.0)
+                - (dcf_inputs.get("cash_and_cash_equivalents") or 0.0)
+                - (dcf_inputs.get("eligible_short_term_investments") or 0.0))
+    return {
+        "financial_base": basis.get("base_revenue_basis"),
+        "revenue": dcf_inputs.get("base_revenue"),
+        "operating_margin": _year_one(primary.get("operating_margin")),
+        "tax_rate": _year_one(primary.get("tax_rate")),
+        "depreciation_amortization": primary.get("depreciation_pct_revenue"),
+        "capex": primary.get("capex_pct_revenue"),
+        "working_capital_change": primary.get("working_capital_pct_revenue"),
+        "cash_or_liquidity": dcf_inputs.get("cash_and_cash_equivalents"),
+        "total_debt": dcf_inputs.get("total_debt"),
+        "net_debt": net_debt,
+        "share_basis": facts.get("dcf_shares_outstanding_source"),
+        "share_count": dcf_inputs.get("diluted_shares"),
+        "forecast_assumptions": tuple(sc.get("name") for sc in proposed if sc.get("name")),
+        "wacc": primary.get("wacc"),
+        "terminal_growth": primary.get("terminal_growth"),
+        "source_evidence_ids": (tuple(sorted(str(v) for v in evidence_ids.values()))
+                                if isinstance(evidence_ids, dict) else ()),
+        "model_arguments": arguments,
+    }
+
+
+def _blocking_assumption_rejections(facts: dict, proposed: List[dict]) -> List[dict]:
+    """Rejections that left a REQUIRED assumption with no valid value.
+
+    A semantic rejection is not by itself a reason to refuse the valuation.
+    Refusing a guidance figure that cannot anchor a forecast is the system
+    working: the guidance stays citable evidence and the forecast falls back
+    to the issuer's own reported history, which is the documented behaviour
+    (finance/forward_assumptions.py). What must never happen is a rejected
+    assumption being replaced by a DEFAULT and carried in as though it had
+    been derived - so a rejection blocks only when the assumption it refused
+    is genuinely absent afterwards.
+    """
+    primary = next((sc for sc in proposed if sc.get("name") == "base"),
+                   proposed[0] if proposed else {})
+    blocking = []
+    for rejection in (facts.get("semantic_rejections") or []):
+        if not isinstance(rejection, dict) or not rejection.get("code"):
+            continue
+        context = str(rejection.get("context") or "")
+        field = ("revenue_growth" if "revenue growth" in context
+                 else "operating_margin" if "operating margin" in context
+                 else None)
+        if field is None:
+            continue
+        if _year_one(primary.get(field)) is None:
+            blocking.append(rejection)
+    return blocking
+
+
+def _build_validated_dcf_packet(symbol, facts, forecast_years, scenarios, warnings):
+    """CanonicalFinancialState -> ValidatedDCFInputPacket, or a refusal.
+
+    Every early return is a PacketFailure carrying the code the report will
+    explain the absence with, so no caller can distinguish "no packet" from
+    "no reason" and pick a default for either.
+    """
+    dcf_inputs, blocker = _dcf_inputs_from_facts(symbol, facts, forecast_years)
+    if dcf_inputs is None:
+        code = facts.get("dcf_unavailable_code") or dcf_packet.DCF_INPUT_PACKET_INVALID
+        return None, dcf_packet.PacketFailure(
+            code=code, reasons=[blocker] if blocker else [],
+            # Which INPUT the refusal is about, not only which code. A bare
+            # code sends a reader looking for the failure; the named input
+            # tells them where it is, and it is the same vocabulary
+            # `build_dcf_input_packet` uses for the refusals it makes itself.
+            invalid_inputs=_INPUT_BLAMED_BY_CODE.get(code, []))
+
+    # Provenance that belongs on `facts`, never in the engine's arguments -
+    # the same pop-and-record contract these fields have always had, applied
+    # before the arguments are frozen into the packet.
+    facts["dcf_shares_outstanding_source"] = dcf_inputs.pop("shares_source", None)
+    split_adjustment = dcf_inputs.pop("shares_split_adjustment", None) or {}
+    facts["dcf_shares_split_adjustment"] = split_adjustment
+    facts["dcf_financial_basis"] = dcf_inputs.pop("financial_basis", None) or {}
+    if split_adjustment.get("split_factor", 1.0) != 1.0:
+        applied = ", ".join("{:g}-for-1 on {}".format(sp["ratio"], sp["date"])
+                            for sp in split_adjustment.get("splits_applied", []))
+        warnings.append(
+            "SHARE_COUNT_SPLIT_RESTATED: the SEC weighted-average diluted share count "
+            "({:,.0f} for {}, filed {}) predates a stock split ({}) and was restated onto "
+            "the current split basis as {:,.0f} before the per-share step. Without this, "
+            "modeled per-share values would be compared against a post-split market price "
+            "on a pre-split share count.".format(
+                split_adjustment["reported_shares"], split_adjustment.get("fiscal_date"),
+                split_adjustment.get("filed"), applied,
+                split_adjustment["adjusted_shares"]))
+
+    proposed = scenarios or propose_assumptions(facts, forecast_years)
+    if any(sc.get("incomplete") for sc in proposed):
+        facts["dcf_unavailable_code"] = DcfValidationStatus.ASSUMPTION_REQUIRED
+        return None, dcf_packet.PacketFailure(
+            code=DcfValidationStatus.ASSUMPTION_REQUIRED,
+            reasons=[proposed[0].get("missing_reason")
+                     or ("The reported history does not support proposing forecast "
+                         "assumptions, so no valuation was attempted.")],
+            invalid_inputs=["forecast_assumptions"])
+
+    arguments = dict(dcf_inputs)
+    arguments["scenarios"] = proposed
+    arguments["sensitivity"] = {
+        "wacc_values": [round(0.07 + 0.01 * i, 4) for i in range(5)],
+        "terminal_growth_values": [round(0.010 + 0.005 * i, 4) for i in range(5)],
+    }
+
+    packet, failure = dcf_packet.build_dcf_input_packet(
+        values=_packet_values(symbol, facts, dcf_inputs, proposed, arguments),
+        validity_graph=facts.get("_validity_graph") or {},
+        business_model=facts.get("_business_model"),
+        assumption_rejections=_blocking_assumption_rejections(facts, proposed))
+    if packet is None and not facts.get("dcf_unavailable_code"):
+        facts["dcf_unavailable_code"] = dcf_packet.DCF_INPUT_PACKET_INVALID
+    return packet, failure
+
+
+# Which packet input each pre-packet refusal is about. `_dcf_inputs_from_facts`
+# can refuse before a packet is ever attempted -- the business model does not
+# admit this valuation, the statements cannot be read, a required balance-sheet
+# input is invalid -- and a PacketFailure that named only a code left the
+# caller unable to say WHICH input failed, which is the whole point of the
+# structured failure.
+_INPUT_BLAMED_BY_CODE = {
+    DCF_CASH_FLOW_NOT_STANDARD_FCFF: ["business_model"],
+    DCF_EQUITY_BRIDGE_INPUT_INVALID: ["net_debt", "total_debt"],
+    DCF_TAXONOMY_UNSUPPORTED: ["financial_base"],
+    DCF_REPORTING_CURRENCY_UNSUPPORTED: ["financial_base"],
+    DCF_INPUT_NORMALIZATION_UNRESOLVED: ["revenue"],
+}
+
+
+def _run_validated_dcf(executor, packet, step=99):
+    """Part 2: the ONLY adapter that may invoke `finance.dcf_model`.
+
+    It takes a packet and nothing else. There is no argument dict to pass
+    alongside, because the arguments live on the packet - a call site that
+    wanted to skip validation would have to construct a
+    ValidatedDCFInputPacket in order to do it, which is exactly the check it
+    was trying to skip.
+    """
+    if not isinstance(packet, dcf_packet.ValidatedDCFInputPacket):
+        raise TypeError(
+            "finance.dcf_model may only be invoked through a ValidatedDCFInputPacket; "
+            "received {}.".format(type(packet).__name__))
+    if not packet.ok:
+        raise ValueError(
+            "A ValidatedDCFInputPacket that did not pass validation cannot be run: "
+            + "; ".join(packet.validation_reasons))
+    return _call_tool(executor, DCF_TOOL_NAME, packet.arguments(), step=step)
+
+
+def _valuation_status(facts: dict) -> str:
+    """Part 4: the single valuation verdict for this analysis.
+
+    Reads the packet failure (if the valuation was refused before it ran),
+    the model's own validation status (if it ran), the business model, and
+    DCF suitability - in that order, because that is the order in which a
+    reader needs the cause explained. Nothing downstream may re-decide this.
+    """
+    dcf = facts.get("dcf") or {}
+    failure = facts.get("dcf_packet_failure")
+    suitability = facts.get("dcf_suitability") or {}
+    return dcf_packet.classify_valuation(
+        packet_failure=failure,
+        dcf_available=bool(dcf.get("available")),
+        dcf_validation_status=dcf.get("validation_status"),
+        business_model=facts.get("_business_model"),
+        # An UNASSESSED suitability is not a limited one. Reporting it as
+        # LIMITED would make "this analysis could not check whether the model
+        # fits" indistinguishable from "the model fits only with caveats",
+        # and the second withholds a valuation the first has no grounds to
+        # withhold. What the analysis could not establish is reported through
+        # data completeness and research readiness, which is where a reader
+        # looks for it.
+        suitability_status=(suitability.get("dcf_suitability")
+                            if suitability.get("assessed", True) else None))
+
+
+def _valuation_unavailable_record(facts: dict, failure) -> dict:
+    """Part 3: a refusal describes its ROOT CAUSE and carries no numbers.
+
+    Never a partial input set, never the previous run's values, never a
+    figure with a warning attached. The record states which status applies
+    and why, and the valuation gate downstream reads that status rather than
+    inferring one from the absence of fields.
+    """
+    reasons = [r for r in list(getattr(failure, "reasons", []) or []) if r]
+    status = dcf_packet.classify_valuation(
+        packet_failure=failure, dcf_available=False,
+        business_model=facts.get("_business_model"))
+    return {
+        "available": False,
+        "reason": reasons[0] if reasons else dcf_packet.STATUS_EXPLANATION.get(status),
+        "unavailable_code": (getattr(failure, "code", None)
+                             or facts.get("dcf_unavailable_code")),
+        "valuation_status": status,
+        "packet_failure": failure.to_dict() if failure is not None else None,
+        # Every reason, not only the first: a packet may refuse for several
+        # independent inputs, and reporting one of them sends a reader to fix
+        # a single symptom of a wider problem.
+        "detail": "; ".join(reasons) if len(reasons) > 1 else None,
+    }
 
 
 def balance_sheet_as_of_hint(facts: dict) -> Optional[str]:
@@ -2109,70 +2386,61 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
     raw_provider_bytes = sum(
         len(json.dumps(raw_payload, default=str)) for raw_payload, _prov in payloads.values())
 
-    # -- valuation, always through the registered tool --
-    dcf_inputs, blocker = _dcf_inputs_from_facts(symbol, facts, forecast_years)
-    if dcf_inputs is None:
-        facts["dcf"] = {"available": False, "reason": blocker,
-                        "unavailable_code": facts.get("dcf_unavailable_code")}
-        warnings.append(f"No DCF valuation was produced: {blocker}")
-    else:
-        # Share-count provenance (Phase 8 corrective patch): recorded on
-        # `facts` directly, NOT passed through to the finance.dcf_model tool
-        # call (which has no such argument) -- pop it before `dcf_inputs`
-        # is used as the tool's `arguments` dict below.
-        facts["dcf_shares_outstanding_source"] = dcf_inputs.pop("shares_source", None)
-        # MLI corrective patch: same pop-and-record contract -- the split
-        # restatement detail is provenance, never a DCF tool argument.
-        split_adjustment = dcf_inputs.pop("shares_split_adjustment", None) or {}
-        facts["dcf_shares_split_adjustment"] = split_adjustment
-        # Phase H.4 -- same contract again: which period the valuation is
-        # built on is provenance for the report, not a DCF tool argument.
-        facts["dcf_financial_basis"] = dcf_inputs.pop("financial_basis", None) or {}
-        if split_adjustment.get("split_factor", 1.0) != 1.0:
-            applied = ", ".join(f"{s['ratio']:g}-for-1 on {s['date']}"
-                               for s in split_adjustment.get("splits_applied", []))
+    # Spec section 9, and the correction this phase exists to make. This block
+    # used to run AFTER the valuation while its own comment claimed it ran
+    # before, so `_dcf_inputs_from_facts` read `facts["_validity_graph"]` and
+    # always found it empty: the cascade was built, wired, and consulted by a
+    # gate that could never see it. The dependency graph and the semantic
+    # rejections are now established BEFORE any valuation input is assembled,
+    # which is the only ordering under which either can refuse anything.
+    _state = facts.get("_current_financial_state")
+    if _state is not None:
+        graph = _build_validity_graph(facts, _state)
+        facts["_validity_graph"] = graph
+        facts["metric_validity"] = {
+            name: metric.to_dict() for name, metric in graph.items()
+            if metric.validity != validity.Validity.VALID}
+        for name in validity.root_causes(graph):
             warnings.append(
-                "SHARE_COUNT_SPLIT_RESTATED: the SEC weighted-average diluted share count "
-                f"({split_adjustment['reported_shares']:,.0f} for "
-                f"{split_adjustment.get('fiscal_date')}, filed "
-                f"{split_adjustment.get('filed')}) predates a stock split ({applied}) and was "
-                f"restated onto the current split basis as "
-                f"{split_adjustment['adjusted_shares']:,.0f} before the per-share step. "
-                "Without this, modeled per-share values would be compared against a "
-                "post-split market price on a pre-split share count.")
-        proposed = scenarios or propose_assumptions(facts, forecast_years)
-        if any(s.get("incomplete") for s in proposed):
+                f"{graph[name].reason_codes[0] if graph[name].reason_codes else 'INVALID'}: "
+                f"{graph[name].reasons[0] if graph[name].reasons else name}")
+
+    facts["semantic_rejections"] = _collect_semantic_rejections(facts)
+
+    # -- valuation, always through the registered tool, and never without a
+    # -- ValidatedDCFInputPacket ------------------------------------------
+    #
+    # Parts 1-3. `build_dcf_input_packet` existed before this phase and was
+    # called by nothing on the live path: the gates it encodes were each
+    # re-implemented, or not implemented, at the call site. There is now
+    # exactly one route from facts to `finance.dcf_model`, it runs through
+    # packet construction, and the engine's arguments live INSIDE the packet
+    # so a caller cannot assemble them without one.
+    packet, packet_failure = _build_validated_dcf_packet(
+        symbol, facts, forecast_years, scenarios, warnings)
+    if packet is None:
+        facts["dcf"] = _valuation_unavailable_record(facts, packet_failure)
+        warnings.append("No DCF valuation was produced: "
+                        + (facts["dcf"].get("reason") or "the input packet was refused."))
+    else:
+        result = _run_validated_dcf(executor, packet, step=99)
+        if result.success:
+            facts["dcf"] = result.data
+            facts["dcf"]["available"] = True
+            facts["dcf"]["assumptions_origin"] = (
+                "user_supplied" if scenarios else "derived_from_reported_history")
+        else:
             facts["dcf"] = {
                 "available": False,
-                "reason": "DCF_ASSUMPTION_REQUIRED",
-                "detail": proposed[0].get("missing_reason"),
-                "inputs_ready": dcf_inputs,
+                "reason": result.error.code if result.error else "UNKNOWN",
+                "detail": result.error.message if result.error else "",
             }
-            warnings.append(
-                "A DCF was not run because the reported history does not support "
-                "proposing assumptions. Supply them explicitly to value this company.")
-        else:
-            arguments = dict(dcf_inputs)
-            arguments["scenarios"] = proposed
-            arguments["sensitivity"] = {
-                "wacc_values": [round(0.07 + 0.01 * i, 4) for i in range(5)],
-                "terminal_growth_values": [round(0.010 + 0.005 * i, 4) for i in range(5)],
-            }
-            result = _call_tool(executor, DCF_TOOL_NAME, arguments, step=99)
-            if result.success:
-                facts["dcf"] = result.data
-                facts["dcf"]["available"] = True
-                facts["dcf"]["assumptions_origin"] = (
-                    "user_supplied" if scenarios else "derived_from_reported_history")
-            else:
-                facts["dcf"] = {
-                    "available": False,
-                    "reason": result.error.code if result.error else "UNKNOWN",
-                    "detail": result.error.message if result.error else "",
-                }
-                errors.append({"dataset": "dcf", "tool": DCF_TOOL_NAME,
-                               "code": facts["dcf"]["reason"],
-                               "message": facts["dcf"]["detail"]})
+            errors.append({"dataset": "dcf", "tool": DCF_TOOL_NAME,
+                           "code": facts["dcf"]["reason"],
+                           "message": facts["dcf"]["detail"]})
+    facts["dcf_input_packet"] = packet.to_dict() if packet is not None else None
+    facts["dcf_packet_failure"] = (packet_failure.to_dict()
+                                   if packet_failure is not None else None)
 
     # -- market price vs the base-scenario modeled value, and scenario
     # disagreement, computed here, never by the model — the LLM's
@@ -2196,7 +2464,8 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
     facts["valuation_method_status"] = metric_policy.valuation_method_status(
         facts.get("_business_model"),
         dcf_available=bool(dcf_record.get("available")),
-        dcf_validation_failed=_dcf_validation_failed(dcf_record))
+        dcf_validation_failed=_dcf_validation_failed(dcf_record),
+        dcf_validation_status=dcf_record.get("validation_status"))
     packet = metric_policy.build_relevant_evidence(
         facts.get("_business_model"),
         canonical_current=((facts.get("canonical_evidence") or {}).get("current") or {}),
@@ -2204,7 +2473,11 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
         valuation_method_status=facts["valuation_method_status"])
     facts["business_model_evidence"] = packet.to_dict()
 
-    facts["semantic_rejections"] = _collect_semantic_rejections(facts)
+    # Phase 52. One place to trace a number from the filing to the valuation
+    # input, instead of eight facts keys. Debug-only and never in the
+    # compact payload: it exists to make the NEXT bug quick to find.
+    if config.finance_audit_trail_enabled():
+        facts["_audit_trail"] = diagnostics.build_audit_trail(facts)
     facts["dcf_suitability"] = _assess_dcf_suitability(facts)
     # Section 48: complete the immutable audit now that the share basis and
     # the valuation are known. One object answers "what period, what basis,
@@ -2213,6 +2486,13 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
     _complete_dcf_input_audit(facts)
     facts["valuation_gap"] = _valuation_gap(facts)
     facts["dcf_scenario_spread"] = _scenario_spread(facts.get("dcf"))
+    # Parts 4-6. ONE valuation status for the whole run, decided by cause,
+    # computed after suitability (which is one of its inputs) and before the
+    # evidence index (which is gated on it). Every consumer reads this field;
+    # none re-derives a verdict from the shape of `facts["dcf"]`, which is
+    # how the report came to say "model invalid" for four different reasons
+    # only one of which was the model's fault.
+    facts["valuation_status"] = _valuation_status(facts)
     facts["research_readiness"] = _research_readiness(plan, facts)
 
     instrumentation = {
@@ -2415,7 +2695,12 @@ def _research_readiness(plan: AnalysisPlan, facts: dict) -> dict:
 
     # Section 33: the root cause first. A refused derivation is the reason a
     # later assumption is weaker, so it is stated before that weakness is.
-    for rejection in (facts.get("semantic_rejections") or []):
+    # Phase 44: a symptom whose cause is present in the same run is not
+    # reported beside it. A bound conflict that exists only because an
+    # invalid derivation reached the clamp sends a reader to the model's
+    # configuration, which was working correctly.
+    for rejection in diagnostics.filter_to_root_causes(
+            facts.get("semantic_rejections") or []):
         reasons.append(
             f"A required figure could not be derived because two values were semantically "
             f"incompatible ({rejection.get('left')} against {rejection.get('right')} for "
@@ -2447,10 +2732,42 @@ def _research_readiness(plan: AnalysisPlan, facts: dict) -> dict:
     if not dcf.get("available"):
         limited = True
         reasons.append("No DCF valuation was available for this analysis.")
-    elif dcf.get("validation_status") == DcfValidationStatus.VALID_WITH_WARNINGS:
-        limited = True
-        reasons.append("The DCF passed validation but carries a warning (see dcf.warnings / "
-                       "dcf.validation_reasons) — e.g. a negative modeled equity value.")
+    else:
+        # THREE DIFFERENT QUESTIONS, and the reason has to answer the right
+        # one. "The DCF passed validation" answers only the first:
+        #
+        #   arithmetic validity   did the model's own checks pass?
+        #                         (`dcf.validation_status`)
+        #   valuation eligibility may its output be used as research
+        #                         evidence? (`facts["valuation_status"]`)
+        #   research readiness    how much weight can THIS RUN bear?
+        #                         (what this function returns)
+        #
+        # They come apart routinely, and the case that matters is the one
+        # where the first says yes and the second says no: a model whose
+        # arithmetic is perfect, resting on a forecast set by a configured
+        # bound rather than by the company's economics. Reporting that as
+        # "passed validation, carries a warning" describes the arithmetic
+        # and says nothing about whether the answer may be used -- which is
+        # the only part a reader is deciding on.
+        valuation_status = facts.get("valuation_status")
+        arithmetic = dcf.get("validation_status")
+        if valuation_status not in (None, dcf_packet.ValuationStatus.VALID_FOR_RESEARCH):
+            limited = True
+            explanation = dcf_packet.STATUS_EXPLANATION.get(valuation_status) or ""
+            reasons.append(
+                f"The DCF's own arithmetic checks passed ({arithmetic}), but its output is "
+                f"not eligible for research use ({valuation_status}). {explanation} "
+                "Valuation-derived conclusions - a modelled value, a premium or discount, "
+                "an implied return - are withheld; the model's assumptions and the "
+                "company's reported figures are unaffected.".strip())
+        elif arithmetic == DcfValidationStatus.VALID_WITH_WARNINGS:
+            limited = True
+            reasons.append(
+                "The DCF's arithmetic checks passed with a warning (see dcf.warnings / "
+                "dcf.validation_reasons) - e.g. a negative modeled equity value. Its "
+                "output remains eligible for research use; the warning describes the "
+                "result, not the method.")
 
     # MLI corrective patch -- ASSUMPTION-QUALITY signals.
     #
@@ -2564,6 +2881,79 @@ def _complete_dcf_input_audit(facts: dict) -> None:
     facts["dcf_input_audit"] = dict(audit)
 
 
+def _build_validity_graph(facts: dict, state) -> dict:
+    """Spec section 9: every canonical metric as a ValidatedMetric, cascaded.
+
+    This is the wiring the cascade kernel was missing. `propagate()` was
+    built and tested in isolation and called by nothing, so the global
+    invariant -- an invalid input invalidates everything that depends on it
+    -- held in the tests and not in the pipeline.
+
+    Only metrics the canonical state actually produced enter the graph, so
+    an issuer missing a metric gets no entry rather than a false VALID.
+    """
+    canonical = (facts.get("canonical_evidence") or {}).get("current") or {}
+    metrics = {}
+    for name, entry in canonical.items():
+        if not isinstance(entry, dict):
+            continue
+        metric = validity.ValidatedMetric(
+            metric_id=name,
+            raw_value=entry.get("value"),
+            period=entry.get("period"),
+            derivation=entry.get("derivation_formula") or entry.get("definition", ""),
+            source_metric_ids=tuple(entry.get("source_metrics") or ()),
+            source_evidence_ids=tuple(filter(None, (entry.get("evidence_id"),))))
+        # The other half of "copied everywhere and checked nowhere". Every
+        # canonical metric has carried a `validation_status` since the TTM
+        # builder was written; the graph was built from the VALUES and
+        # ignored it, so a trailing window the constructor had already
+        # rejected entered the cascade as VALID and was consumed by
+        # everything downstream. An INVALID construction is not a caveat on
+        # the number: it means the window does not cover what it claims to.
+        if entry.get("validation_status") == ttm_module.TtmValidation.INVALID:
+            metric.invalidate(
+                "TTM_CONSTRUCTION_INVALID",
+                f"The trailing-twelve-month construction for {name} did not validate, so "
+                "the figure does not cover the period it is labelled with.")
+        metrics[name] = metric
+
+    # Section 10: a debt conflict that could not be resolved invalidates the
+    # canonical figure, and the cascade carries it from there.
+    detail = getattr(state, "net_debt_detail", None) or {}
+    debt_validity = detail.get("total_debt_validity")
+    if debt_validity == validity.Validity.INVALID and "total_debt" in metrics:
+        metrics["total_debt"].invalidate(
+            validity.TOTAL_DEBT_CONFLICT,
+            "; ".join(detail.get("total_debt_reasons") or
+                      ["total debt could not be reconciled"]))
+
+    return validity.propagate(metrics)
+
+
+def _analysis_issue_codes(facts: dict) -> List[str]:
+    """Every diagnostic code this analysis actually raised.
+
+    Sections 30-31. A condition promising to resolve a share-count conflict
+    is only meaningful when a share-count conflict was found; without this
+    set there is nothing to check it against, and a live report listed
+    exactly such a trigger for an issuer whose shares reconciled cleanly.
+    """
+    codes = []
+    for rejection in (facts.get("semantic_rejections") or []):
+        if isinstance(rejection, dict) and rejection.get("code"):
+            codes.append(rejection["code"])
+    for source in ("canonical_evidence", "current_financial_state"):
+        for finding in ((facts.get(source) or {}).get("findings") or []):
+            if isinstance(finding, dict) and finding.get("code"):
+                codes.append(finding["code"])
+    basis = (facts.get("dcf_financial_basis") or {}).get("share_reconciliation") or {}
+    for finding in (basis.get("findings") or []):
+        if isinstance(finding, dict) and finding.get("code"):
+            codes.append(finding["code"])
+    return sorted(set(codes))
+
+
 def _collect_semantic_rejections(facts: dict) -> List[dict]:
     """Every operation `finance.semantics` refused during this analysis.
 
@@ -2599,6 +2989,7 @@ def _assess_dcf_suitability(facts: dict) -> dict:
     if state is None:
         return suitability_module.SuitabilityAssessment(
             status=suitability_module.DcfSuitability.LIMITED,
+            assessed=False,
             summary=("No normalized financial state was built, so whether a discounted-cash-"
                      "flow valuation suits this company could not be assessed.")).to_dict()
 
@@ -4149,7 +4540,7 @@ def build_compact_synthesis_payload(result: AnalysisResult) -> dict:
     technical_metrics_compact, technical_version = _compact_metrics(
         facts.get("technical_metrics"), "calculation_version")
 
-    return {
+    compact = {
         "symbol": result.symbol,
         "generated_at_utc": facts.get("generated_at_utc"),
         "analysis_mode": result.plan.mode,
@@ -4203,6 +4594,11 @@ def build_compact_synthesis_payload(result: AnalysisResult) -> dict:
         "business_model_evidence": _compact_business_model_evidence(
             facts.get("business_model_evidence")),
         "valuation_method_status": facts.get("valuation_method_status"),
+        # Part 4. The single valuation verdict travels with the payload so
+        # the evidence gate and the report model read the SAME status the
+        # analysis decided, rather than each inferring one from whichever
+        # subset of dcf/suitability/business-model fields it happens to see.
+        "valuation_status": facts.get("valuation_status"),
         "growth_bridge": _compact_growth_bridge(facts.get("growth_bridge")),
         "canonical_evidence": _compact_canonical_evidence(
             facts.get("canonical_evidence")),
@@ -4223,6 +4619,12 @@ def build_compact_synthesis_payload(result: AnalysisResult) -> dict:
         "warnings": list(result.warnings)[:max_warnings],
         "errors": list(result.errors),
     }
+    # Present only when a packet was actually refused. A key whose value is
+    # always None on the ordinary path is bytes spent saying nothing, and
+    # this payload has a budget a real fixture already sits close to.
+    if facts.get("dcf_packet_failure"):
+        compact["dcf_packet_failure"] = facts["dcf_packet_failure"]
+    return compact
 
 
 def _record_validation_telemetry(symbol, pipeline_result) -> None:
@@ -4626,138 +5028,33 @@ def _return_window_label(total_return_metric) -> str:
     return "Return (period)"
 
 
-def _snapshot_rows(compact: dict) -> List[Tuple[str, str]]:
-    """The compact Snapshot table's rows. A metric with a genuinely missing
-    value is simply omitted (nothing meaningful to show); a metric whose
-    `status` is `not_meaningful` (H.4 corrective patch, goal 1 — ROE or
-    debt-to-equity against non-positive shareholder equity) is INCLUDED but
-    rendered as "N/M — <reason>", never as a numeric ratio."""
-    quote = compact.get("quote") or {}
-    company = compact.get("company") or {}
-    fundamental_metrics_ = compact.get("fundamental_metrics") or {}
-    technical_metrics_ = compact.get("technical_metrics") or {}
-    currency = compact.get("financial_history_currency") or "USD"
-    income_periods = (compact.get("financial_history") or {}).get("income_statement") or []
-    latest_income_values = (income_periods[0].get("values") or {}) if income_periods else {}
+_VALUE_FORMATTERS = {
+    report_model_module.ValueKind.CURRENCY: lambda v, c: _fmt_currency(v, c),
+    report_model_module.ValueKind.PRICE: lambda v, c: _fmt_price(v, c),
+    report_model_module.ValueKind.PERCENT: lambda v, _c: _fmt_pct(v),
+    report_model_module.ValueKind.RATIO: lambda v, _c: _fmt_ratio(v),
+}
 
-    def fm(name):
-        entry = fundamental_metrics_.get(name)
-        return entry if isinstance(entry, dict) else {}
 
-    # Phase H.9, sections 1-2: the canonical CURRENT metrics. Read once, at
-    # the top, so every row below draws on the same packet rather than on
-    # whichever provider-shaped structure its own code path reaches.
-    canonical_current = (compact.get("canonical_evidence") or {}).get("current") or {}
+def _snapshot_rows(model) -> List[Tuple[str, str]]:
+    """Format the Snapshot the model already decided.
 
+    Every choice this function used to make -- which of two revenue figures
+    is current, whether a ratio came from this quarter's components or last
+    year's, whether "free cash flow" is an honest label for this issuer, when
+    a ratio is not meaningful -- now happens in
+    `finance/report_model.py::_build_snapshot`. What is left is turning a
+    float into a string, which is all a renderer should ever have been doing.
+    """
     rows: List[Tuple[str, str]] = []
-
-    def add(label, formatted):
-        if formatted is not None:
-            rows.append((label, formatted))
-
-    # Phase H.6 — the snapshot's headline figures come from the SAME
-    # selection the valuation uses, when one exists.
-    #
-    # This is the NVDA failure in its most visible form. The Valuation
-    # section said "Financial base: trailing twelve months to 26 Apr 2026"
-    # and the Snapshot two inches above it said "Revenue $215.94B" — NVDA's
-    # FY2026 ANNUAL revenue, $37B below the actual trailing twelve months of
-    # $253.49B, read straight out of `financial_history` while the DCF used
-    # the TTM. Net debt had the same split: -$1.14B in the snapshot against
-    # -$3.77B in the state. Two numbers for one quantity, on one page, with
-    # nothing saying which was which.
-    #
-    # The labels now name the period, so a reader can see which basis each
-    # figure is on rather than assuming they share one.
-    def flow_row(field_name, fallback):
-        selection = canonical_current.get(field_name)
-        if isinstance(selection, dict) and selection.get("value") is not None:
-            suffix = (" (TTM)" if selection.get("period_type") in ("TTM", "DERIVED")
-                      else " (FY)")
-            return selection["value"], suffix
-        return fallback, ""
-
-    add("Price", _fmt_price(quote.get("price"), currency))
-    add("Market Cap", _fmt_currency(company.get("market_capitalisation"), currency))
-    revenue_value, revenue_suffix = flow_row("revenue", latest_income_values.get("revenue"))
-    add(f"Revenue{revenue_suffix}", _fmt_currency(revenue_value, currency))
-    # Phase H.11, sections 6 and 10. The label states which period the rate
-    # covers, and the value comes from the canonical current slot rather than
-    # from the annual statements. A live report printed a trailing-twelve-
-    # month revenue base and, two rows below it, the PRIOR FISCAL YEAR's
-    # growth under a bare "Revenue Growth" heading -- both correct, only one
-    # of them describing the period the report claimed.
-    growth_metric = canonical_current.get("revenue_growth") or {}
-    growth_label = (compact.get("canonical_evidence") or {}).get("current_growth_label")
-    if growth_metric.get("value") is not None:
-        heading = f"Revenue Growth ({growth_label})" if growth_label else "Revenue Growth"
-        add(heading, _fmt_pct(growth_metric["value"]))
-    elif fm("revenue_growth_yoy").get("value") is not None:
-        # Nothing current could be built at all. Say which period this is.
-        add("Revenue Growth (last fiscal year YoY)",
-            _fmt_pct(fm("revenue_growth_yoy").get("value")))
-    income_value, income_suffix = flow_row("net_income", latest_income_values.get("net_income"))
-    add(f"Net Income{income_suffix}", _fmt_currency(income_value, currency))
-    fcf_value, fcf_suffix = flow_row("free_cash_flow", fm("free_cash_flow").get("value"))
-    # Phase H.12, section 31. "FCF" asserts owner economics. Where the
-    # business model does not support that claim the row is named for the
-    # subtraction that was actually performed, so the Snapshot and the
-    # Valuation section cannot describe one number two different ways.
-    fcf_label = ((compact.get("business_model_evidence") or {}).get("cash_flow_label")
-                 or "FCF")
-    add(f"{fcf_label}{fcf_suffix}", _fmt_currency(fcf_value, currency))
-    state_net_debt = ((canonical_current.get("net_debt") or {}).get("value")
-                      if canonical_current.get("net_debt")
-                      else (compact.get("current_financial_state") or {}).get("net_debt"))
-    add("Net Debt", _fmt_currency(
-        state_net_debt if state_net_debt is not None else fm("net_debt").get("value"), currency))
-    # Phase H.9: the DERIVED CURRENT margin, when one exists. Reading
-    # `fundamental_metrics` here rendered last fiscal year's margin under a
-    # heading that said trailing twelve months -- 10.66% against a current
-    # 15.71% on one live issuer, and nothing at all on another whose annual
-    # operating income is untagged.
-    operating_margin_metric = canonical_current.get("operating_margin") or {}
-    if operating_margin_metric.get("value") is not None:
-        add("Operating Margin (TTM)", _fmt_pct(operating_margin_metric["value"]))
-    else:
-        add("Operating Margin", _fmt_pct(fm("operating_margin").get("value")))
-    # Phase H.11, sections 7-9. Derived from the CURRENT balance sheet's own
-    # components when they exist. A live report stated a balance-sheet date of
-    # the latest quarter and a current ratio of 5.92 carried over from the
-    # prior fiscal year, while that quarter's own current assets and
-    # liabilities -- both already selected -- gave 4.78.
-    def instant_ratio_row(label, key, formatter):
-        current = canonical_current.get(key) or {}
-        if current.get("value") is not None:
-            add(label, formatter(current["value"]))
-            return True
-        return False
-
-    if not instant_ratio_row("Current Ratio", "current_ratio", _fmt_ratio):
-        annual = fm("current_ratio")
-        if annual.get("value") is not None:
-            add("Current Ratio (FY)", _fmt_ratio(annual.get("value")))
-
-    for label, metric_name, formatter in (
-        ("ROE", "roe_ending_equity", _fmt_pct),
-        ("Debt-to-Equity", "debt_to_equity", _fmt_ratio),
-    ):
-        # The current-date form wins wherever one could be derived; the
-        # annual entry below stays as the fallback for issuers with no
-        # newer components.
-        if metric_name == "debt_to_equity" and instant_ratio_row(
-                "Debt-to-Equity", "debt_to_equity", _fmt_ratio):
+    for row in model.snapshot:
+        if row.text is not None:
+            rows.append((row.label, row.text))
             continue
-        entry = fm(metric_name)
-        if entry.get("status") == STATUS_NOT_MEANINGFUL:
-            reason = _NOT_MEANINGFUL_REASON_TEXT.get(entry.get("reason"), "not meaningful")
-            add(label, f"N/M — {reason}")
-        elif entry.get("value") is not None:
-            add(label, formatter(entry["value"]))
-
-    total_return_entry = technical_metrics_.get("total_return_over_window") or {}
-    add(_return_window_label(total_return_entry), _fmt_pct(total_return_entry.get("value")))
-
+        formatter = _VALUE_FORMATTERS.get(row.kind)
+        formatted = formatter(row.value, model.currency) if formatter else str(row.value)
+        if formatted is not None:
+            rows.append((row.label, formatted))
     return rows
 
 
@@ -4767,21 +5064,17 @@ def _render_markdown_table(rows: List[Tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def _compact_status_section(result: "AnalysisResult", compact: dict) -> List[str]:
-    status_words = {
-        AnalysisMode.FULL: "COMPLETE", AnalysisMode.REDUCED: "REDUCED",
-        AnalysisMode.CACHED_ONLY: "PARTIAL", AnalysisMode.STALE: "PARTIAL",
-    }
-    mode = result.plan.mode
-    sentence = f"**{status_words.get(mode, 'REDUCED')}**."
-    if mode != AnalysisMode.FULL:
-        sentence += f" {result.plan.reason}"
-    omitted = list(result.plan.omitted_datasets)
-    if omitted:
-        sentence += f" Missing: {', '.join(d.replace('_', ' ') for d in omitted)}."
-    provenance = compact.get("data_provenance") or {}
-    if any(isinstance(p, dict) and p.get("provider") == "yahoo" for p in provenance.values()):
-        sentence += " Yahoo Finance data is an unofficial, personal-use source."
+def _compact_status_section(model) -> List[str]:
+    """Join what the model settled. No mode inspection, no provenance scan."""
+    sentence = model.status.headline
+    if model.status.reason:
+        sentence += f" {model.status.reason}"
+    if model.status.missing_datasets:
+        sentence += (" Missing: "
+                     + ", ".join(d.replace("_", " ") for d in model.status.missing_datasets)
+                     + ".")
+    if model.status.unofficial_source_note:
+        sentence += f" {model.status.unofficial_source_note}"
     return ["## Status", "", sentence, ""]
 
 
@@ -4822,244 +5115,57 @@ def _period_label(date_text) -> Optional[str]:
         return None
 
 
-def _valuation_basis_lines(compact: dict) -> List[str]:
-    """The three-line financial-base statement (section 19)."""
-    basis = compact.get("dcf_financial_basis") or {}
-    guidance = compact.get("management_guidance") or {}
+def _valuation_basis_lines(basis) -> List[str]:
+    """The financial-base statement, from a settled ValuationBasis."""
     lines: List[str] = []
-
-    flow_end = basis.get("flow_period_end")
-    # Phase H.6, section 24: the label may only say "trailing twelve months"
-    # when a twelve-month window was ACTUALLY constructed and validated. On
-    # the live NVDA run this line read "trailing twelve months to 26 Apr
-    # 2026" above a headline revenue that was the prior FISCAL YEAR's — the
-    # label was derived from `base_revenue_basis` alone, which said
-    # `ttm_calculation` regardless of whether the construction had held.
-    validation = basis.get("flow_base_validation")
-    if basis.get("base_revenue_basis") == "ttm_calculation" and flow_end \
-            and validation in (None, "valid", "partial"):
-        lines.append("Financial base: trailing twelve months to "
-                     f"{_period_label(flow_end) or flow_end}")
-        if validation == "partial":
-            lines.append("  (that twelve-month window ends before this company's latest "
-                         "reported period — see the research view)")
-    elif flow_end:
-        lines.append(f"Financial base: fiscal year to {_period_label(flow_end) or flow_end}")
-
-    balance_as_of = basis.get("balance_sheet_as_of")
-    if balance_as_of:
-        label = _period_label(balance_as_of) or balance_as_of
-        # The KIND of period is stated in words rather than encoded in a
-        # quarter label, so a non-calendar fiscal year cannot be misread.
-        kind = ("latest quarterly filing"
-                if basis.get("balance_sheet_source") == "quarterly_sec_filing"
-                else "fiscal year end, latest annual filing")
-        lines.append(f"Balance sheet: {label} ({kind})")
-
-    metrics = (guidance or {}).get("metrics") or {}
-    if metrics:
-        # Section 24: name the period the guidance ACTUALLY covers. NVIDIA's
-        # current guidance is a NEXT-QUARTER outlook; rendering it as
-        # "FY2027 guidance" claims a full-year outlook the company did not
-        # give. The period label comes from the guidance record itself.
-        period = basis.get("guidance_period")
-        if period:
-            lines.append(f"Management guidance: {period} current guidance")
-            # Section 10/42. A company routinely issues FULL-YEAR guidance
-            # alongside its second-quarter results, and a live report called
-            # that "Q2 FY2026 guidance" -- naming the reporting quarter as
-            # the target and making a twelve-month outlook look like a
-            # three-month one. Both periods are stated, and they are labelled
-            # as the different things they are.
-            issued_with = basis.get("guidance_issued_with")
-            if issued_with and issued_with != period:
-                lines.append(f"  Issued with {issued_with} results")
-        else:
-            fiscal_year = guidance.get("fiscal_year")
-            lines.append(f"Management guidance: FY{fiscal_year} current guidance"
-                         if fiscal_year else "Management guidance: current guidance")
-        guided = sorted(name for name in metrics)
-        if guided:
-            lines.append(f"  (guided metrics: {', '.join(guided)})")
-        coverage_matrix = compact.get("guidance_matrix") or {}
-        if coverage_matrix.get("dcf_rows_missing"):
-            lines.append(f"  Coverage: "
-                         f"{guidance_module.guidance_summary_line(coverage_matrix)}")
-    elif (compact.get("guidance_matrix") or {}).get("current_rows"):
-        # Phase H.11, section 12. Partial coverage is not absence. A live
-        # issuer published current capital-expenditure guidance and no
-        # revenue guidance, and the report said guidance was unavailable --
-        # which also cost the assumption builder a figure it could have used.
-        coverage_matrix = compact["guidance_matrix"]
-        lines.append("Management guidance: partial")
-        lines.append(f"  {guidance_module.guidance_summary_line(coverage_matrix)}")
-    else:
-        # DIS/CASY corrective patch: "unavailable" asserted that the company
-        # published no guidance. What is actually known is that the extractor
-        # found none -- a weaker claim, and the only one the evidence
-        # supports. Live counter-examples where the report said "unavailable"
-        # while the company had in fact guided:
-        #
-        #   DIS   "We continue to expect fiscal 2026 adjusted EPS growth of
-        #          approximately 12%"   -- a single value, and this extractor
-        #          requires a RANGE (the guard that keeps reported actuals out)
-        #   CASY  "inside same-store sales to increase 2% to 5%"  -- a real
-        #          range, missed because the metric vocabulary did not cover
-        #          same-store sales
-        #
-        # Stating what was examined lets a reader tell "nothing to find" from
-        # "nothing found", which is the difference between the two cases.
-        examined = compact.get("guidance_releases_examined")
-        if examined:
-            lines.append(f"Management guidance: none extracted "
-                         f"({examined} SEC earnings release"
-                         f"{'s' if examined != 1 else ''} examined)")
-        elif examined == 0:
-            lines.append("Management guidance: no SEC earnings release found")
-        else:
-            lines.append("Management guidance: not retrieved")
-
-    freshness = basis.get("valuation_freshness")
-    if freshness and freshness != ValuationFreshness.CURRENT:
-        lines.append(f"Valuation freshness: {freshness.replace('_', ' ').lower()}")
-
-    # Section 54: DCF suitability is shown WHEN MATERIAL. A SUITABLE verdict
-    # is the ordinary case and saying so on every report would be noise; the
-    # other three change how much weight the valuation can carry and belong
-    # on the page.
-    suitability = (compact.get("dcf_suitability") or {}).get("dcf_suitability")
-    if suitability and suitability != "SUITABLE":
-        lines.append(f"DCF suitability: {suitability.replace('_', ' ').lower()}")
-
-    # Phase H.10, section 20. A missing valuation is not a failed analysis,
-    # and the difference has to be visible or a reader will read the absence
-    # as a malfunction. When the model was declined because it cannot
-    # represent this business, the report says so and says why -- and the
-    # cash-flow figure is relabelled rather than withheld (section 18).
-    # A DCF that was declined for a stated reason says so. Without this the
-    # reader sees a Valuation section with no valuation and no explanation,
-    # which reads as a malfunction -- and for a euro-reporting issuer the
-    # underlying message was worse than silence: the old text claimed revenue
-    # "was not reported" when the issuer had filed complete accounts this
-    # project simply cannot convert.
-    # Phase H.12, sections 16/43/44. ONE statement about the valuation method.
-    # Two separate blocks used to render here, and a live insurer got the same
-    # paragraph twice at different lengths. The wording also said the model was
-    # "invalid" when it had simply never applied -- a different claim, and a
-    # harsher one, than the true statement that a standard FCFF valuation does
-    # not fit this business.
-    model = compact.get("business_model") or {}
-    unavailable = compact.get("dcf") or {}
-    method_status = compact.get("valuation_method_status")
-    method_line = metric_policy.VALUATION_STATUS_WORDING.get(method_status)
-    if method_line and not unavailable.get("available"):
-        lines.append(method_line)
-        profile = (model.get("profile") or "").replace("_", " ").lower()
-        if profile and model.get("standard_fcff_suitability") == "NOT_SUITABLE":
-            lines.append(
-                f"  This issuer is classified as {profile} (SEC SIC {model.get('sic')}, "
-                f"{model.get('sic_description')}); for that business model operating cash "
-                f"flow less capital expenditure is not owner free cash flow. The figure is "
-                f"still reported, under that definition.")
-        lines.append("  Research therefore relies on operating, capital, guidance and "
-                     "market evidence.")
+    if basis.financial_base_label:
+        lines.append(basis.financial_base_label)
+    if basis.financial_base_caveat:
+        lines.append(basis.financial_base_caveat)
+    if basis.balance_sheet_label:
+        lines.append(f"Balance sheet: {basis.balance_sheet_label} "
+                     f"({basis.balance_sheet_kind})")
+    lines += list(basis.guidance_lines)
+    if basis.freshness_note:
+        lines.append(basis.freshness_note)
+    if basis.suitability_note:
+        lines.append(basis.suitability_note)
+    if basis.method_lines:
+        lines += list(basis.method_lines)
         lines.append("")
-    elif not unavailable.get("available") and unavailable.get("reason"):
-        lines.append(f"Valuation model: no discounted-cash-flow valuation was produced. "
-                     f"{unavailable['reason']}")
+    if basis.unavailable_line:
+        lines.append(basis.unavailable_line)
         lines.append("")
-
-
-    share = basis.get("share_reconciliation") or {}
-    if share.get("status") in ("MATERIAL_DIFFERENCE", "INCOMPATIBLE_BASIS"):
-        gap = share.get("market_cap_gap")
-        lines.append(
-            "Share basis: UNRESOLVED"
-            + (f" — price x shares differs from reported market capitalisation by "
-               f"{gap:+.1%}" if isinstance(gap, (int, float)) else "")
-            + "; per-share figures are not comparable with the market price")
+    if basis.share_basis_note:
+        lines.append(basis.share_basis_note)
     return lines + [""] if lines else []
 
 
-def _base_growth_clamp(compact: dict) -> Optional[dict]:
-    """The base scenario's year-1 revenue-growth clamp, if it bound.
+def _valuation_section(model) -> List[str]:
+    """Format a decided valuation.
 
-    Reads the assumption PROVENANCE rather than re-deriving anything: the
-    builder already recorded `raw_growth`, `applied_growth` and
-    `clamp_reason` on the entry (finance/forward_assumptions.py), and the
-    report's job is to show them, not to recompute a bound.
+    The withheld/shown decisions are gone from here entirely. A modelled
+    value the model did not publish is not in `model.valuation` at all, so
+    there is nothing for this function to suppress and no way for a future
+    edit to un-suppress it.
     """
-    dcf = compact.get("dcf") or {}
-    candidates = []
-    for scenario in (dcf.get("scenarios") or []):
-        if scenario.get("scenario") != "base":
-            continue
-        candidates.append(((scenario.get("assumptions") or {})
-                           .get("assumption_provenance") or {}).get("revenue_growth"))
-    # `_hoist_shared_assumption_provenance` moves an entry that is identical
-    # across every scenario into one shared dict, so look there too.
-    candidates.append((dcf.get("shared_assumption_provenance") or {}).get("revenue_growth"))
-    for entry in candidates:
-        if isinstance(entry, dict) and entry.get("clamped") \
-                and entry.get("raw_value") is not None:
-            return {"raw_growth": entry["raw_value"],
-                    "applied_growth": entry.get("applied_value"),
-                    "clamp_reason": entry.get("clamp_reason")}
-    return None
-
-
-def _valuation_section(compact: dict) -> List[str]:
+    valuation = model.valuation
+    currency = model.currency
     lines = ["## Valuation", ""]
-    quote = compact.get("quote") or {}
-    currency = compact.get("financial_history_currency") or "USD"
-    spread = compact.get("dcf_scenario_spread") or {}
-    gap = compact.get("valuation_gap") or {}
-    dcf = compact.get("dcf") or {}
 
-    # Section 31/56: a precise price-vs-value comparison and a warning that
-    # the two are not on the same share basis cannot both be true. When the
-    # denominator under every per-share figure is unresolved, the comparison
-    # is WITHHELD rather than printed beside its own contradiction -- the
-    # same treatment the report already gives a DCF that failed validation.
-    share_basis = ((compact.get("dcf_financial_basis") or {})
-                   .get("share_reconciliation") or {})
-    share_basis_unresolved = share_basis.get("status") in (
-        "MATERIAL_DIFFERENCE", "INCOMPATIBLE_BASIS")
+    if valuation.market_price is not None:
+        lines.append(f"Market price: {_fmt_price(valuation.market_price, currency)}")
 
-    # Section 26: when the DCF is not economically reliable, a comparison
-    # rendered to one decimal place claims a precision the inputs do not
-    # support. A live run printed "Market-price premium: 75,588.5%" because a
-    # configured default margin had collapsed the modelled value to $0.20 --
-    # the figure was arithmetically correct and told the reader nothing
-    # except that something was broken. The raw numbers stay in the facts for
-    # full/debug mode; only the compact rendering is suppressed.
-    suitability_status = (compact.get("dcf_suitability") or {}).get("dcf_suitability")
-    valuation_not_meaningful = suitability_status in ("LIMITED", "NOT_SUITABLE")
+    lines += _valuation_basis_lines(valuation.basis)
 
-    if quote.get("price") is not None:
-        lines.append(f"Market price: {_fmt_price(quote['price'], currency)}")
-
-    # Phase H.4 (section 19): the financial BASE, in three short lines.
-    # Deliberately not a freshness audit -- compact mode gets only what a
-    # reader needs to know which periods the valuation rests on; the full
-    # per-field provenance stays in facts["current_financial_state"] for
-    # full/debug mode. Before this, a report could state a modeled value
-    # without ever saying it was built on a balance sheet six months stale.
-    lines += _valuation_basis_lines(compact)
-
-    # TSLA DCF validation patch (sections 9/14): a DCF that RAN but failed
-    # deterministic validation (finance.dcf.DcfValidationStatus.INVALID)
-    # must never render bear/base/bull numbers or a valuation-gap percentage
-    # as normal findings — `_scenario_spread`/`_valuation_gap` already return
-    # `available=False` in this case (see finance/workflow.py), so the
-    # rendering below this block naturally has nothing to print; this block
-    # ADDS the explicit status statement and the specific reason(s) instead
-    # of silently rendering an empty Valuation section.
-    if dcf.get("available") and _dcf_validation_failed(dcf):
-        lines += ["", f"Status: MODEL_INVALID ({dcf.get('validation_status')})", ""]
-        lines.append("The deterministic DCF failed validation because:")
-        for reason in (dcf.get("validation_reasons") or ["see dcf.warnings for detail"]):
-            lines.append(f"- {reason}")
+    if valuation.model_invalid_status:
+        lines += ["", f"Status: {valuation.model_invalid_status}", ""]
+        if valuation.model_invalid_explanation:
+            lines.append(valuation.model_invalid_explanation)
+            lines.append("")
+        if valuation.model_invalid_reasons:
+            lines.append("The deterministic model reported:")
+            lines += [f"- {reason}" for reason in valuation.model_invalid_reasons]
         lines += [
             "",
             "Valuation-based comparison with the current market price is withheld. "
@@ -5068,138 +5174,72 @@ def _valuation_section(compact: dict) -> List[str]:
         ]
         return lines
 
-    if spread.get("available"):
-        lines.append(f"Bear modeled value: {_fmt_price(spread.get('bear_value_per_share'), currency)}")
-        lines.append(f"Base modeled value: {_fmt_price(spread.get('base_value_per_share'), currency)}")
-        lines.append(f"Bull modeled value: {_fmt_price(spread.get('bull_value_per_share'), currency)}")
+    if valuation.bear_value_per_share is not None:
+        lines.append("Bear modeled value: "
+                     f"{_fmt_price(valuation.bear_value_per_share, currency)}")
+        lines.append("Base modeled value: "
+                     f"{_fmt_price(valuation.base_value_per_share, currency)}")
+        lines.append("Bull modeled value: "
+                     f"{_fmt_price(valuation.bull_value_per_share, currency)}")
     lines.append("")
 
-    if gap.get("available"):
-        # DIS valuation-comparison patch: two DISTINCT percentages, each with
-        # its OWN denominator (see finance/workflow.py::_valuation_gap's
-        # docstring) -- never conflated into one ambiguous sentence again.
-        # `market_price_premium_pct` (denominated in the MODELED value) is
-        # the correct figure for "market price is X% below/above the base
-        # modeled value"; `modeled_return_to_value_pct` (denominated in the
-        # market PRICE) is a different question ("what would the implied
-        # return be") and is rendered as its own, separately labelled line.
-        premium_pct = gap.get("market_price_premium_pct")
-        return_pct = gap.get("modeled_return_to_value_pct")
-        if share_basis_unresolved:
-            lines.append(
-                "Comparison with the market price is WITHHELD: the share count underlying "
-                "the modeled per-share values does not reconcile against the reported market "
-                "capitalisation, so the two figures are not on the same basis.")
-            lines.append("")
-        elif valuation_not_meaningful:
-            lines.append(
-                "Market-price comparison: not meaningful — DCF input normalization is "
-                "unresolved, so a percentage comparison against the modeled value would "
-                "state a precision the inputs do not support.")
-            lines.append("")
-        elif premium_pct is not None:
-            if premium_pct < 0:
+    if valuation.comparison_withheld_reason:
+        lines.append(valuation.comparison_withheld_reason)
+        lines.append("")
+    else:
+        premium = valuation.premium_pct
+        printed = False
+        if premium is not None:
+            if premium < 0:
                 lines.append("Market-price discount to base modeled value: "
-                             f"{abs(premium_pct):.1%}")
-            elif premium_pct > 0:
+                             f"{abs(premium):.1%}")
+            elif premium > 0:
                 lines.append("Market-price premium to base modeled value: "
-                             f"{abs(premium_pct):.1%}")
+                             f"{abs(premium):.1%}")
             else:
-                lines.append("Market price is approximately equal to the base modeled value.")
-        suppress = share_basis_unresolved or valuation_not_meaningful
-        if return_pct is not None and not suppress:
-            lines.append(f"Modeled return from current price to base value: {return_pct:+.1%}")
-        if not suppress and (premium_pct is not None or return_pct is not None):
+                lines.append("Market price is approximately equal to the base modeled "
+                             "value.")
+            printed = True
+        if valuation.modeled_return_pct is not None:
+            lines.append("Modeled return from current price to base value: "
+                         f"{valuation.modeled_return_pct:+.1%}")
+            printed = True
+        if printed:
             lines.append("")
 
-    scenarios = dcf.get("scenarios") or []
-    primary = next((s for s in scenarios if s.get("scenario") == dcf.get("primary_scenario")),
-                   None)
-    if primary:
-        assumptions = primary.get("assumptions") or {}
-        revenue_growth = assumptions.get("revenue_growth")
-        if isinstance(revenue_growth, list):
-            revenue_growth = revenue_growth[0] if revenue_growth else None
-        bits = []
-        if revenue_growth is not None:
-            # Section 19: a clamped growth rate is the MODEL'S BOUND, not an
-            # estimate of the company's growth, and printing it bare invites
-            # exactly the reading the live NVDA report got — "25.0%" beside a
-            # 65.5% reported growth rate, with nothing saying the 25% was a
-            # ceiling rather than a forecast.
-            clamp = _base_growth_clamp(compact)
-            if clamp:
-                bits.append(
-                    f"- Revenue growth: {_fmt_pct(revenue_growth)} "
-                    f"(CLAMPED — the evidence implied {_fmt_pct(clamp['raw_growth'])}; "
-                    "this is the model's configured bound, not an estimate of the "
-                    "company's growth)")
-            else:
-                bits.append(f"- Revenue growth: {_fmt_pct(revenue_growth)}")
-        if assumptions.get("wacc") is not None:
-            bits.append(f"- WACC: {_fmt_pct(assumptions['wacc'])}")
-        if assumptions.get("terminal_growth") is not None:
-            bits.append(f"- Terminal growth: {_fmt_pct(assumptions['terminal_growth'])}")
-        if bits:
-            lines.append("Key base-case assumptions:")
-            lines += bits
-            lines.append("")
+    if valuation.assumption_lines:
+        lines.append("Key base-case assumptions:")
+        lines += list(valuation.assumption_lines)
+        lines.append("")
 
-    if spread.get("available") and spread.get("spread_pct_of_base") is not None:
-        spread_pct = abs(spread["spread_pct_of_base"])
-        level = "LOW" if spread_pct < 0.15 else ("MODERATE" if spread_pct < 0.40 else "HIGH")
-        lines.append(f"Model sensitivity: {level}")
-        terminal_share = (primary or {}).get("terminal_value_share_of_enterprise_value")
-        # 0.75 matches the SAME threshold finance/dcf.py::_collect_warnings
-        # already uses for its own terminal-value-dependency warning.
-        if terminal_share is not None and terminal_share > 0.75:
-            lines.append("The base modeled value depends heavily on the terminal-value "
-                        "assumption (WACC and terminal growth), not near-term cash flows.")
+    if valuation.sensitivity_level:
+        lines.append(f"Model sensitivity: {valuation.sensitivity_level}")
+        if valuation.terminal_dependence_note:
+            lines.append(valuation.terminal_dependence_note)
         lines.append("")
 
     return lines
 
 
-def _technical_section(compact: dict) -> List[str]:
+def _technical_section(model) -> List[str]:
+    """Format the decided technical view. No thresholds, no comparisons."""
+    technical = model.technical
     lines = ["## Technical", ""]
-    technical_metrics_ = compact.get("technical_metrics") or {}
-
-    def value(name):
-        entry = technical_metrics_.get(name)
-        return entry.get("value") if isinstance(entry, dict) else None
-
-    latest = value("latest_close")
-    smas = (("20-day", value("sma_20")), ("50-day", value("sma_50")), ("200-day", value("sma_200")))
-    if latest is not None and any(sma is not None for _label, sma in smas):
-        above = [label for label, sma in smas if sma is not None and latest >= sma]
-        below = [label for label, sma in smas if sma is not None and latest < sma]
-        parts = []
-        if above:
-            parts.append(f"above the {_join_labels(above)} SMA{'s' if len(above) > 1 else ''}")
-        if below:
-            parts.append(f"below the {_join_labels(below)} SMA{'s' if len(below) > 1 else ''}")
-        lines.append(f"Price is {' and '.join(parts)}.")
-
-    rsi = value("rsi_14")
-    if rsi is not None:
-        lines.append(f"RSI (14) is {rsi:.2f}.")
-
-    macd_histogram = value("macd_histogram")
-    if macd_histogram is not None:
-        sign = "positive" if macd_histogram > 0 else ("negative" if macd_histogram < 0 else "flat")
-        lines.append(f"MACD histogram is {sign} ({macd_histogram:.2f}).")
-
-    total_return_entry = technical_metrics_.get("total_return_over_window") or {}
-    ret = total_return_entry.get("value")
-    volatility = value("annualized_volatility")
-    if ret is not None or volatility is not None:
+    if technical.trend_sentence:
+        lines.append(technical.trend_sentence)
+    if technical.rsi is not None:
+        lines.append(f"RSI (14) is {technical.rsi:.2f}.")
+    if technical.macd_histogram is not None:
+        lines.append(f"MACD histogram is {technical.macd_sign} "
+                     f"({technical.macd_histogram:.2f}).")
+    if technical.total_return is not None or technical.annualized_volatility is not None:
         bits = []
-        if ret is not None:
-            bits.append(f"{_return_window_label(total_return_entry)} is {ret:+.1%}")
-        if volatility is not None:
-            bits.append(f"annualized volatility is {volatility:.1%}")
+        if technical.total_return is not None:
+            bits.append(f"{technical.return_label} is {technical.total_return:+.1%}")
+        if technical.annualized_volatility is not None:
+            bits.append("annualized volatility is "
+                        f"{technical.annualized_volatility:.1%}")
         lines.append("; ".join(bits) + ".")
-
     lines.append("")
     return lines
 
@@ -5221,39 +5261,51 @@ def _compact_pipeline_stage_output(pipeline_result: Optional[ResearchPipelineRes
     output = pipeline_result.output(stage_name)
     if output is not None:
         return output, None
+    # Phases 24/40. The note says WHAT happened to this section, never how
+    # the pipeline is built. "research_manager made an unsupported evidence
+    # claim after one repair attempt" names an internal stage and a retry
+    # count; a reader cannot act on either, and both remain in the run
+    # artifact and in full/debug mode for anyone debugging the pipeline.
+    #
+    # The skipped/failed distinction survives, because it IS meaningful: one
+    # says this section was never attempted, the other that it was attempted
+    # and could not be validated.
     checkpoint = pipeline_result.by_stage(stage_name)
-    reason = _stage_unavailable_reason(pipeline_result, stage_name)
     if checkpoint is not None and checkpoint.status == StageStatus.SKIPPED:
-        return None, f"_Not available (skipped — prerequisite not met): {reason}._"
-    return None, f"_Not available (failed): {reason}._"
+        return None, ("_Not available: an earlier research stage did not complete, so this "
+                      "one was not attempted._")
+    return None, "_Not available: this research stage could not be validated._"
 
 
-def _compact_claims_section(heading: str, pipeline_result, stage_name: str, max_bullets=3) -> List[str]:
+def _compact_claims_section(heading: str, claim_set) -> List[str]:
+    """Bullets, or the model's own unavailability note. Nothing else."""
     lines = [f"## {heading}", ""]
-    output, unavailable_note = _compact_pipeline_stage_output(pipeline_result, stage_name)
-    if output is None:
-        return lines + [unavailable_note, ""]
-    # Plain-text claims only — no internal claim IDs or evidence IDs rendered
-    # in compact mode (goal 6/test 23: "excludes full evidence IDs"). Full
-    # provenance for every claim remains in `result.research_pipeline` and in
-    # report_detail="full"'s rendering.
-    lines += [f"- {claim['claim']}" for claim in output["claims"][:max_bullets]]
+    if claim_set.unavailable_note:
+        return lines + [claim_set.unavailable_note, ""]
+    lines += [f"- {claim}" for claim in claim_set.claims]
     lines.append("")
     return lines
 
 
-def _compact_risk_section(pipeline_result, max_bullets=4) -> List[str]:
+def _compact_risk_section(model) -> List[str]:
+    """Two dimensions, shown apart -- as the model classified them.
+
+    Which findings are the company's risk and which are this analysis's
+    limitations is a finance judgement (§18) and is made in the report
+    model. This function only prints the two lists it is handed.
+    """
     lines = ["## Risk", ""]
-    output, unavailable_note = _compact_pipeline_stage_output(pipeline_result, "risk_reviewer")
-    if output is None:
-        return lines + [unavailable_note, ""]
-    severity_rank = {"high": 0, "medium": 1, "low": 2}
-    risks = sorted(output["key_risks"], key=lambda r: severity_rank.get(r["severity"], 1))
-    bullets = [f"- **[{r['severity'].upper()}]** {r['risk']}" for r in risks[:max_bullets]]
-    for concern in output["data_quality_concerns"][:max(0, max_bullets - len(bullets))]:
-        bullets.append(f"- **[DATA]** {concern}")
-    lines += bullets
+    if model.risk_unavailable_note:
+        return lines + [model.risk_unavailable_note, ""]
+    lines += [f"- **[{item.severity.upper()}]** {item.text}" if item.severity
+              else f"- {item.text}" for item in model.company_risk]
     lines.append("")
+    if model.analysis_limitations:
+        lines.append("**Analysis limitations** — what this analysis could not establish, "
+                     "which is not a risk the company carries:")
+        lines.append("")
+        lines += [f"- {item.text}" for item in model.analysis_limitations]
+        lines.append("")
     return lines
 
 
@@ -5280,43 +5332,42 @@ def _research_view_reason_line(readiness: dict, pipeline_result, cascade: Dict[s
     if readiness.get("status") == ResearchReadiness.LIMITED:
         incomplete = [name for name in _REQUIRED_PIPELINE_STAGES if cascade.get(name) != "COMPLETE"]
         if incomplete:
-            summary = _pipeline_failure_summary(pipeline_result)
-            if summary:
-                return summary
+            # Phases 24/40. Compact mode used to print the raw failure --
+            # "bull_researcher response did not match the required schema
+            # after 3 attempts" -- which names an internal stage, an internal
+            # schema and a retry count, none of which mean anything to a
+            # reader or change what they should do with the analysis. What
+            # DOES matter is that the view rests on less than it should.
+            #
+            # The specific stage, its status and its attempt count remain in
+            # the run artifact and in full/debug mode, where someone
+            # debugging this pipeline will look for them.
             if _pipeline_overall_status(cascade) == "DISABLED":
                 return "The independent research pipeline is disabled for this analysis."
+            count = len(incomplete)
+            return (f"{count} research stage{'s' if count != 1 else ''} could not be "
+                    f"validated, so the final synthesis rests on a reduced evidence set "
+                    f"and its confidence is capped accordingly.")
     reasons = readiness.get("reasons") or []
     return reasons[-1] if reasons else None
 
 
-def _compact_research_view_section(compact: dict, pipeline_result) -> List[str]:
-    """Problem 2/5/7 (DIS correction): ALWAYS states the pipeline's own
-    completion status ('Research pipeline: COMPLETE/PARTIAL/DISABLED') and
-    the pipeline-AWARE research readiness FIRST, deterministically — never
-    left for the model's own narrative to get right or wrong (the live DIS
-    bug this responds to: bear_researcher had FAILED, yet the report still
-    said "Decision readiness: READY"). When no validated final synthesis
-    exists (the pipeline is not COMPLETE, and no constrained fallback
-    synthesis ran — see Problem 5), research stance / valuation view / risk
-    / confidence are explicitly 'unavailable', never fabricated from
-    whatever partial output does exist.
-    """
-    lines = ["## Research View", ""]
-    cascade = _pipeline_stage_cascade(pipeline_result)
-    pipeline_status = _pipeline_overall_status(cascade)
-    base_readiness = compact.get("research_readiness") or {"status": None, "reasons": []}
-    readiness = _effective_research_readiness(base_readiness, cascade)
+def _compact_research_view_section(model) -> List[str]:
+    """Print the settled research view.
 
-    lines.append(f"Research pipeline: {pipeline_status}")
-    if readiness.get("status"):
-        lines.append(f"Research readiness: {readiness['status']}")
-    reason_line = _research_view_reason_line(readiness, pipeline_result, cascade)
-    if reason_line:
-        lines += ["", f"Reason: {reason_line}"]
+    Pipeline completeness, effective readiness, the reason the readiness is
+    what it is, the confidence band and which conditions survived filtering
+    are all decided in the report model. None of them is re-derived here.
+    """
+    view = model.research_view
+    lines = ["## Research View", "", f"Research pipeline: {view.pipeline_status}"]
+    if view.readiness_status:
+        lines.append(f"Research readiness: {view.readiness_status}")
+    if view.readiness_reason:
+        lines += ["", f"Reason: {view.readiness_reason}"]
     lines.append("")
 
-    output = pipeline_result.output("final_investment_synthesizer") if pipeline_result else None
-    if output is None:
+    if not view.available:
         lines += [
             "Research stance: unavailable",
             "Valuation view: unavailable",
@@ -5327,37 +5378,21 @@ def _compact_research_view_section(compact: dict, pipeline_result) -> List[str]:
         ]
         return lines
 
-    # MLI corrective patch (spec 7): a low-confidence call must not read with
-    # the same conviction as a high-confidence one, so the band is stated
-    # alongside the number rather than left for the reader to infer.
-    confidence = output["confidence"]
     lines += [
-        f"Research stance: {output['research_stance'].replace('_', ' ')}",
-        f"Valuation view: {output['valuation_view'].replace('_', ' ')}",
-        f"Risk: {output['overall_risk'].replace('_', ' ')}",
-        f"Confidence: {confidence:.0%} ({_confidence_band(confidence)})",
+        f"Research stance: {view.research_stance}",
+        f"Valuation view: {view.valuation_view}",
+        f"Risk: {view.overall_risk}",
+        f"Confidence: {view.confidence:.0%} ({view.confidence_band})",
         "",
-        f"Recommendation: {output['recommendation'].replace('_', ' ').upper()}",
+        f"Recommendation: {view.recommendation}",
         "",
     ]
-    # Spec 12: WHY this recommendation and not the adjacent one, capped at
-    # three reasons -- primary_reason first, then the specific validated
-    # limitations behind it.
-    primary = (output.get("primary_reason") or "").strip()
-    if primary:
-        lines += ["Why:", primary, ""]
-    # Spec 15: this section is now the ONLY place conditions render in
-    # compact mode -- the standalone "What Could Change the View" section was
-    # a verbatim duplicate of the upgrade/downgrade lists and was removed.
-    for label, key, cap in (("Limiting factors", "limiting_factors", 3),
-                            ("Upgrade conditions", "conditions_that_strengthen_the_view", 2),
-                            ("Downgrade conditions", "conditions_that_weaken_the_view", 2),
-                            ("Reassessment triggers", "reassessment_triggers", 2)):
-        items = [i for i in (output.get(key) or []) if str(i).strip()][:cap]
-        if items:
-            lines.append(f"{label}:")
-            lines += [f"- {i}" for i in items]
-            lines.append("")
+    if view.primary_reason:
+        lines += ["Why:", view.primary_reason, ""]
+    for label, items in view.condition_groups:
+        lines.append(f"{label}:")
+        lines += [f"- {item}" for item in items]
+        lines.append("")
     return lines
 
 
@@ -5389,27 +5424,13 @@ _DATASET_SOURCE_LABEL = {
 }
 
 
-def _compact_sources_section(compact: dict) -> List[str]:
+def _compact_sources_section(model) -> List[str]:
     lines = ["## Sources", ""]
-    provenance = compact.get("data_provenance") or {}
-    by_provider: Dict[str, List[str]] = {}
-    for dataset, entry in provenance.items():
-        provider = entry.get("provider") if isinstance(entry, dict) else None
-        if not provider:
-            continue
-        label = _DATASET_SOURCE_LABEL.get(dataset, dataset.replace("_", " "))
-        labels = by_provider.setdefault(provider, [])
-        if label not in labels:
-            labels.append(label)
-    parts = [f"{_PROVIDER_DISPLAY_NAME.get(provider, provider.title())}: {'/'.join(labels)}"
-            for provider, labels in by_provider.items()]
+    parts = [f"{line.provider}: {'/'.join(line.labels)}" for line in model.sources]
     if parts:
         lines.append(" | ".join(parts))
-    plan = compact.get("plan") or {}
-    omitted = plan.get("omitted_datasets") or []
-    if omitted:
-        effect = (plan.get("omission_effects") or {}).get(omitted[0], "")
-        lines.append(f"Missing: {omitted[0].replace('_', ' ')}" + (f" — {effect}" if effect else "") + ".")
+    if model.missing_dataset_note:
+        lines.append(model.missing_dataset_note)
     lines.append("")
     return lines
 
@@ -5436,17 +5457,18 @@ def render_compact_report(result: "AnalysisResult", compact: dict,
     for complete provenance, full sensitivity, and the full bull/bear/
     rebuttal/research-manager transcript.
     """
-    symbol = compact.get("symbol") or result.symbol
-    lines = [f"# Stock Analysis — {symbol}", ""]
-    lines += _compact_status_section(result, compact)
-    lines += ["## Snapshot", "", _render_markdown_table(_snapshot_rows(compact)), ""]
-    lines += _valuation_section(compact)
-    lines += _technical_section(compact)
-    lines += _compact_claims_section("Bull Case", pipeline_result, "bull_researcher")
-    lines += _compact_claims_section("Bear Case", pipeline_result, "bear_researcher")
-    lines += _compact_risk_section(pipeline_result)
-    lines += _compact_research_view_section(compact, pipeline_result)
-    lines += _compact_sources_section(compact)
+    model = report_model_module.build_stock_analysis_report_model(
+        result, compact, pipeline_result)
+    lines = [f"# Stock Analysis — {model.symbol}", ""]
+    lines += _compact_status_section(model)
+    lines += ["## Snapshot", "", _render_markdown_table(_snapshot_rows(model)), ""]
+    lines += _valuation_section(model)
+    lines += _technical_section(model)
+    lines += _compact_claims_section("Bull Case", model.bull_case)
+    lines += _compact_claims_section("Bear Case", model.bear_case)
+    lines += _compact_risk_section(model)
+    lines += _compact_research_view_section(model)
+    lines += _compact_sources_section(model)
     lines.append(_COMPACT_DISCLAIMER)
     return "\n".join(lines)
 
@@ -5549,6 +5571,7 @@ def synthesize_report(result: AnalysisResult, ask_local_fn, report_detail=None) 
             # future development from a description of today.
             current_metrics=((compact.get("canonical_evidence") or {})
                              .get("current") or {}),
+            issue_codes=_analysis_issue_codes(result.facts),
             guidance_metrics=((compact.get("management_guidance") or {})
                               .get("metrics") or {}))
         result.research_pipeline = pipeline_result.to_dict()

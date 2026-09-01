@@ -181,3 +181,110 @@ def test_ifrs_filers_are_classified_from_their_own_taxonomy_block():
         submissions=_subs("6211", "Security Brokers"),
         company_facts={"facts": {"ifrs-full": {"Revenue": {}}}})
     assert result.profile == P.BROKER_DEALER
+
+
+# ---------------------------------------------------------------------------
+# A positive non-financial SIC code is not overridden by concept evidence
+# ---------------------------------------------------------------------------
+#
+# Found by live verification of this phase's wiring. A large telecom (SEC SIC
+# 4813, "Telephone Communications") was classified BANK because it reports
+# `LoansAndLeasesReceivableNetReportedAmount` and
+# `ProvisionForLoanLeaseAndOtherLosses` for its device-payment and equipment-
+# lease receivables. The valuation was then refused as
+# NOT_APPLICABLE_FOR_BUSINESS_MODEL for a company a discounted cash flow fits
+# perfectly well.
+#
+# The general invariant that was missing: concept evidence may CONFIRM a
+# classification, or SUPPLY one where the SIC code is absent or is itself
+# financial. It may not OVERRIDE a code that positively places the issuer in
+# a non-financial division. The module's rationale for allowing an override
+# -- "a SIC code is assigned once and can lag what a company has become" --
+# describes an issuer whose code is missing or already financial; it does not
+# describe one the Commission has placed in Telephone Communications.
+#
+# This is the same case the module's own comment already anticipated ("a
+# manufacturer with a captive finance arm reports some receivables
+# concepts") -- the threshold of two was simply too low to tell the two
+# apart -- and no count can, because the question is not how MANY financial
+# concepts a captive finance arm reports but WHICH. Only a bank takes
+# deposits; anyone with a finance arm books loans receivable.
+
+def _submissions(sic, description):
+    return {"sic": sic, "sicDescription": description}
+
+
+def _facts(*concepts):
+    return {"facts": {"us-gaap": {name: {"units": {}} for name in concepts}}}
+
+
+def test_a_captive_finance_arm_does_not_make_a_telecom_a_bank():
+    from finance.business_model import CashFlowValuationProfile, classify_business_model
+
+    result = classify_business_model(
+        _submissions("4813", "Telephone Communications (No Radiotelephone)"),
+        _facts("LoansAndLeasesReceivableNetReportedAmount",
+               "ProvisionForLoanLeaseAndOtherLosses", "Revenues", "Assets"))
+    assert result.profile == CashFlowValuationProfile.STANDARD_OPERATING_COMPANY
+    assert result.standard_fcff_suitability == "SUITABLE"
+
+
+def test_the_financial_concepts_are_still_reported_as_context():
+    """Refusing the override is not the same as ignoring the evidence. The
+    concepts stay on the classification, and the reason says what was seen
+    and why it did not decide the verdict."""
+    from finance.business_model import classify_business_model
+
+    result = classify_business_model(
+        _submissions("4813", "Telephone Communications (No Radiotelephone)"),
+        _facts("LoansAndLeasesReceivableNetReportedAmount",
+               "ProvisionForLoanLeaseAndOtherLosses"))
+    assert set(result.corroborating_concepts) == {
+        "LoansAndLeasesReceivableNetReportedAmount",
+        "ProvisionForLoanLeaseAndOtherLosses"}
+    assert any("4813" in reason for reason in result.reasons)
+
+
+def test_concept_evidence_still_classifies_when_no_sic_code_exists():
+    """The override exists for a real case and must survive: an issuer whose
+    submissions record carries no SIC code at all is classified by what it
+    files."""
+    from finance.business_model import CashFlowValuationProfile, classify_business_model
+
+    result = classify_business_model(
+        {}, _facts("PayablesToCustomers", "ReceivablesFromCustomers", "SecuritiesBorrowed"))
+    assert result.profile == CashFlowValuationProfile.BROKER_DEALER
+
+
+def test_concept_evidence_still_refines_a_financial_sic_code():
+    """Within financial services the SIC code can genuinely lag: a
+    nondepository-credit code (6199) on an issuer filing customer payables
+    and segregated cash is a broker-dealer, and the concepts say so."""
+    from finance.business_model import CashFlowValuationProfile, classify_business_model
+
+    result = classify_business_model(
+        _submissions("6199", "Finance Services"),
+        _facts("PayablesToCustomers", "ReceivablesFromCustomers",
+               "CashAndSecuritiesSegregatedUnderFederalAndOtherRegulations"))
+    assert result.profile in (CashFlowValuationProfile.BROKER_DEALER,
+                              CashFlowValuationProfile.FINANCIAL_INSTITUTION)
+    assert result.standard_fcff_suitability == "NOT_SUITABLE"
+
+
+def test_a_non_financial_sic_still_yields_to_a_definitive_filing_pattern():
+    """The rule is about WHICH concepts, not about ignoring evidence.
+
+    An issuer whose SIC is non-financial but which reports DEPOSITS is not a
+    manufacturer with a finance arm; it is a bank whose code is wrong. Only a
+    bank takes deposits, and no amount of captive financing produces that
+    line -- which is why the test is a concept identity and not a count.
+    """
+    from finance.business_model import CashFlowValuationProfile, classify_business_model
+
+    result = classify_business_model(
+        _submissions("4813", "Telephone Communications (No Radiotelephone)"),
+        _facts("Deposits", "InterestExpenseDeposits",
+               "InterestAndDividendIncomeOperating",
+               "FederalFundsSoldAndSecuritiesPurchasedUnderAgreementsToResell",
+               "ProvisionForLoanLeaseAndOtherLosses"))
+    assert result.profile == CashFlowValuationProfile.BANK

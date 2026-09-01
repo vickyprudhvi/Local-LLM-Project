@@ -584,9 +584,10 @@ def test_a_malformed_period_label_degrades_to_none(bad):
 def test_an_annual_balance_sheet_is_labelled_as_a_fiscal_year_end():
     """The half that actually broke: the KIND of period is stated in words,
     so a non-calendar fiscal year cannot be misread as an interim period."""
+    from finance.report_model import valuation_basis_from
     from finance.workflow import _valuation_basis_lines
 
-    lines = _valuation_basis_lines({
+    lines = _valuation_basis_lines(valuation_basis_from({
         "dcf_financial_basis": {
             "base_revenue_basis": "ttm_calculation",
             "flow_period_end": "2026-04-30",
@@ -595,7 +596,7 @@ def test_an_annual_balance_sheet_is_labelled_as_a_fiscal_year_end():
             "valuation_freshness": "MOSTLY_CURRENT",
         },
         "management_guidance": None,
-    })
+    }))
     text = "\n".join(lines)
     assert "Balance sheet: 30 Apr 2026 (fiscal year end, latest annual filing)" in text
     assert "trailing twelve months to 30 Apr 2026" in text
@@ -628,16 +629,17 @@ def test_absent_guidance_states_only_what_is_known(examined, expected):
     Neither is a wording quibble: the report fell back to history while
     stating something that reads as a fact about the company.
     """
+    from finance.report_model import valuation_basis_from
     from finance.workflow import _valuation_basis_lines
 
-    lines = _valuation_basis_lines({
+    lines = _valuation_basis_lines(valuation_basis_from({
         "dcf_financial_basis": {"base_revenue_basis": "ttm_calculation",
                                 "flow_period_end": "2026-06-30",
                                 "balance_sheet_as_of": "2026-06-30",
                                 "balance_sheet_source": "quarterly_sec_filing"},
         "management_guidance": None,
         "guidance_releases_examined": examined,
-    })
+    }))
     text = "\n".join(lines)
     assert expected in text
     assert "Management guidance: unavailable" not in text
@@ -646,14 +648,15 @@ def test_absent_guidance_states_only_what_is_known(examined, expected):
 def test_none_and_zero_releases_are_not_conflated():
     """None means ingestion never ran; 0 means it ran and found no earnings
     release. Collapsing them erases the distinction the field exists for."""
+    from finance.report_model import valuation_basis_from
     from finance.workflow import _valuation_basis_lines
 
     def line(examined):
-        return "\n".join(_valuation_basis_lines({
+        return "\n".join(_valuation_basis_lines(valuation_basis_from({
             "dcf_financial_basis": {"balance_sheet_as_of": "2026-06-30",
                                     "balance_sheet_source": "quarterly_sec_filing"},
             "management_guidance": None,
-            "guidance_releases_examined": examined}))
+            "guidance_releases_examined": examined})))
 
     assert line(None) != line(0)
 
