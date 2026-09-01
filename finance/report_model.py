@@ -134,23 +134,53 @@ class TechnicalView:
 
 
 def _reject_empty(label: str, texts) -> None:
-    """A published claim has to say something.
+    """A published claim has to say something, and say it to a reader.
 
-    The report model is the last boundary before a reader, and this is a
-    STRUCTURAL refusal rather than a filter: a blank bullet that is silently
-    dropped here looks identical to a claim that was never made, and the
-    stage that produced it goes on producing them. Refusing construction
-    means the failure surfaces where it can be fixed.
+    Two contracts, one place, because they fail the same way. The report
+    model is the last boundary before a reader, and both refusals are
+    STRUCTURAL rather than filters: a bad bullet silently dropped here looks
+    identical to a claim that was never made, and the stage that produced it
+    goes on producing them. Refusing construction surfaces the failure where
+    it can be fixed. Filtering in the renderer -- which is where both were
+    noticed -- would have hidden them one layer further down.
 
-    Filtering blanks in the renderer -- which is where this was noticed --
-    would have hidden the same defect one layer further down.
+    1. CONTENT. "", "   ", ".", "N/A" and "TBD" are placeholders. The
+       minimum-content rule already applied to claims and risks at the schema
+       boundary; an analysis limitation reached the report through a field it
+       had not been applied to.
+
+    2. AUDIENCE. "see dcf.warnings / dcf.validation_reasons" is a field path
+       inside this program. A reader cannot open it and it tells them nothing
+       except that the sentence was written for somebody else.
     """
+    from finance.content_policy import contains_internal_reference
+
     for text in texts or ():
-        if not isinstance(text, str) or not text.strip():
+        if not _carries_content(text):
             raise ValueError(
-                f"{label} cannot contain an empty claim; a blank bullet is a published "
-                "claim that says nothing, and dropping it silently hides the stage that "
-                "produced it")
+                f"{label} cannot contain an empty claim; {text!r} is a placeholder, and a "
+                "bullet that says nothing is a published claim that says nothing")
+        if contains_internal_reference(text):
+            raise ValueError(
+                f"{label} cannot contain internal implementation text; {text[:60]!r} names "
+                "a field inside this program rather than something a reader can act on")
+
+
+# Placeholder text that is not empty and is not a claim either. Kept beside
+# the schema's own `_MIN_CLAIM_CHARS` rule rather than duplicating the
+# threshold: this boundary is about the SHAPE of a non-answer, and the schema
+# is about length.
+_PLACEHOLDER_TEXT = frozenset({
+    "", ".", "-", "--", "...", "n/a", "na", "n.a.", "tbd", "tba", "none",
+    "no", "unknown", "?", "pending",
+})
+
+
+def _carries_content(text) -> bool:
+    if not isinstance(text, str):
+        return False
+    stripped = text.strip()
+    return bool(stripped) and stripped.lower().rstrip(".") not in _PLACEHOLDER_TEXT
 
 
 @dataclass(frozen=True)
@@ -217,12 +247,20 @@ class StockAnalysisReportModel:
     currency: str = "USD"
 
     def __post_init__(self):
-        # `ClaimSet` and `RiskItem` guard their own text; the condition
-        # groups are plain strings and need the same rule applied here.
+        # `ClaimSet` and `RiskItem` guard their own text. Everything else the
+        # model holds that a reader will SEE is checked here, so the contract
+        # covers the whole surface rather than the two fields it started on.
         for label, items in self.conditions or ():
             _reject_empty(f"the {label!r} conditions", items)
-        for label, items in (self.research_view.condition_groups or ()):
+        view = self.research_view
+        for label, items in (view.condition_groups or ()):
             _reject_empty(f"the {label!r} conditions", items)
+        _reject_empty("the research readiness reason",
+                      [t for t in (view.readiness_reason,) if t])
+        _reject_empty("the recommendation reason",
+                      [t for t in (view.primary_reason,) if t])
+        _reject_empty("the analysis status",
+                      [t for t in (self.status.reason,) if t])
 
     # -- questions the tests and the renderer both ask -------------------
     def snapshot_values(self) -> Dict[str, Optional[float]]:

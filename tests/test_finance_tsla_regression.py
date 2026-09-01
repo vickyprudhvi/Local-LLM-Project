@@ -323,7 +323,14 @@ def test_research_readiness_is_not_ready(wired):
     result = run_tsla(wired)
     readiness = result.facts["research_readiness"]
     assert readiness["status"] == ResearchReadiness.NOT_READY
-    assert any("DCF" in r for r in readiness["reasons"])
+    # The reason names the CAUSE in plain language. It used to print the
+    # validation enum ("DCF validation failed (DCF_NEGATIVE_TERMINAL_FCFF)"),
+    # which named a constant inside this program as though it were a finding
+    # about the company; the code stays on `facts["dcf"]` as diagnostic
+    # metadata for anyone debugging.
+    reasons = " ".join(readiness["reasons"])
+    assert "terminal cash flow" in reasons or "valuation" in reasons.lower(), reasons
+    assert "DCF_NEGATIVE_TERMINAL_FCFF" not in reasons
 
 
 # ---- 7: no invalid DCF evidence reaches the research pipeline (sections

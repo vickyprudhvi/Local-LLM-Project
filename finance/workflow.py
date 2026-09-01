@@ -2365,7 +2365,11 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
         facts["guidance_matrix"] = guidance_module.build_guidance_matrix(
             ((sec_extras or {}).get("guidance") or {}).get("metrics"),
             superseded=(sec_extras or {}).get("superseded_guidance"),
-            releases_examined=(sec_extras or {}).get("guidance_releases_examined"))
+            releases_examined=(sec_extras or {}).get("guidance_releases_examined"),
+            # Every current statement, not only the one the name-keyed view
+            # had room for. A company that guides a quarter and a full year
+            # states more than the per-name projection can show.
+            all_metrics=((sec_extras or {}).get("guidance") or {}).get("all_metrics"))
         facts["superseded_guidance"] = (sec_extras or {}).get("superseded_guidance") or []
         # None means ingestion never ran; 0 means it ran and found no
         # earnings release. Collapsing them with `or 0` would erase the
@@ -2712,9 +2716,18 @@ def _research_readiness(plan: AnalysisPlan, facts: dict) -> dict:
             reasons.append(finding.get("message", ""))
 
     if dcf.get("available") and _dcf_validation_failed(dcf):
+        # The CODE is diagnostic metadata and stays on `facts["dcf"]`; the
+        # sentence a reader gets says what happened. Printing the enum told
+        # them nothing they could act on and named a constant inside this
+        # program as though it were a finding about the company.
+        status = dcf.get("validation_status")
         reasons.append(
-            f"DCF validation failed ({dcf.get('validation_status')}); valuation-based "
-            "conclusions are withheld.")
+            (dcf_packet.STATUS_EXPLANATION.get(
+                dcf_packet.ValuationStatus.FORECAST_PATH_INVALID)
+             if status == DcfValidationStatus.NEGATIVE_TERMINAL_FCFF
+             else "The valuation model ran but failed its own validation checks.")
+            + " Valuation-based conclusions are withheld; the company's reported "
+              "figures and the technicals are unaffected.")
         return {"status": ResearchReadiness.NOT_READY, "reasons": reasons}
 
     all_warnings = list(facts.get("statements", {}).get("warnings") or [])
@@ -2756,18 +2769,17 @@ def _research_readiness(plan: AnalysisPlan, facts: dict) -> dict:
             limited = True
             explanation = dcf_packet.STATUS_EXPLANATION.get(valuation_status) or ""
             reasons.append(
-                f"The DCF's own arithmetic checks passed ({arithmetic}), but its output is "
-                f"not eligible for research use ({valuation_status}). {explanation} "
-                "Valuation-derived conclusions - a modelled value, a premium or discount, "
-                "an implied return - are withheld; the model's assumptions and the "
-                "company's reported figures are unaffected.".strip())
+                ("The valuation model's own arithmetic checks passed, but its output is "
+                 f"not eligible for research use. {explanation} "
+                 "Valuation-derived conclusions - a modelled value, a premium or "
+                 "discount, an implied return - are withheld; the model's assumptions "
+                 "and the company's reported figures are unaffected.").strip())
         elif arithmetic == DcfValidationStatus.VALID_WITH_WARNINGS:
             limited = True
             reasons.append(
-                "The DCF's arithmetic checks passed with a warning (see dcf.warnings / "
-                "dcf.validation_reasons) - e.g. a negative modeled equity value. Its "
-                "output remains eligible for research use; the warning describes the "
-                "result, not the method.")
+                "The DCF's arithmetic checks passed with a warning - for example a "
+                "negative modelled equity value. Its output remains eligible for "
+                "research use; the warning describes the result, not the method.")
 
     # MLI corrective patch -- ASSUMPTION-QUALITY signals.
     #
@@ -4234,16 +4246,26 @@ def _compact_guidance(guidance):
     """
     if not guidance:
         return None
+    def trim(metric):
+        return {k: v for k, v in metric.items() if k != "source_excerpt"}
+
     metrics = {}
     for name, metric in (guidance.get("metrics") or {}).items():
         if not isinstance(metric, dict):
             continue
-        metrics[name] = {k: v for k, v in metric.items() if k != "source_excerpt"}
+        metrics[name] = trim(metric)
+    # Every current statement travels too, keyed by nothing -- a list, in the
+    # order the resolver produced. A research claim naming a period has to be
+    # checkable against the period the evidence actually targets, and the
+    # name-keyed view above can only show one horizon per metric.
+    statements = [trim(m) for m in (guidance.get("all_metrics") or [])
+                  if isinstance(m, dict)]
     return {
         "fiscal_year": guidance.get("fiscal_year"),
         "guidance_date": guidance.get("guidance_date"),
         "source_document": guidance.get("source_document"),
         "metrics": metrics,
+        "all_metrics": statements,
         # Guidance is FORWARD-LOOKING evidence, never a reported fact. Stated
         # inline so a stage reading this payload cannot mistake it for one.
         "evidence_kind": "forward_looking_management_guidance",

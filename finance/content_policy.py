@@ -674,3 +674,56 @@ def scan_structure_for_prohibited_directives(value) -> List[str]:
             seen.add(label)
             deduped.append(label)
     return deduped
+
+
+# ---------------------------------------------------------------------------
+# Internal diagnostic text is not user-facing text
+# ---------------------------------------------------------------------------
+#
+# A readiness reason read "The DCF passed validation but carries a warning
+# (see dcf.warnings / dcf.validation_reasons)" and went into the compact
+# report unchanged. Those are field paths inside this program. A reader
+# cannot open them, and naming them says only that the sentence was written
+# for somebody else.
+#
+# This lives here because it is a content policy -- a rule about what may
+# appear in text a person reads -- and because `research_pipeline` is
+# deliberately barred from importing the valuation layer, which the published
+# vocabulary below comes from.
+#
+# Deliberately narrow, so ordinary prose cannot trip it: a DOTTED FIELD PATH,
+# a bracketed dict access, a SCREAMING_SNAKE diagnostic code, or an internal
+# stage name. "No discounted-cash-flow valuation was produced" has none.
+_INTERNAL_REFERENCE = re.compile(
+    r"(?:\b(?:dcf|facts|compact|state|evidence|packet|canonical)\.[a-z_]{3,}\b)"
+    r"|(?:\b\w+\[[\'\"]\w+[\'\"]\])"
+    r"|(?:\b[A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]+){1,}\b)"
+    r"|(?:\b(?:bull|bear|risk)_(?:researcher|reviewer)\b)"
+    r"|(?:\bfinal_investment_synthesizer\b)"
+    r"|(?:\bresearch_manager\b)")
+
+
+def _published_vocabulary() -> frozenset:
+    """Codes this project deliberately shows a reader.
+
+    `ValuationStatus` is published: the report states "Status:
+    FORECAST_PATH_INVALID" on purpose, because naming which of four things
+    happened is the entire reason there are four statuses. The distinction is
+    not the shape of the token but whether showing it was a decision.
+    """
+    from finance.dcf_packet import ValuationStatus
+
+    # `ResearchReadiness` is published for the same reason: the report states
+    # "Research readiness: NOT_READY" on purpose. Named here rather than
+    # imported from `finance.workflow`, which imports this module.
+    readiness = frozenset({"READY", "LIMITED", "NOT_READY"})
+    return frozenset(ValuationStatus.ALL) | readiness
+
+
+def contains_internal_reference(text) -> bool:
+    """Would this sentence show a reader the inside of the program?"""
+    if not isinstance(text, str):
+        return False
+    published = _published_vocabulary()
+    return any(match.group(0) not in published
+               for match in _INTERNAL_REFERENCE.finditer(text))

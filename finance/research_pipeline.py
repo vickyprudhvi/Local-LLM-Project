@@ -84,6 +84,7 @@ from typing import Dict, List, Optional, Tuple
 
 import tools.config as config
 from finance.canonical import conflicting_historical_citations
+from finance.content_policy import contains_internal_reference  # noqa: F401
 from finance.evidence import EvidenceItem, render_evidence_index, validate_evidence_citations
 
 PIPELINE_VERSION = "research_pipeline_v1"
@@ -1204,7 +1205,7 @@ def _validate_researcher_output(raw, index, side) -> dict:
         raise _Invalid("response was not a JSON object")
     validated = {
         "role": f"{side}_researcher",
-        "thesis": _str_field(raw, "thesis", max_len=500),
+        "thesis": _claim_text(raw, "thesis", max_len=500),
         "claims": _claims_list(raw, "claims", index, min_items=2, max_items=5),
         "confidence": _cap_confidence_enum_for_omissions(
             _enum_field(raw, "confidence", _CONFIDENCE_LEVELS), index),
@@ -2170,6 +2171,29 @@ def is_circular_price_condition(text: str) -> bool:
     return not any(term in lowered for term in _OPERATING_TERMS)
 
 
+# A NEGATION reverses the direction word it governs. "Margins expand" and
+# "margins fail to expand" are opposite conditions, and the classifier scored
+# both favourable because it read the direction word and not the thing
+# modifying it -- the same mistake, one level up, as reading "decline"
+# without knowing what was declining.
+#
+# Also here: falling short OF A TARGET is unfavourable regardless of the
+# metric. "Revenue fails to meet guidance" names no direction word at all,
+# so it scored UNCLASSIFIED and stayed wherever the model had filed it.
+_NEGATED_DIRECTION = re.compile(
+    r"(?i)\b(?:fails?|failing|unable|does\s+not|do\s+not|did\s+not|cannot|"
+    r"can\s?not|won'?t|will\s+not|is\s+not|are\s+not|no\s+longer|without)\b"
+    r"[^.]{0,30}?"
+    r"\b(?:meet|meets|reach|reaches|achieve|achieves|expand|expands|improve|"
+    r"improves|sustain|sustains|grow|grows|exceed|exceeds|recover|recovers|"
+    r"deliver|delivers|materialise|materialize)\b")
+
+_SHORTFALL_AGAINST_TARGET = re.compile(
+    r"(?i)\b(?:miss|misses|missing|missed|shortfall|falls?\s+short|"
+    r"below|under)\b[^.]{0,40}?"
+    r"\b(?:guidance|outlook|target|consensus|expectations?|forecast)\b")
+
+
 def classify_condition_direction(text: str) -> str:
     """FAVORABLE / UNFAVORABLE / BIDIRECTIONAL / UNCLASSIFIED for one
     condition.
@@ -2192,6 +2216,11 @@ def classify_condition_direction(text: str) -> str:
     lowered = text.lower()
     if any(marker in lowered for marker in _BIDIRECTIONAL_MARKERS):
         return CONDITION_BIDIRECTIONAL
+
+    # Checked BEFORE the subject-aware scorer, because the scorer reads the
+    # direction word this negates and would answer the opposite question.
+    if _NEGATED_DIRECTION.search(text) or _SHORTFALL_AGAINST_TARGET.search(text):
+        return CONDITION_UNFAVOURABLE
 
     subject_aware = _subject_aware_direction(lowered)
     if subject_aware is not None:
@@ -2436,7 +2465,14 @@ _ISSUE_CONDITIONS = (
       "SHARE_BASIS_INCOMPATIBLE")),
     (re.compile(r"(?i)\b(?:net[\s-])?debt\b[^.]{0,40}?\b(?:conflict|discrepanc\w+|"
                 r"does\s+not\s+reconcile|reconciliation)\b"),
-     ("DCF_NET_DEBT_COMPONENT_OVERLAP", "INCOMPATIBLE_DEBT_BASIS")),
+     # Every code that produces this diagnostic class, not a subset of them.
+     # `TOTAL_DEBT_CONFLICT` is what `finance/validity.py` actually raises
+     # for an unreconciled total, and it was missing -- so a condition about
+     # a debt discrepancy was dropped as unverifiable on exactly the runs
+     # where the discrepancy was real.
+     ("DCF_NET_DEBT_COMPONENT_OVERLAP", "INCOMPATIBLE_DEBT_BASIS",
+      "TOTAL_DEBT_CONFLICT", "DCF_NET_DEBT_RECONCILIATION_FAILURE",
+      "DCF_EQUITY_BRIDGE_INPUT_INVALID")),
     (re.compile(r"(?i)\bcurrency\b[^.]{0,40}?\b(?:conversion|translat\w+)\b[^.]{0,30}?"
                 r"\b(?:resolv\w+|support\w+|available)\b"),
      ("DCF_REPORTING_CURRENCY_UNSUPPORTED",)),
@@ -2475,11 +2511,14 @@ def drop_conditions_referencing_absent_issues(validated: dict, issue_codes=None)
     for key in ("conditions_that_strengthen_the_view", "conditions_that_weaken_the_view",
                 "reassessment_triggers"):
         conditions = validated.get(key) or []
-        if len(conditions) <= 1:
-            continue
-        kept = [c for c in conditions
-                if not condition_references_nonexistent_issue(c, issue_codes)]
-        validated[key] = kept or conditions[:1]
+        # No `len <= 1` exemption. The last condition in a bucket is normally
+        # protected -- one imperfect entry tells a reader more than none --
+        # but that reasoning does not survive here: a condition promising to
+        # resolve a problem this analysis never found sends the reader to
+        # look for something that is not there, and a debt discrepancy that
+        # was reconciled upstream is exactly such a promise.
+        validated[key] = [c for c in conditions
+                          if not condition_references_nonexistent_issue(c, issue_codes)]
     return validated
 
 
@@ -2563,11 +2602,28 @@ def _route_conditions_by_direction(validated: dict, current_metrics=None,
     Caps are re-applied after routing so a bucket cannot overflow.
     """
     validated = _filter_limiting_factors(validated)
+    validated = route_conditions_by_direction(validated)
     validated = validate_conditions_against_current_state(validated, current_metrics)
     validated = drop_stale_availability_triggers(validated, guidance_metrics)
     # Sections 30-31: a condition may not promise to resolve a problem this
     # analysis never reported.
     validated = drop_conditions_referencing_absent_issues(validated, issue_codes)
+    validated = route_conditions_by_direction(validated)
+    for key, items in validated.items():
+        if key in _CONDITION_BUCKETS.values():
+            validated[key] = items[:_CONDITION_BUCKET_CAP]
+    return validated
+
+
+def route_conditions_by_direction(validated: dict) -> dict:
+    """Every condition in the bucket its own direction puts it in.
+
+    Re-filing happens whatever the bucket count. The "never empty a bucket"
+    rule elsewhere protects a bucket from losing its last entry; it must not
+    protect a downgrade filed as an upgrade, because an empty Upgrade
+    Conditions list is honest and a wrong one is not.
+    """
+    validated = dict(validated)
     routed = {key: [] for key in _CONDITION_BUCKETS.values()}
     for expected, source_key in (
             (CONDITION_FAVOURABLE, "conditions_that_strengthen_the_view"),
@@ -2585,9 +2641,8 @@ def _route_conditions_by_direction(validated: dict, current_metrics=None,
                           else _CONDITION_BUCKETS[actual])
             if condition not in routed[destination]:
                 routed[destination].append(condition)
-    validated = dict(validated)
     for key, items in routed.items():
-        validated[key] = items[:_CONDITION_BUCKET_CAP]
+        validated[key] = items
     return validated
 
 

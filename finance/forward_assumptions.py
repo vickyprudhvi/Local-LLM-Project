@@ -185,6 +185,20 @@ class GrowthEvidence:
     guidance_basis: Optional[str] = None
     guidance_bound_type: Optional[str] = None
 
+    # Consolidated revenue guidance for a SHORTER horizon than the assumption
+    # -- a next-quarter growth rate, most often. Held in its own fields
+    # rather than in the ones above, because the slot above is what a
+    # twelve-month consumer reads and a quarterly rate is not a twelve-month
+    # rate. Nothing is discarded: the value, its target period and its
+    # evidence id all survive here, and it stays citable research evidence
+    # and directional corroboration.
+    near_term_guidance_low: Optional[float] = None
+    near_term_guidance_high: Optional[float] = None
+    near_term_guidance_period_label: Optional[str] = None
+    near_term_guidance_period_type: Optional[str] = None
+    near_term_guidance_evidence_id: Optional[str] = None
+    near_term_guidance_source_metric: Optional[str] = None
+
     # A revenue COMPONENT's guidance (service, product, segment). Supporting
     # forward evidence only: it may inform a forecast and must be cited as
     # what it is, but it is never consolidated revenue guidance (section 7).
@@ -283,6 +297,22 @@ class GrowthEvidence:
             assumption_frequency=sem.PeriodFrequency.ANNUAL)
 
     @property
+    def near_term_guidance_midpoint(self) -> Optional[float]:
+        if self.near_term_guidance_low is None or self.near_term_guidance_high is None:
+            return None
+        return (self.near_term_guidance_low + self.near_term_guidance_high) / 2.0
+
+    @property
+    def near_term_guidance_eligibility(self) -> "sem.ForecastEligibility":
+        return sem.forecast_compatibility(
+            evidence_metric=sem.MetricIdentity.REVENUE,
+            evidence_frequency=_PERIOD_TYPE_FREQUENCY.get(
+                (self.near_term_guidance_period_type or "quarter").lower(),
+                sem.PeriodFrequency.QUARTER),
+            assumption_metric=sem.MetricIdentity.REVENUE,
+            assumption_frequency=sem.PeriodFrequency.ANNUAL)
+
+    @property
     def guidance_midpoint(self) -> Optional[float]:
         if self.guidance_low is None or self.guidance_high is None:
             return None
@@ -313,6 +343,32 @@ class GrowthEvidence:
         return f"{first} to {last} ({len(self.historical_periods)} reported years)"
 
 
+# Target-period types that cover twelve months or more, and so can answer a
+# question an annual assumption asks.
+_ANNUAL_TARGET_TYPES = ("CURRENT_FISCAL_YEAR", "NEXT_FISCAL_YEAR", "MULTI_YEAR")
+
+
+def _statement_for(statements, name_keyed, name, prefer_annual=True):
+    """One statement of `name`, choosing the horizon the caller needs.
+
+    Reads the multi-horizon list when the resolver supplied one and falls
+    back to the name-keyed view otherwise, so a replayed artifact or a
+    hand-built fixture keeps working unchanged.
+    """
+    candidates = [m for m in (statements or [])
+                  if isinstance(m, dict) and m.get("name") == name
+                  and m.get("low") is not None]
+    if not candidates:
+        entry = name_keyed.get(name)
+        return entry if isinstance(entry, dict) and entry.get("low") is not None else None
+    annual = [m for m in candidates
+              if m.get("target_period_type") in _ANNUAL_TARGET_TYPES]
+    shorter = [m for m in candidates if m not in annual]
+    if prefer_annual:
+        return (annual or shorter)[0]
+    return (shorter or annual)[0]
+
+
 def collect_growth_evidence(state: "fr.CurrentFinancialState",
                             company_facts: Optional[dict] = None,
                             comparability: Optional[dict] = None) -> GrowthEvidence:
@@ -327,8 +383,28 @@ def collect_growth_evidence(state: "fr.CurrentFinancialState",
     """
     evidence = GrowthEvidence()
 
-    guidance = (state.management_guidance or {}).get("metrics") or {}
-    revenue_growth = guidance.get(gm.GuidanceMetricName.CONSOLIDATED_REVENUE_GROWTH)
+    published = state.management_guidance or {}
+    guidance = published.get("metrics") or {}
+    # Every current statement, when the resolver supplied them. The
+    # name-keyed view holds one horizon per metric; a company that guided
+    # both a quarter and a full year has two, and reading only the first
+    # is what lost the annual outlook.
+    statements = published.get("all_metrics") or []
+
+    revenue_growth = _statement_for(
+        statements, guidance, gm.GuidanceMetricName.CONSOLIDATED_REVENUE_GROWTH,
+        prefer_annual=True)
+    near_term = _statement_for(
+        statements, guidance, gm.GuidanceMetricName.CONSOLIDATED_REVENUE_GROWTH,
+        prefer_annual=False)
+    if near_term is not None and near_term is not revenue_growth:
+        evidence.near_term_guidance_low = float(near_term["low"])
+        evidence.near_term_guidance_high = float(near_term["high"])
+        evidence.near_term_guidance_period_label = near_term.get("fiscal_period")
+        evidence.near_term_guidance_period_type = near_term.get("period_type")
+        evidence.near_term_guidance_evidence_id = near_term.get("evidence_id")
+        evidence.near_term_guidance_source_metric = near_term.get("name")
+
     if isinstance(revenue_growth, dict) and revenue_growth.get("low") is not None:
         source_metric = revenue_growth.get("name") or \
             gm.GuidanceMetricName.CONSOLIDATED_REVENUE_GROWTH
@@ -368,15 +444,36 @@ def collect_growth_evidence(state: "fr.CurrentFinancialState",
                 "context": "guidance -> year-1 revenue growth",
             })
         if anchorable and metric_ok and gm.may_anchor_revenue_growth(source_metric):
-            evidence.guidance_low = float(revenue_growth["low"])
-            evidence.guidance_high = float(revenue_growth["high"])
-            evidence.guidance_fiscal_year = revenue_growth.get("fiscal_year")
-            evidence.guidance_evidence_id = revenue_growth.get("evidence_id")
-            evidence.guidance_source_metric = source_metric
-            evidence.guidance_period_label = revenue_growth.get("fiscal_period")
-            evidence.guidance_period_type = revenue_growth.get("period_type")
-            evidence.guidance_basis = revenue_growth.get("basis")
-            evidence.guidance_bound_type = revenue_growth.get("bound_type")
+            period_type = revenue_growth.get("period_type")
+            frequency = _PERIOD_TYPE_FREQUENCY.get(
+                (period_type or "").lower(), sem.PeriodFrequency.UNKNOWN)
+            comparable = sem.forecast_compatibility(
+                evidence_metric=sem.MetricIdentity.REVENUE,
+                evidence_frequency=frequency,
+                assumption_metric=sem.MetricIdentity.REVENUE,
+                assumption_frequency=sem.PeriodFrequency.ANNUAL).may_set_magnitude
+            if comparable:
+                evidence.guidance_low = float(revenue_growth["low"])
+                evidence.guidance_high = float(revenue_growth["high"])
+                evidence.guidance_fiscal_year = revenue_growth.get("fiscal_year")
+                evidence.guidance_evidence_id = revenue_growth.get("evidence_id")
+                evidence.guidance_source_metric = source_metric
+                evidence.guidance_period_label = revenue_growth.get("fiscal_period")
+                evidence.guidance_period_type = period_type
+                evidence.guidance_basis = revenue_growth.get("basis")
+                evidence.guidance_bound_type = revenue_growth.get("bound_type")
+            elif evidence.near_term_guidance_low is None:
+                # A stated growth rate for a shorter period. Real guidance,
+                # kept whole, and not the twelve-month rate the assumption
+                # slot is for.
+                evidence.near_term_guidance_low = float(revenue_growth["low"])
+                evidence.near_term_guidance_high = float(revenue_growth["high"])
+                evidence.near_term_guidance_period_label = \
+                    revenue_growth.get("fiscal_period")
+                evidence.near_term_guidance_period_type = period_type
+                evidence.near_term_guidance_evidence_id = \
+                    revenue_growth.get("evidence_id")
+                evidence.near_term_guidance_source_metric = source_metric
 
     # A revenue COMPONENT's growth guidance, when the company guided one.
     # AT&T guides service revenue, which is most of but not all of
@@ -401,7 +498,17 @@ def collect_growth_evidence(state: "fr.CurrentFinancialState",
 
     # Absolute revenue guidance -> an implied growth rate, when the period it
     # covers can be matched against a reported comparable period.
-    revenue_amount = guidance.get(gm.GuidanceMetricName.CONSOLIDATED_REVENUE)
+    # `evidence.guidance_low is None` used to gate this, which meant ANY
+    # consolidated growth guidance suppressed the derivation -- including a
+    # quarterly rate that cannot set an annual assumption. A company guiding
+    # 27-29% for next quarter and $118-120B for the year lost the annual
+    # outlook entirely, and with it the annual growth it implies and the
+    # model-bound assessment that growth would have triggered. The gate is
+    # now what it always meant: derive unless a COMPARABLE annual signal is
+    # already in hand.
+    revenue_amount = _statement_for(
+        statements, guidance, gm.GuidanceMetricName.CONSOLIDATED_REVENUE,
+        prefer_annual=True)
     if isinstance(revenue_amount, dict) and revenue_amount.get("midpoint") is not None \
             and company_facts and evidence.guidance_low is None:
         _apply_absolute_revenue_guidance(evidence, revenue_amount, company_facts)
@@ -531,6 +638,37 @@ def _guidance_scale_contradicts_period(guided_amount, period_type, company_facts
             "is not a plausible full-year revenue level for this issuer".format(ratio))
 
 
+def _annual_growth_bases(company_facts):
+    """Twelve-month revenue bases an ANNUAL outlook may be measured against.
+
+    Yields (value, frequency, start, end, definition_id), most current first.
+    Each is a real reported window carrying its own dates, so the semantic
+    validator can check the pair rather than trusting the label this function
+    put on it.
+    """
+    from finance import period_facts as pf_module
+
+    bases = []
+    ttm = fr.build_ttm(company_facts, "revenue")
+    if ttm.ok and ttm.value:
+        bases.append((ttm.value, sem.PeriodFrequency.TTM,
+                      ttm.period_start, ttm.period_end, "reported_ttm_revenue"))
+
+    # The latest reported FISCAL YEAR. An annual outlook is usually written
+    # against exactly this -- "FY2027 revenue of $118-120 billion" means
+    # against FY2026's actual -- and an issuer whose quarterly series cannot
+    # build a trailing window still has it. Without this the whole annual
+    # derivation was silently unavailable for such an issuer.
+    annual = [p for p in pf_module.annual_periods(company_facts, "revenue")
+              if p.value]
+    if annual:
+        latest = annual[-1]
+        bases.append((latest.value, sem.PeriodFrequency.ANNUAL,
+                      getattr(latest, "start", None), getattr(latest, "end", None),
+                      "reported_annual_revenue"))
+    return bases
+
+
 def _apply_absolute_revenue_guidance(evidence, entry, company_facts):
     """Turn a guided revenue LEVEL into a growth rate, or refuse to.
 
@@ -593,31 +731,41 @@ def _apply_absolute_revenue_guidance(evidence, entry, company_facts):
         return
 
     if period_type == "annual":
-        ttm = fr.build_ttm(company_facts, "revenue")
-        if not (ttm.ok and ttm.value):
+        # Two comparable bases, in preference order. A trailing twelve months
+        # is the more CURRENT twelve-month window and is tried first; the
+        # latest reported fiscal year is the one an annual outlook is most
+        # often written against ("FY2027 revenue of $118-120B" against
+        # FY2026's actual) and is the fallback for an issuer whose quarterly
+        # series cannot build a TTM.
+        #
+        # Both are twelve months, so both pass `compatible_for(GROWTH, ...)`
+        # for the same reason; neither is assumed, each is checked.
+        for base_value, base_frequency, base_start, base_end, base_definition in \
+                _annual_growth_bases(company_facts):
+            base = sem.SemanticFact(
+                metric_id=sem.MetricIdentity.REVENUE, value=base_value, units="currency",
+                accounting_basis=sem.AccountingBasis.GAAP,
+                period_frequency=base_frequency,
+                start_date=base_start, end_date=base_end,
+                flow_or_instant=sem.FlowOrInstant.FLOW,
+                current_or_historical=sem.CurrentOrHistorical.CURRENT,
+                definition_id=base_definition)
+            verdict = sem.compatible_for(sem.Operation.GROWTH, guided, base)
+            if not verdict.allowed:
+                reject(verdict.reason, base, verdict.code or GUIDANCE_PERIOD_INCOMPATIBLE)
+                continue
+            evidence.guidance_low = (guided_amount - base_value) / abs(base_value)
+            evidence.guidance_high = evidence.guidance_low
+            evidence.guidance_source_metric = \
+                gm.GuidanceMetricName.CONSOLIDATED_REVENUE_GROWTH
+            evidence.guidance_period_label = entry.get("fiscal_period")
+            evidence.guidance_period_type = "annual"
+            evidence.guidance_basis = entry.get("basis")
+            evidence.guidance_bound_type = entry.get("bound_type")
+            evidence.guidance_evidence_id = entry.get("evidence_id")
+            evidence.guidance_implied_comparison_period = "{}..{}".format(
+                base_start, base_end)
             return
-        base = sem.SemanticFact(
-            metric_id=sem.MetricIdentity.REVENUE, value=ttm.value, units="currency",
-            accounting_basis=sem.AccountingBasis.GAAP,
-            period_frequency=sem.PeriodFrequency.TTM,
-            start_date=ttm.period_start, end_date=ttm.period_end,
-            flow_or_instant=sem.FlowOrInstant.FLOW,
-            current_or_historical=sem.CurrentOrHistorical.CURRENT,
-            definition_id="reported_ttm_revenue")
-        verdict = sem.compatible_for(sem.Operation.GROWTH, guided, base)
-        if not verdict.allowed:
-            reject(verdict.reason, base, verdict.code or GUIDANCE_PERIOD_INCOMPATIBLE)
-            return
-        evidence.guidance_low = (guided_amount - ttm.value) / abs(ttm.value)
-        evidence.guidance_high = evidence.guidance_low
-        evidence.guidance_source_metric = gm.GuidanceMetricName.CONSOLIDATED_REVENUE_GROWTH
-        evidence.guidance_period_label = entry.get("fiscal_period")
-        evidence.guidance_period_type = "annual"
-        evidence.guidance_basis = entry.get("basis")
-        evidence.guidance_bound_type = entry.get("bound_type")
-        evidence.guidance_evidence_id = entry.get("evidence_id")
-        evidence.guidance_implied_comparison_period = "{}..{}".format(
-            ttm.period_start, ttm.period_end)
         return
 
     if period_type != "quarter":

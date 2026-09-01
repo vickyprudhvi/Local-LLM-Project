@@ -510,11 +510,40 @@ def test_a_phantom_condition_is_dropped_from_its_bucket():
     assert routed["reassessment_triggers"] == ["Full-year guidance is issued"]
 
 
-def test_the_last_condition_in_a_bucket_is_never_removed():
-    """An empty list tells a reader less than one imperfect entry."""
+def test_the_last_condition_in_a_bucket_survives_a_quality_check():
+    """An empty list tells a reader less than one imperfect entry.
+
+    The rule holds for the checks it was written for -- a threshold already
+    met, a bound that exists only inside this software -- because there the
+    condition is merely weak. It does NOT hold for a condition that
+    REFERENCES an issue this analysis never reported: see
+    `test_an_unverifiable_reference_is_dropped_even_when_it_is_the_last_one`.
+    A weak condition costs a reader a little attention; one promising to
+    resolve a problem that does not exist sends them looking for it.
+    """
+    from finance.research_pipeline import validate_conditions_against_current_state
+
+    kept = validate_conditions_against_current_state(
+        {"reassessment_triggers": ["Operating margin sustains above 15% for two quarters"]},
+        current_metrics={})
+    assert len(kept["reassessment_triggers"]) == 1
+
+
+def test_an_unverifiable_reference_is_dropped_even_when_it_is_the_last_one():
+    """The narrowed case, stated where the old rule used to be.
+
+    A live report carried "resolve the debt discrepancy" as its only
+    reassessment trigger for an analysis whose debt had reconciled cleanly
+    upstream. There is no reading of that condition a reader can act on.
+    """
     from finance.research_pipeline import drop_conditions_referencing_absent_issues
 
     routed = drop_conditions_referencing_absent_issues(
         {"reassessment_triggers": ["The share-count conflict is resolved"]},
         issue_codes=[])
-    assert len(routed["reassessment_triggers"]) == 1
+    assert routed["reassessment_triggers"] == []
+
+    kept = drop_conditions_referencing_absent_issues(
+        {"reassessment_triggers": ["The share-count conflict is resolved"]},
+        issue_codes=["SHARE_COUNT_CONFLICT"])
+    assert len(kept["reassessment_triggers"]) == 1

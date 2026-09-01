@@ -589,8 +589,26 @@ class GuidanceRelease:
     accession: str
     document: str
     filed: str
+    # The NAME-KEYED view, kept because every existing consumer reads it. It
+    # holds ONE statement per metric, chosen by `preferred_for_assumption`.
     metrics: Dict[str, GuidanceMetric] = field(default_factory=dict)
+    # EVERY current statement, keyed in practice by `guidance_identity`.
+    #
+    # Section 11 says guidance identity is (metric, target period, target
+    # period type, basis). `guidance_identity` computed that and
+    # `resolve_guidance_status` used it -- but the CONTAINER above is keyed by
+    # name alone, so a release guiding both a quarter and a full year could
+    # physically hold only one of them, and the extractor dropped the second
+    # before the resolver ever saw it. A company guiding 27-29% for next
+    # quarter and $118-120B for the year had its annual outlook disappear,
+    # and with it the annual growth that outlook implied and the model-bound
+    # assessment that growth would have triggered.
+    all_metrics: Tuple[GuidanceMetric, ...] = ()
     warnings: Tuple[str, ...] = ()
+
+    def statements_for(self, name: str) -> Tuple[GuidanceMetric, ...]:
+        """Every current statement of one metric, across horizons."""
+        return tuple(m for m in self.all_metrics if m.name == name)
 
     def to_dict(self) -> dict:
         return {
@@ -603,6 +621,9 @@ class GuidanceRelease:
                                f"filed {self.filed})",
             "guidance_date": self.filed,
             "metrics": {k: v.to_dict() for k, v in self.metrics.items()},
+            # Every current statement, so a consumer that needs a horizon the
+            # name-keyed view had to drop can find it.
+            "all_metrics": [m.to_dict() for m in self.all_metrics],
             "warnings": list(self.warnings),
         }
 
@@ -1167,7 +1188,8 @@ _SCALE_RE = re.compile(r"(?i)\b(millions?|billions?)\b")
 # forward-looking. Without this, a prior-year comparison range would qualify.
 _FORWARD_MARKERS = re.compile(
     r"(?i)\b(outlook|guidance|expect\w*|anticipat\w*|forecast\w*|target\w*|"
-    r"project\w*|estimat\w*|reaffirm\w*|reiterat\w*|narrow\w*|rais\w*|lower\w*|"
+    r"project\w*|estimat\w*|reaffirm\w*|reiterat\w*|confirm\w*|narrow\w*|"
+    r"rais\w*|lower\w*|"
     r"updat\w*|plans?\s+to|on\s+track)\b")
 
 # Section 9: an outlook the company has taken back is not current guidance.
@@ -1391,6 +1413,34 @@ def _clause_after(text: str, position: int, reach: int = _CLAUSE_YEAR_REACH) -> 
     return tail[:boundary.start()] if boundary else tail
 
 
+# A growth statement names TWO periods: the one it targets and the one it is
+# measured against. "revenue growth of 27% to 29% compared with the first
+# quarter of fiscal 2026" targets Q1 FY2027 and is measured against Q1 FY2026,
+# and reading the comparison clause as the target files next year's guidance
+# under last year -- where `_period_is_plausible` then rejects it outright,
+# because a release cannot guide a period that has already ended.
+#
+# This is section 11's rule in a third pair: issue period, target period and
+# COMPARISON period are three different fields and none of them may stand in
+# for another.
+_COMPARISON_CLAUSE_RE = re.compile(
+    r"(?i)\b(?:compared\s+(?:with|to)|versus|vs\.?|against|relative\s+to|"
+    r"year[\s-]over[\s-]year\s+from|up\s+from|down\s+from|from\s+the\s+"
+    r"(?:prior|year[\s-]ago|comparable))\b")
+
+
+def _before_comparison(fragment: str) -> str:
+    """The part of a statement that is ABOUT the guided period.
+
+    Everything from a comparison connector onward describes the BASE, so it
+    is removed before any period is read out of the text. The comparison
+    period is not lost -- the growth derivation records it separately -- it
+    simply may not answer "which period is being guided".
+    """
+    match = _COMPARISON_CLAUSE_RE.search(fragment or "")
+    return fragment[:match.start()] if match else fragment
+
+
 def resolve_guidance_period(text: str, keyword_start: int, value_start: int, value_end: int,
                             filed: str,
                             declarations: Optional[Sequence[Tuple[int, GuidancePeriod]]] = None
@@ -1426,13 +1476,14 @@ def resolve_guidance_period(text: str, keyword_start: int, value_start: int, val
                                   period_type=GuidancePeriodType.ANNUAL,
                                   fiscal_year=int(year))
 
-    statement = text[keyword_start:value_end] + _clause_after(text, value_end)
+    statement = _before_comparison(
+        text[keyword_start:value_end] + _clause_after(text, value_end))
     if _QUARTER_PERIOD_RE.search(statement):
         parsed = parse_guidance_period(statement, filed)
         if parsed is not None:
             return parsed
 
-    trailing_years = _YEAR_RE.findall(_clause_after(text, value_end))
+    trailing_years = _YEAR_RE.findall(_before_comparison(_clause_after(text, value_end)))
     if trailing_years:
         year = int(trailing_years[0])
         return GuidancePeriod(label=f"FY{year}", period_type=GuidancePeriodType.ANNUAL,
@@ -1554,9 +1605,15 @@ _MIDPOINT_PATTERN = re.compile(
 # statement, not what counts as a nearby number.
 _QUALIFIER_LOOKBEHIND = 40
 _BARE_FIGURE_ADJACENCY = 25
+# The same forward vocabulary `_FORWARD_MARKERS` uses, in the same stem
+# form. This list held past participles only -- "expected", "projected",
+# "anticipated" -- so "we EXPECT revenue of $90 billion" qualified nothing
+# while "our expected revenue" did. Two spellings of one vocabulary, one of
+# them matching what releases actually write.
 _FORWARD_QUALIFIER = re.compile(
-    r"(?i)\b(?:estimated|expected|approximately|about|around|roughly|guidance|"
-    r"outlook|forecast|projected|anticipated)\b")
+    r"(?i)\b(?:estimat\w*|expect\w*|approximately|about|around|roughly|guidance|"
+    r"outlook|forecast\w*|project\w*|anticipat\w*|target\w*|reaffirm\w*|"
+    r"reiterat\w*|confirm\w*)\b")
 _BARE_FIGURE_PATTERN = re.compile(
     rf"(?i)^[^0-9%$]{{0,{_BARE_FIGURE_ADJACENCY}}}?\$?\s*({_NUM})\s*{_PCT}\s*"
     rf"(billion|million|bn|mm)?")
@@ -1581,14 +1638,53 @@ def _same_statement_lookbehind(lookbehind: str) -> str:
 
 
 def _qualified_bare_figure(window: str, lookbehind: str, require_percent: bool):
-    """A bare figure that a preceding qualifier makes forward-looking."""
+    """A bare figure that a qualifier in the SAME STATEMENT makes forward-looking.
+
+    The qualifier may sit on either side of the metric name. This function
+    already knew the first half of that -- "increasing 2026 guidance with
+    ESTIMATED reported sales of $101.1 Billion" puts the qualifier before the
+    metric, and looking only immediately before the NUMBER missed it -- and
+    then looked only in the lookbehind, which misses the mirror case:
+
+        "guidance for revenue of $90 billion"   qualifier before the metric
+        "revenue guidance of $90 billion"       qualifier after it
+
+    Both sentences say one thing. A live issuer wrote the second and its
+    FULL-YEAR outlook was dropped while the next-quarter guidance in the same
+    release was kept -- so nothing downstream could derive an annual growth
+    rate, and a valuation that should have been LIMITED was published as
+    fully usable.
+
+    Word order is not a semantic property. Qualification belongs to the
+    statement, and both sides of the metric name are the statement.
+    """
     lookbehind = _same_statement_lookbehind(lookbehind or "")
-    if not lookbehind or not _FORWARD_QUALIFIER.search(lookbehind):
-        return None
-    if _REPORTED_ACTUAL_MARKERS.search(lookbehind):
-        return None
-    match = _BARE_FIGURE_PATTERN.match(window)
+    # Only the text between the metric name and the figure counts on the
+    # right: the window is already cut at a clause boundary and at the next
+    # metric keyword, so this cannot reach into a neighbouring statement.
+    match = _BARE_FIGURE_PATTERN.match(window or "")
     if match is None:
+        return None
+    leading = (window or "")[:match.start(1)]
+
+    qualified_before = bool(lookbehind and _FORWARD_QUALIFIER.search(lookbehind))
+    qualified_after = bool(_FORWARD_QUALIFIER.search(leading))
+    if not (qualified_before or qualified_after):
+        return None
+
+    # A bare point is the WEAKEST value shape and is ranked last for that
+    # reason. If the window also holds a properly formed RANGE, the metric's
+    # value here is that range -- and a bare number taken from the same
+    # window is something else: a footnote marker, a year, a count.
+    #
+    # "Free cash flow 1 growth of 9.0 to 10.0 percent" is the case. The "1"
+    # is a footnote reference sitting inside the metric name, and reading it
+    # as $1 of guided free cash flow is not a small error.
+    if any(pattern.search(window or "") for pattern in _RANGE_PATTERNS):
+        return None
+    # A reported actual stays refused whichever side its qualifier sits on.
+    if _REPORTED_ACTUAL_MARKERS.search(lookbehind) or \
+            _REPORTED_ACTUAL_MARKERS.search(leading):
         return None
     value = _to_number(match.group(1))
     is_percent = bool(match.group(2))
@@ -1975,7 +2071,11 @@ def extract_guidance_from_text(text: str, symbol: str, accession: str, document:
     Every rejection is recorded in `warnings` so a reader can tell "this
     company published no guidance" from "a value was found and refused".
     """
-    metrics: Dict[str, GuidanceMetric] = {}
+    # Keyed by IDENTITY while extracting. Keying by NAME here is what made a
+    # release's second horizon unreachable: the full-year outlook two
+    # sentences below the next-quarter one hit `if name in metrics` and was
+    # dropped before anything could weigh it.
+    by_identity: Dict[tuple, GuidanceMetric] = {}
     warnings: List[str] = []
     if not text:
         return GuidanceRelease(symbol=symbol, fiscal_year=expected_fiscal_year,
@@ -1991,8 +2091,6 @@ def extract_guidance_from_text(text: str, symbol: str, accession: str, document:
 
     for index, (start, end, entry) in enumerate(hits):
         name, unit, require_percent, scope, forced_basis, _regex = entry
-        if name in metrics:
-            continue
 
         # The window stops at the earlier of: a clause boundary, the next
         # metric keyword, or `_WINDOW` characters. All three matter — the
@@ -2126,15 +2224,13 @@ def extract_guidance_from_text(text: str, symbol: str, accession: str, document:
                     "not assigned an identity.")
                 continue
             name, unit = resolved
-            if name in metrics:
-                continue
 
         scale_match = _SCALE_RE.search(context)
         if is_percent:
             low, high = low / 100.0, high / 100.0
 
         evidence_id = f"dcf.guidance.{name}.current"
-        metrics[name] = GuidanceMetric(
+        candidate = GuidanceMetric(
             name=name, low=low, high=high, unit=unit, basis=basis,
             fiscal_year=period.fiscal_year,
             evidence_id=evidence_id,
@@ -2157,18 +2253,28 @@ def extract_guidance_from_text(text: str, symbol: str, accession: str, document:
             status=status,
             status_reason=status_reason,
             prospective_evidence=prospective_evidence)
+        # One statement per IDENTITY. A repeat of the same metric for the
+        # same period and basis is the same statement said twice; a different
+        # period is a different statement and keeps its own place.
+        by_identity.setdefault(guidance_identity(candidate), candidate)
+
+    metrics = name_keyed_view(by_identity.values())
 
     # Sections 10-11. Whatever the sentence path could not see, recovered
     # from the table with its row and column identity intact. Additive only:
     # an entry the sentence path already produced stands.
     table_metrics, table_warnings = _table_guidance_metrics(
         text, symbol, accession, filed, metrics)
-    metrics.update(table_metrics)
+    for metric in table_metrics.values():
+        by_identity.setdefault(guidance_identity(metric), metric)
     warnings.extend(table_warnings)
 
+    statements = tuple(by_identity.values())
     return GuidanceRelease(symbol=symbol, fiscal_year=expected_fiscal_year,
                            accession=accession, document=document, filed=filed,
-                           metrics=metrics, warnings=tuple(warnings))
+                           metrics=name_keyed_view(statements),
+                           all_metrics=statements,
+                           warnings=tuple(warnings))
 
 
 # GAAP metric -> its adjusted counterpart, for the "an 'adjusted' modifier
@@ -2226,6 +2332,66 @@ def _excerpt(text: str, start: int, end: int, pad: int = 40) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Which horizon wins the ONE slot the name-keyed `metrics` view has.
+#
+# The assumption builder reads that view and builds an ANNUAL forecast, so an
+# annual statement is the one that answers its question. A shorter horizon is
+# not discarded -- it stays in `all_metrics` and reaches the research evidence
+# and the report -- it simply does not occupy the slot a twelve-month
+# consumer reads.
+_HORIZON_PREFERENCE = {
+    GuidanceTargetType.CURRENT_FISCAL_YEAR: 0,
+    GuidanceTargetType.NEXT_FISCAL_YEAR: 1,
+    GuidanceTargetType.MULTI_YEAR: 2,
+    GuidanceTargetType.NEXT_QUARTER: 3,
+    GuidanceTargetType.OTHER: 4,
+}
+
+
+def preferred_for_assumption(statements: Sequence[GuidanceMetric]
+                             ) -> Optional[GuidanceMetric]:
+    """The statement a twelve-month consumer should read, among several.
+
+    Longest applicable horizon first, then the newest issue date. Returns
+    None for an empty sequence rather than raising, because "this metric was
+    not guided" is an ordinary answer.
+    """
+    def rank(metric):
+        # Longest applicable horizon first; then, WITHIN a horizon, the
+        # newest statement, because that is what supersession means. Sorting
+        # the issue date ascending here picked a company's expired
+        # next-quarter guidance over the one it had just published.
+        return (_HORIZON_PREFERENCE.get(metric.target_period_type, 5),
+                _descending(metric.issued_at),
+                _descending(metric.fiscal_period))
+
+    ranked = sorted(statements, key=rank)
+    return ranked[0] if ranked else None
+
+
+class _descending:
+    """Sort one field descending inside an otherwise ascending key."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = value or ""
+
+    def __lt__(self, other):
+        return self.value > other.value
+
+    def __eq__(self, other):
+        return self.value == other.value
+
+
+def name_keyed_view(statements: Sequence[GuidanceMetric]) -> Dict[str, GuidanceMetric]:
+    """The one-per-name projection of a multi-horizon statement set."""
+    by_name: Dict[str, List[GuidanceMetric]] = {}
+    for metric in statements:
+        by_name.setdefault(metric.name, []).append(metric)
+    return {name: preferred_for_assumption(group) for name, group in by_name.items()}
+
+
 def select_current_guidance(releases: Sequence[GuidanceRelease],
                             fiscal_year: Optional[int] = None,
                             as_of: Optional[str] = None
@@ -2249,10 +2415,15 @@ def select_current_guidance(releases: Sequence[GuidanceRelease],
         return None, []
     ordered = sorted(usable, key=lambda r: (r.filed or "", r.accession or ""), reverse=True)
 
-    current_metrics: Dict[str, GuidanceMetric] = {}
-    supplier_of: Dict[str, GuidanceRelease] = {}
+    # Keyed by IDENTITY -- metric, target period, target period type, basis --
+    # so a full-year outlook and a next-quarter outlook for the same metric
+    # are two statements that both survive, which is what section 11 has
+    # always said they are.
+    current_by_identity: Dict[tuple, GuidanceMetric] = {}
+    supplier_of: Dict[tuple, GuidanceRelease] = {}
     for release in ordered:
-        for name, metric in release.metrics.items():
+        for metric in (release.all_metrics or tuple(release.metrics.values())):
+            name = metric.name
             # `fiscal_year` is the EARLIEST period still relevant, not an
             # exact match. Guidance for a LATER fiscal year is the whole
             # point of asking — NVIDIA's May-2026 release guides fiscal 2027
@@ -2266,13 +2437,17 @@ def select_current_guidance(releases: Sequence[GuidanceRelease],
                 continue
             if _is_expired(metric, as_of):
                 continue
-            if name in current_metrics:
+            identity = guidance_identity(metric)
+            if identity in current_by_identity:
                 continue
-            current_metrics[name] = metric
-            supplier_of[name] = release
+            current_by_identity[identity] = metric
+            supplier_of[identity] = release
 
-    if not current_metrics:
+    if not current_by_identity:
         return None, list(ordered)
+
+    statements = tuple(current_by_identity.values())
+    current_metrics = name_keyed_view(statements)
 
     # The release that supplied the most current metrics names the result —
     # a guidance record has to cite ONE primary filing, and every individual
@@ -2293,6 +2468,7 @@ def select_current_guidance(releases: Sequence[GuidanceRelease],
         document=primary.document,
         filed=primary.filed,
         metrics=current_metrics,
+        all_metrics=statements,
         warnings=primary.warnings)
     superseded = [r for r in ordered if r is not primary]
     return combined, superseded
@@ -2593,7 +2769,7 @@ def current_guidance_only(entries) -> list:
 
 
 def build_guidance_matrix(metrics, superseded=None, releases_examined=None,
-                          extraction_failed=False) -> dict:
+                          extraction_failed=False, all_metrics=None) -> dict:
     """Sections 11-14: a status for every row, and two summary verdicts.
 
     The live failure this replaces: a report said "management guidance:
@@ -2605,7 +2781,15 @@ def build_guidance_matrix(metrics, superseded=None, releases_examined=None,
     `releases_examined` separates "we looked and found nothing" from "we never
     looked", which is the difference between UNAVAILABLE and NOT_SEARCHED.
     """
-    metrics = metrics or {}
+    # Coverage counts a metric as guided when ANY current horizon states it.
+    # Reading only the name-keyed view would undercount an issuer that guided
+    # a metric for a quarter and a different metric for the year, since that
+    # view holds one statement per name and the matrix asks a per-name
+    # question about the whole release.
+    metrics = dict(metrics or {})
+    for statement in (all_metrics or []):
+        if isinstance(statement, dict) and statement.get("name"):
+            metrics.setdefault(statement["name"], statement)
     superseded_names = {entry.get("name") for entry in (superseded or [])
                         if isinstance(entry, dict)}
 

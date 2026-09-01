@@ -719,3 +719,92 @@ def scan_structure_for_unsupported_claims(value, providers_present: Optional[Set
             seen.add(label)
             deduped.append(label)
     return deduped
+
+
+# ---------------------------------------------------------------------------
+# A claim may not restate one period's guidance as another's
+# ---------------------------------------------------------------------------
+#
+# The failure: a company guided 27-29% revenue growth FOR THE FIRST QUARTER,
+# and the research output read "Management guides 27-29% growth for fiscal
+# year 2027". Every number is right and the sentence is false -- a
+# three-month outlook presented as a twelve-month commitment, which is the
+# same period-collapsing error section 11 forbids upstream, arriving instead
+# through prose.
+#
+# The guidance record has always carried its target period. Nothing compared
+# a claim against it, and asking the model to preserve the period is not a
+# check: this is the deterministic half of the division of responsibility in
+# section 21.
+
+GUIDANCE_PERIOD_MISSTATED = "GUIDANCE_PERIOD_MISSTATED"
+
+# How a claim spells an ANNUAL horizon, and how it spells a QUARTERLY one.
+# Deliberately narrow: a claim that names no period at all makes no period
+# error, and this checks references rather than policing vocabulary.
+# A claim that names a quarter is talking about a quarter, whatever else it
+# mentions. "FY2027" names a year; "Q1 FY2027" names a quarter OF that year,
+# and reading the second as annual rejects a correct claim.
+_CLAIM_NAMES_A_QUARTER = re.compile(
+    r"(?i)\bQ[1-4]\b|\b(?:first|second|third|fourth)[\s-]quarter\b|"
+    r"\bnext[\s-]quarter\b|\bquarterly\b")
+
+_CLAIM_ANNUAL_PERIOD = re.compile(
+    r"(?i)\b(?:full[\s-]year|fiscal\s+year|full\s+fiscal\s+year|"
+    r"for\s+the\s+year|FY\s?\d{2,4}|annual)\b")
+_CLAIM_QUARTER_PERIOD = re.compile(
+    r"(?i)\b(?:Q[1-4]\b|first|second|third|fourth)[\s-]*(?:quarter)?\b(?=[^.]{0,40}"
+    r"(?:quarter|Q[1-4]))|\bnext[\s-]quarter\b|\bquarterly\b|\bquarter\b")
+
+_ANNUAL_TARGET_TYPES = ("CURRENT_FISCAL_YEAR", "NEXT_FISCAL_YEAR", "MULTI_YEAR")
+
+
+def _guidance_horizons(guidance_metrics):
+    """(annual periods, shorter periods) actually present in the guidance."""
+    annual, shorter = set(), set()
+    for entry in (guidance_metrics or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        period = entry.get("target_period") or entry.get("fiscal_period")
+        if not period:
+            continue
+        if entry.get("target_period_type") in _ANNUAL_TARGET_TYPES:
+            annual.add(period)
+        else:
+            shorter.add(period)
+    return annual, shorter
+
+
+def scan_for_guidance_period_mismatch(text, guidance_metrics) -> List[str]:
+    """Does this claim attribute guidance to a period nobody guided?
+
+    Returns a finding only when the claim CITES a horizon the guidance does
+    not cover. A claim naming an annual period is fine when annual guidance
+    exists; it is a misstatement when the only guidance targets a quarter,
+    because that is the whole content of the error.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return []
+    if not _GUIDANCE_ATTRIBUTION.search(text):
+        return []
+    annual, shorter = _guidance_horizons(guidance_metrics)
+    if not (annual or shorter):
+        return []
+
+    findings: List[str] = []
+    if _CLAIM_NAMES_A_QUARTER.search(text):
+        return findings
+    if _CLAIM_ANNUAL_PERIOD.search(text) and not annual and shorter:
+        findings.append(
+            f"{GUIDANCE_PERIOD_MISSTATED}: the claim attributes guidance to a full "
+            f"fiscal year, but the guidance on file targets {', '.join(sorted(shorter))}. "
+            "A three-month outlook stated as a twelve-month commitment is a different "
+            "claim about the company, not a rounding of the same one.")
+    return findings
+
+
+# Words that make a sentence an attribution OF GUIDANCE, rather than a
+# statement that merely mentions a period. Without this, ordinary prose about
+# a fiscal year would be scanned as though it were quoting management.
+_GUIDANCE_ATTRIBUTION = re.compile(
+    r"(?i)\b(?:guid\w+|management\s+expects|the\s+company\s+expects|outlook)\b")

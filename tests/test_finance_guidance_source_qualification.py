@@ -189,3 +189,83 @@ def test_the_coverage_matrix_reports_only_the_prospective_rows(metrics):
                                      releases_examined=1)
     assert "share_count" not in (matrix.get("current_rows") or [])
     assert "revenue" in (matrix.get("current_rows") or [])
+
+
+# ---------------------------------------------------------------------------
+# Qualification is a property of the STATEMENT, not of word order
+# ---------------------------------------------------------------------------
+#
+# `_qualified_bare_figure` already carries a comment recording that a forward
+# qualifier can sit before the METRIC NAME rather than before the number, and
+# it was taught to look there. It was never taught to look on the OTHER side.
+#
+#     "guidance for revenue of $90 billion"   qualifier before the metric  OK
+#     "revenue guidance of $90 billion"       qualifier after the metric   MISSED
+#
+# Both sentences are one statement saying one thing. A live issuer wrote the
+# second -- "For fiscal year 2027, we confirm our prior revenue guidance of
+# $90 billion total revenue" -- and its FULL-YEAR outlook was dropped while
+# the next-quarter guidance two paragraphs above was kept. Everything that
+# depends on the annual horizon then behaved as though the company had
+# guided only a quarter: no annual growth was derived, the model-bound
+# assessment saw only trailing evidence, and a valuation that should have
+# been LIMITED was published as fully usable.
+#
+# Spec §11's coverage rule is the one violated: "no revenue guidance" and
+# "guidance unavailable" are different claims, and neither is true here.
+
+def _extract(sentence, filed="2026-06-10", fiscal_year=2027):
+    release = G.extract_guidance_from_text(sentence, "ZZ", "acc", "doc", filed,
+                                           expected_fiscal_year=fiscal_year)
+    return dict(release.metrics or {})
+
+
+@pytest.mark.parametrize("sentence", [
+    "For fiscal year 2027, we confirm our prior revenue guidance of $90 billion.",
+    "For fiscal year 2027, we are raising total revenue guidance to $90 billion.",
+    "For fiscal year 2027, our revenue outlook is $90 billion.",
+    "For fiscal year 2027, we expect revenue of $90 billion.",
+])
+def test_a_qualifier_on_either_side_of_the_metric_qualifies_the_statement(sentence):
+    metrics = _extract(sentence)
+    entry = metrics.get(N.CONSOLIDATED_REVENUE)
+    assert entry is not None, f"not extracted: {sentence!r}"
+    assert entry.low == pytest.approx(90.0)
+    assert entry.scale == "billion"
+    assert entry.target_period_type in ("CURRENT_FISCAL_YEAR", "NEXT_FISCAL_YEAR")
+
+
+def test_the_two_orderings_produce_the_same_statement():
+    before = _extract("For fiscal year 2027, we expect revenue of $90 billion.")
+    after = _extract("For fiscal year 2027, our revenue guidance is $90 billion.")
+    assert set(before) == set(after), (sorted(before), sorted(after))
+    assert before[N.CONSOLIDATED_REVENUE].low == pytest.approx(
+        after[N.CONSOLIDATED_REVENUE].low)
+
+
+@pytest.mark.parametrize("sentence", [
+    "Revenue was $67 billion for the year.",
+    "Third quarter revenue of $16 billion was up 12%.",
+    "Full year revenue results were $67 billion.",
+])
+def test_a_reported_actual_is_still_refused(sentence):
+    """The guard this widening must not weaken. A figure with no forward
+    qualification anywhere in its statement is a reported number."""
+    assert N.CONSOLIDATED_REVENUE not in _extract(sentence)
+
+
+def test_a_release_stating_both_horizons_keeps_both():
+    """The end-to-end consequence, in the phrasing a real release uses."""
+    text = (
+        "Financial Outlook\n\n"
+        "For the first quarter of fiscal 2027, we expect total revenue growth of "
+        "27% to 29%.\n\n"
+        "For fiscal year 2027, we confirm our prior revenue guidance of $90 billion "
+        "total revenue.\n")
+    release = G.extract_guidance_from_text(text, "ZZ", "acc", "doc", "2026-06-10",
+                                           expected_fiscal_year=2027)
+    horizons = {(m.name, m.target_period_type) for m in release.all_metrics}
+    assert (N.CONSOLIDATED_REVENUE_GROWTH, "NEXT_QUARTER") in horizons, sorted(horizons)
+    assert any(name == N.CONSOLIDATED_REVENUE
+               and kind in ("CURRENT_FISCAL_YEAR", "NEXT_FISCAL_YEAR")
+               for name, kind in horizons), sorted(horizons)
