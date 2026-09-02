@@ -2410,7 +2410,7 @@ def select_current_guidance(releases: Sequence[GuidanceRelease],
     selected. Both are still returned among the superseded releases, because
     "management withdrew its outlook" is itself material.
     """
-    usable = [r for r in releases if r.metrics]
+    usable = [r for r in releases if r.metrics or r.all_metrics]
     if not usable:
         return None, []
     ordered = sorted(usable, key=lambda r: (r.filed or "", r.accession or ""), reverse=True)
@@ -2685,12 +2685,50 @@ def _row_status(present_names, metrics, superseded_names) -> str:
 # the metric and the period it targets -- not the document it arrived in.
 
 
+# Target-period types that differ only by HOW FAR AHEAD the target was when
+# the statement was made. `classify_target_type` derives CURRENT vs NEXT
+# fiscal year from the RELEASE's own reporting period, so one company
+# restating one outlook produces two different types:
+#
+#     March release   "For fiscal year 2027 ..."   NEXT_FISCAL_YEAR
+#     June release    "For fiscal year 2027 ..."   CURRENT_FISCAL_YEAR
+#
+# That is correct information about each STATEMENT and wrong information for
+# IDENTITY. Section 11 says issue period and target period are different
+# fields; the same rule read backwards is that information about the issue
+# date must not leak into the identity of the target. Collapsed to one class
+# so the two are recognised as one statement and the older is superseded.
+#
+# MULTI_YEAR and OTHER are NOT collapsed into it: a long-term framework and
+# an outlook for a named year can quote the same year and remain different
+# forward statements. NEXT_QUARTER is left alone because a quarter's target
+# period already differs ("Q1 FY2027" against "FY2027").
+_NAMED_FISCAL_YEAR_TYPES = frozenset({
+    GuidanceTargetType.CURRENT_FISCAL_YEAR,
+    GuidanceTargetType.NEXT_FISCAL_YEAR,
+})
+_NAMED_FISCAL_YEAR = "NAMED_FISCAL_YEAR"
+
+
+def identity_horizon(target_period_type: Optional[str]) -> Optional[str]:
+    """The horizon class an identity uses, ignoring distance from the issuer."""
+    if target_period_type in _NAMED_FISCAL_YEAR_TYPES:
+        return _NAMED_FISCAL_YEAR
+    return target_period_type
+
+
 def guidance_identity(entry) -> tuple:
     """What makes two guidance items the same statement.
 
-    Basis is part of the identity: a GAAP margin outlook and an adjusted one
-    for the same period are two statements, and neither supersedes the
-    other. Merging them would silently drop whichever arrived first.
+    The metric, the period it targets, the KIND of horizon and the basis.
+
+    Basis is part of it: a GAAP margin outlook and an adjusted one for the
+    same period are two statements, and neither supersedes the other.
+    Merging them would silently drop whichever arrived first.
+
+    The horizon is the CLASS, not the distance -- see `identity_horizon`.
+    Two releases restating one full-year outlook are one statement however
+    each measured its own distance from it.
     """
     def read(name, default=None):
         if isinstance(entry, dict):
@@ -2699,7 +2737,7 @@ def guidance_identity(entry) -> tuple:
 
     return (read("name") or read("metric_id"),
             read("fiscal_period") or read("target_period"),
-            read("target_period_type"),
+            identity_horizon(read("target_period_type")),
             read("basis"))
 
 
@@ -2718,8 +2756,16 @@ def resolve_guidance_status(entries) -> list:
 
     Returns the entries with `status` and `status_reason` set. Input order
     is preserved so a caller can zip results back to its own records.
+
+    A dict is updated in place; a frozen `GuidanceMetric` is REPLACED by a
+    copy carrying the new status, because a validated statement must not be
+    mutable after the fact. The dataclass branch used to `setattr` and raise,
+    which meant this resolver could only ever be handed dicts -- fine while
+    the only statements it saw were dicts, and wrong now that `all_metrics`
+    carries the objects themselves.
     """
     entries = list(entries or [])
+    resolved = {}          # id(original) -> replacement, for frozen entries
 
     def read(entry, name, default=None):
         if isinstance(entry, dict):
@@ -2729,8 +2775,14 @@ def resolve_guidance_status(entries) -> list:
     def write(entry, name, value):
         if isinstance(entry, dict):
             entry[name] = value
-        else:
-            setattr(entry, name, value)
+            return
+        current = resolved.get(id(entry), entry)
+        updates = {"status": read(current, "status"),
+                   "status_reason": read(current, "status_reason"),
+                   name: value}
+        resolved[id(entry)] = current.with_status(updates["status"],
+                                                  updates["status_reason"])             if name == "status_reason" else current.with_status(
+                value, read(current, "status_reason"))
 
     groups = {}
     for entry in entries:
@@ -2754,7 +2806,7 @@ def resolve_guidance_status(entries) -> list:
                   f"{read(newest, 'issued_at') or 'later'}.")
         write(newest, "status", GuidanceStatus.CURRENT)
         write(newest, "status_reason", None)
-    return entries
+    return [resolved.get(id(entry), entry) for entry in entries]
 
 
 def current_guidance_only(entries) -> list:

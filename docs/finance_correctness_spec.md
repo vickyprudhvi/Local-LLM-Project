@@ -373,6 +373,24 @@ UNAVAILABLE`; absence reasons distinguish `NO_GUIDANCE_EXISTS`,
 `NO_REVENUE_GUIDANCE`, `GUIDANCE_EXTRACTION_FAILED`, `PARTIAL_GUIDANCE_ONLY`,
 `NOT_APPLICABLE` (never searched).
 
+**RULE (identity is the horizon CLASS, not the distance).** Guidance identity
+is `(metric_id, target_period, horizon class, basis)`. `target_period_type`
+distinguishes CURRENT_FISCAL_YEAR from NEXT_FISCAL_YEAR, and that difference
+is a property of the ISSUE DATE, not of the target: one company restating one
+full-year outlook in March and again in June produces both labels for the
+same year. Collapsed to one class, so the two are recognised as one statement
+and the older is SUPERSEDED. A long-term framework and an outlook for a named
+year are still two statements; so are a quarter and a year, and GAAP and
+adjusted.
+
+**RATIONALE.** This is the same rule as "issue period and target period are
+never collapsed", read in the other direction: information about when a
+statement was made must not enter the identity of what it is about. Live, one
+$90B FY2027 outlook occupied two identities and neither superseded the other.
+The values agreed, so nothing was corrupted — but had the company RAISED its
+outlook, the analysis would have carried the old figure and the new one side
+by side as current guidance for one year.
+
 **RULE (source qualification).** A number in a historical table is not
 guidance. Proximity to a forward-looking word does not qualify a figure: an
 earnings release is mostly condensed statements, reconciliations and

@@ -208,3 +208,102 @@ def test_the_coverage_matrix_counts_the_annual_row(release):
         {name: m.to_dict() for name, m in current.metrics.items()},
         releases_examined=1, all_metrics=[m.to_dict() for m in current.all_metrics])
     assert "revenue" in (matrix.get("current_rows") or [])
+
+
+# ---------------------------------------------------------------------------
+# One statement, one identity, however each release measured its distance
+# ---------------------------------------------------------------------------
+#
+# `target_period_type` answers "how far ahead is this, from where I am
+# standing". It is a property of the RELATIVE relationship between the issue
+# date and the target period, not of the target period itself:
+#
+#     March release   "For fiscal year 2027 ..."   NEXT_FISCAL_YEAR
+#     June release    "For fiscal year 2027 ..."   CURRENT_FISCAL_YEAR
+#
+# Same metric, same period, same basis, same company -- one statement,
+# restated. Keying identity on the relative type made it two, so the older
+# one was never marked superseded and both stayed current. Values happened to
+# agree on the run that exposed this; had the company RAISED its outlook, the
+# analysis would have carried the old figure and the new one side by side as
+# current guidance for one year, which is exactly what supersession exists to
+# prevent (§11).
+#
+# This is §11's own rule read in the other direction: issue period and target
+# period are different fields, so information about the ISSUE date must not
+# leak into the identity of the TARGET.
+
+def _statement(period="FY2027", target_type="CURRENT_FISCAL_YEAR", low=90.0,
+               high=90.0, filed="2026-06-10", name=None, basis=None,
+               accession="a"):
+    return G.GuidanceMetric(
+        name=name or N.CONSOLIDATED_REVENUE, low=low, high=high,
+        unit=G.GuidanceUnit.CURRENCY, basis=basis or G.BASIS_GAAP,
+        fiscal_year=2027, evidence_id="dcf.guidance.revenue.current",
+        source_excerpt="x", fiscal_period=period, period_type="annual",
+        target_period_type=target_type, issued_at=filed,
+        source_accession=accession, source_evidence_ids=("dcf.guidance.revenue.current",),
+        prospective_evidence="we confirm our prior revenue guidance of")
+
+
+def test_the_same_period_from_two_releases_is_one_identity():
+    march = _statement(target_type="NEXT_FISCAL_YEAR", filed="2026-03-10")
+    june = _statement(target_type="CURRENT_FISCAL_YEAR", filed="2026-06-10")
+    assert G.guidance_identity(march) == G.guidance_identity(june)
+
+
+def test_the_newer_statement_supersedes_the_older_one():
+    march = _statement(target_type="NEXT_FISCAL_YEAR", filed="2026-03-10",
+                       low=85.0, high=85.0, accession="older")
+    june = _statement(target_type="CURRENT_FISCAL_YEAR", filed="2026-06-10",
+                      low=90.0, high=90.0, accession="newer")
+    resolved = G.resolve_guidance_status([march, june])
+    current = [m for m in resolved if m.status == G.GuidanceStatus.CURRENT]
+    assert len(current) == 1, [(m.low, m.status) for m in resolved]
+    assert current[0].low == pytest.approx(90.0)
+
+
+def test_a_raised_outlook_does_not_leave_both_figures_current():
+    """The failure this would have caused. Two live figures for one year is
+    not a richer answer, it is an unresolved contradiction."""
+    older = G.GuidanceRelease(
+        symbol="ZZ", fiscal_year=2027, accession="older", document="d",
+        filed="2026-03-10",
+        all_metrics=(_statement(target_type="NEXT_FISCAL_YEAR", filed="2026-03-10",
+                                low=85.0, high=85.0, accession="older"),))
+    newer = G.GuidanceRelease(
+        symbol="ZZ", fiscal_year=2027, accession="newer", document="d",
+        filed="2026-06-10",
+        all_metrics=(_statement(target_type="CURRENT_FISCAL_YEAR", filed="2026-06-10",
+                                low=90.0, high=90.0, accession="newer"),))
+    current, _superseded = G.select_current_guidance([older, newer], as_of="2026-07-01")
+    revenue = [m for m in current.all_metrics if m.name == N.CONSOLIDATED_REVENUE]
+    assert len(revenue) == 1, [(m.low, m.fiscal_period) for m in revenue]
+    assert revenue[0].low == pytest.approx(90.0)
+
+
+# -- what must STAY two statements ------------------------------------------
+
+def test_two_different_target_periods_stay_separate():
+    assert G.guidance_identity(_statement(period="FY2027")) != \
+        G.guidance_identity(_statement(period="Q1 FY2027",
+                                       target_type="NEXT_QUARTER"))
+
+
+def test_gaap_and_adjusted_for_one_period_stay_separate():
+    assert G.guidance_identity(_statement()) != \
+        G.guidance_identity(_statement(basis=G.BASIS_ADJUSTED))
+
+
+def test_two_different_metrics_stay_separate():
+    assert G.guidance_identity(_statement()) != \
+        G.guidance_identity(_statement(name=N.ADJUSTED_EPS))
+
+
+def test_a_multi_year_framework_is_not_a_single_year_outlook():
+    """A long-term framework and an outlook for a named year can quote the
+    same year and are different forward statements (§11); only the
+    RELATIVE-DISTANCE distinction is collapsed."""
+    outlook = _statement(period="FY2028", target_type="NEXT_FISCAL_YEAR")
+    framework = _statement(period="FY2028", target_type="MULTI_YEAR")
+    assert G.guidance_identity(outlook) != G.guidance_identity(framework)
