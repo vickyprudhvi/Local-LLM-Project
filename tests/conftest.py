@@ -45,3 +45,57 @@ def _pin_finance_providers_to_alphavantage(monkeypatch):
     monkeypatch.setenv("YAHOO_FINANCE_ENABLED", "false")
     monkeypatch.setenv("YAHOO_PERSONAL_USE_ACKNOWLEDGED", "false")
     monkeypatch.setenv("SEC_EDGAR_ENABLED", "false")
+
+
+@pytest.fixture(autouse=True)
+def _pin_finance_extraction_to_v1(monkeypatch):
+    """The suite measures the code, not the operator's `.env`.
+
+    Same discipline as the provider pin above, for the same reason. Once the
+    semantic extractor was wired to the composition root, setting
+    FINANCE_EXTRACTION_MODE=compare in this repository's own `.env` made the
+    canaries issue REAL model calls -- minutes of network per run, a
+    nondeterministic reader deciding whether assertions held, and a suite that
+    passed or failed depending on a file nobody reads while writing tests.
+
+    So the mode is pinned to v1 and the extractor registry is emptied. A test
+    exercising compare/v2 says so explicitly, by passing `mode=` or patching
+    `config.finance_extraction_mode`, and supplies its own stub extractor.
+    """
+    monkeypatch.setenv("FINANCE_EXTRACTION_MODE", "v1")
+
+    from finance.extraction import runtime as _extraction_runtime
+
+    previous = _extraction_runtime._EXTRACTOR_FACTORY  # noqa: SLF001
+    _extraction_runtime.register_extractor_factory(None)
+    yield
+    _extraction_runtime.register_extractor_factory(previous)
+
+
+@pytest.fixture(autouse=True)
+def _pin_finance_actualization_to_v1(monkeypatch):
+    """The suite measures the code, not the operator's `.env`.
+
+    Same discipline as the extraction-mode pin above. Without it, switching
+    FINANCE_ACTUALIZATION_MODE in this repository's own `.env` would silently
+    change which period every finance test resolves as current -- and the
+    canaries would start asserting against a different quarter for reasons
+    nobody reading the test could see.
+    """
+    monkeypatch.setenv("FINANCE_ACTUALIZATION_MODE", "v1")
+
+
+@pytest.fixture(autouse=True)
+def _pin_reported_actuals_to_v1(monkeypatch):
+    """The suite measures the code, not the operator's `.env`.
+
+    Same discipline as the two pins above. Without it, setting
+    FINANCE_REPORTED_ACTUALS_MODE in this repository's own `.env` would send
+    every finance test out to SEC EDGAR for filing indexes and exhibits --
+    real network per test, and a suite whose answers depend on what an issuer
+    filed this morning.
+
+    A test exercising compare/v2 says so explicitly, by passing `mode=` and
+    its own fetcher.
+    """
+    monkeypatch.setenv("FINANCE_REPORTED_ACTUALS_MODE", "v1")

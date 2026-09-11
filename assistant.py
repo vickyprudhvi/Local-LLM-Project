@@ -21,6 +21,7 @@ import tools.config as app_config
 from brain import ask_claude, ask_local_raw, load_system_prompt
 from ears import listen_push_to_talk
 from finance import workflow as finance_workflow
+from finance.extraction import runtime as finance_extraction_runtime
 from interaction_log import log_turn
 from mcp_layer import FilesystemRootValidator, McpError, MultiMcpRuntimeManager
 from mcp_management.access_classifier import (
@@ -58,6 +59,28 @@ from tools.models import (
 from voice import speak
 
 console = Console()
+
+# ---------------------------------------------------------------------------
+# Composition root for the finance extraction layer
+# ---------------------------------------------------------------------------
+#
+# The semantic guidance extractor needs a model; `finance/` must never import
+# one. This module already owns both halves -- the configured local-model
+# capability (`ask_local_raw`) and the tool layer that runs the extraction --
+# so the wiring belongs here and nowhere else.
+#
+# Done at IMPORT, deliberately. Registering inside a request handler, or after
+# `synthesize_report` where an `ask_local_fn` happens to be in scope, would
+# make extraction behaviour depend on whether some earlier turn had run --
+# and guidance extraction happens BEFORE synthesis, so a registration made
+# there could only ever take effect on a LATER analysis in the same process.
+# The whole capability would work or not work depending on call order.
+#
+# Registration is free: it stores a factory and calls nothing. Under the
+# default `v1` mode `extract_release` never builds an extractor, so no model
+# call is made and no model is loaded. Only an explicitly configured
+# `compare`/`v2` mode reaches the model.
+finance_extraction_runtime.register_model_client(ask_local_raw)
 
 _FS_YES_WORDS = {"y", "yes", "approve", "approved", "ok", "okay"}
 _FS_NO_WORDS = {"n", "no", "decline", "declined", "cancel"}

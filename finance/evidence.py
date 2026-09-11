@@ -20,6 +20,7 @@ stage to see differently.
 """
 
 import json
+import dataclasses
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -469,6 +470,12 @@ def build_evidence_index(compact_payload: dict) -> Dict[str, EvidenceItem]:
     # below. `gate` holds what may be published; anything it does not return
     # is not indexed, so a role cannot cite it -- which is a stronger
     # guarantee than instructing a role not to use it.
+    # §9: a figure that is not from the current reported period may not be
+    # presented as current. Applied HERE, at the single boundary where roles
+    # receive facts, rather than asked of each role in prose. Absent under
+    # the default actualization mode, which attaches no freshness view.
+    apply_research_freshness(index, compact_payload.get("actualization_freshness"))
+
     valuation_status = valuation_evidence_status(compact_payload)
     gate = build_valuation_research_evidence(
         valuation_status,
@@ -694,3 +701,42 @@ def validate_evidence_citations(cited_ids, index: Dict[str, EvidenceItem]) -> Tu
         return False, []
     unknown = [cid for cid in cited_ids if not isinstance(cid, str) or cid not in index]
     return (len(unknown) == 0), unknown
+
+
+def apply_research_freshness(index: Dict[str, "EvidenceItem"],
+                             freshness: Optional[dict]) -> List[str]:
+    """Strip the claim of currency from any item that cannot support it.
+
+    Returns the evidence IDs that were requalified, so the caller can record
+    what changed rather than the change being invisible.
+
+    The item KEEPS its value. A prior-quarter figure is real and a role may
+    legitimately need it; what it may not do is wear the word "current".
+    Dropping it would lose information, and leaving it unqualified is the
+    failure this exists to prevent.
+    """
+    from finance.actualization import (
+        CURRENT_EVIDENCE_PREFIX,
+        requalify_evidence_label,
+    )
+
+    if not freshness:
+        return []
+    requalified = freshness.get("requalified") or {}
+    if not requalified:
+        return []
+
+    changed: List[str] = []
+    for evidence_id, item in list(index.items()):
+        if not evidence_id.startswith(CURRENT_EVIDENCE_PREFIX):
+            continue
+        metric = evidence_id[len(CURRENT_EVIDENCE_PREFIX):]
+        period = requalified.get(metric)
+        if not period:
+            continue
+        index[evidence_id] = dataclasses.replace(
+            item,
+            label=requalify_evidence_label(item.label, period),
+            source_periods=[period])
+        changed.append(evidence_id)
+    return changed

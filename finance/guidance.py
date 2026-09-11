@@ -79,7 +79,7 @@ the report can be traced back to the sentence in the filing that supports it.
 import hashlib
 import html as _html
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
 # The 8-K item that means "Results of Operations and Financial Condition" —
@@ -110,7 +110,15 @@ class GuidanceStatus:
     SUPERSEDED = "SUPERSEDED"
     WITHDRAWN = "WITHDRAWN"
     EXPIRED = "EXPIRED"
-    ALL = (CURRENT, SUPERSEDED, WITHDRAWN, EXPIRED)
+    # The actual result for the guided period has been reported. Distinct
+    # from EXPIRED, which means only that the calendar moved past it: a
+    # forecast for a period we can now MEASURE is not a forecast any more,
+    # and calling that "expired" would suggest we merely ran out of time.
+    REALIZED = "REALIZED"
+    ALL = (CURRENT, SUPERSEDED, WITHDRAWN, EXPIRED, REALIZED)
+
+    # Statuses in which a statement is no longer an outlook.
+    RETIRED = (SUPERSEDED, WITHDRAWN, EXPIRED, REALIZED)
 
 
 class GuidancePeriodType:
@@ -282,7 +290,12 @@ class GuidanceBound:
     RANGE = "range"
     AT_LEAST = "at_least"
     APPROXIMATELY = "approximately"
-    ALL = (RANGE, AT_LEAST, APPROXIMATELY)
+    # A point the company stated with an uncertainty around it: "$91.0
+    # billion, plus or minus 2%". Its endpoints are DERIVED, and keeping it
+    # distinct from RANGE is what stops a computed 89.18 being read as a
+    # number the issuer published.
+    POINT_WITH_TOLERANCE = "point_with_tolerance"
+    ALL = (RANGE, AT_LEAST, APPROXIMATELY, POINT_WITH_TOLERANCE)
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +550,12 @@ class GuidanceMetric:
     bound_type: str = GuidanceBound.RANGE
     status: str = GuidanceStatus.CURRENT
     status_reason: Optional[str] = None
+    # Set only when low/high were COMPUTED rather than read. Mirrors the
+    # provenance `finance/canonical.py` records for a derived margin, so a
+    # reader can always tell a published endpoint from an arithmetic one.
+    derivation_formula: Optional[str] = None
+    derivation_type: Optional[str] = None
+    derivation_operands: Tuple[str, ...] = ()
     # WHY this figure qualified as prospective: the text that established it
     # as forward-looking. Recorded rather than asserted, because "there was a
     # forward-looking word nearby" is exactly the reasoning that turned a
@@ -609,6 +628,23 @@ class GuidanceRelease:
     def statements_for(self, name: str) -> Tuple[GuidanceMetric, ...]:
         """Every current statement of one metric, across horizons."""
         return tuple(m for m in self.all_metrics if m.name == name)
+
+    def with_metrics(self, metrics: Sequence[GuidanceMetric]) -> "GuidanceRelease":
+        """The same filing, read differently.
+
+        Exists so an alternative extraction layer can supply the statements
+        without any consumer downstream learning that it did -- the release is
+        a description of one filing, and which reader produced the statements
+        is not part of that description.
+
+        Both views are rebuilt together. Setting `all_metrics` alone would
+        leave the name-keyed `metrics` holding the previous reader's answer,
+        and every existing consumer reads THAT one, so the two views would
+        disagree about the same filing.
+        """
+        statements = tuple(metrics)
+        return replace(self, metrics=name_keyed_view(statements),
+                       all_metrics=statements)
 
     def to_dict(self) -> dict:
         return {
@@ -1703,7 +1739,7 @@ def _qualified_bare_figure(window: str, lookbehind: str, require_percent: bool):
 # word "to" -- where the two ends carry DIFFERENT units. A unit distributes
 # only when the other end carries no unit at all: no currency sign and no
 # scale word anywhere in the matched span.
-_CURRENCY_OR_SCALE = re.compile(r"(?i)\$|(?:billion|million|bn|mm)s?")
+_CURRENCY_OR_SCALE = re.compile(r"(?i)\$|\b(?:billion|million|bn|mm)s?\b")
 
 
 def _percent_unit_distributes(matched: str) -> bool:
@@ -1875,7 +1911,7 @@ _REPORTED_BLOCK_REACH = 700
 # "Three Months Ended" block reached over the whole table and the company's
 # own full-year outlook was refused as reported results.
 _REPORTED_BLOCK_TERMINATOR_RE = re.compile(
-    r"(?i)outlook|guidance|we\s+expect|the\s+company\s+expects")
+    r"(?i)\boutlook\b|\bguidance\b|\bwe\s+expect\b|\bthe\s+company\s+expects\b")
 
 
 def _reported_block_spans(text):

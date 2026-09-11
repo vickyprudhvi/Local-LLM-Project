@@ -43,3 +43,8 @@ fixture_verify.log
 # and never to be committed (they hold provider responses, not secrets, but there
 # is no reason for them to be in the repository).
 app_data/finance_cache/
+
+# Live extraction-benchmark model responses. A local measurement cache,
+# not source: it is keyed on model identity and would go stale on any model
+# change, and it holds raw model output.
+app_data/extraction_benchmark_cache.json

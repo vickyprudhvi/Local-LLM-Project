@@ -49,6 +49,7 @@ from finance import report_model as report_model_module
 from finance import entity as entity_module
 from finance import suitability as suitability_module
 from finance.evidence import build_evidence_index
+from finance import actualization_runtime
 from finance.freshness import (
     DCF_CURRENT_GUIDANCE_NOT_CONSIDERED,
     DCF_STALE_BALANCE_SHEET_INPUT,
@@ -1589,6 +1590,38 @@ def _growth_source_texts(sec_extras):
     return texts
 
 
+def _reported_actual_candidates(symbol, sec_extras, state, company_facts):
+    """(candidates, facts overlay, observation). Non-fatal in every failure mode.
+
+    Reads filed earnings-release exhibits so the Actualization resolver can
+    see a reported period the SEC CompanyFacts API does not carry. Under the
+    default mode nothing is fetched and nothing is attached, so a normal run
+    is byte-for-byte what it was.
+
+    A failure here degrades the run to what the CompanyFacts path alone can
+    see -- which is today's behaviour -- and is recorded rather than raised.
+    Refusing to produce a report because an optional source was unreachable
+    would be a worse answer than the one this project already gives.
+    """
+    from finance.reported_actuals import runtime as reported_actuals_runtime
+    from tools import config as config_module
+
+    if config_module.finance_reported_actuals_mode() ==             reported_actuals_runtime.ReportedActualsMode.V1:
+        return (), {}, None
+    try:
+        result = reported_actuals_runtime.discover_release_candidates(
+            symbol, (sec_extras or {}).get("submissions"),
+            companyfacts_latest_period=(state.latest_quarterly_period
+                                        or state.latest_annual_period),
+            company_facts=company_facts,
+            as_of=state.valuation_date)
+    except Exception as failure:                              # noqa: BLE001
+        return (), {}, {"mode": config_module.finance_reported_actuals_mode(),
+                        "failure_code": "REPORTED_ACTUALS_SOURCE_FAILED",
+                        "notes": [f"{type(failure).__name__}: {failure}"]}
+    return result.candidates, result.facts_overlay, result.observation.to_dict()
+
+
 def _dcf_inputs_from_facts(symbol, facts, forecast_years):
     """Assemble DCF equity-bridge inputs from normalized data (Problem 3).
     Returns None when a REQUIRED input is genuinely unavailable — never a
@@ -2081,6 +2114,30 @@ def _run_validated_dcf(executor, packet, step=99):
     return _call_tool(executor, DCF_TOOL_NAME, packet.arguments(), step=step)
 
 
+def _dcf_base_staleness(facts: dict):
+    """(is_stale, assessment). Only the v2 actualization layer may decide this.
+
+    Under v1 there is no resolved actual period to compare against, and under
+    compare V1's answer is the answer -- letting the gate fire there would
+    make compare mode change production behaviour, which is the one thing it
+    must never do.
+    """
+    from finance import actualization
+    from finance.actualization_runtime import ActualizationMode
+
+    observation = facts.get("actualization") or {}
+    if observation.get("layer_used") != ActualizationMode.V2:
+        return False, None
+
+    resolution = facts.get("_actual_state_resolution")
+    current_end = getattr(resolution, "period_end", None)
+    state = facts.get("_current_financial_state")
+    base_end = (getattr(state, "latest_quarterly_period", None)
+                or getattr(state, "latest_annual_period", None))
+    assessment = actualization.assess_dcf_base_freshness(current_end, base_end)
+    return (not assessment.may_be_research_valid), assessment
+
+
 def _valuation_status(facts: dict) -> str:
     """Part 4: the single valuation verdict for this analysis.
 
@@ -2105,7 +2162,11 @@ def _valuation_status(facts: dict) -> str:
         # data completeness and research readiness, which is where a reader
         # looks for it.
         suitability_status=(suitability.get("dcf_suitability")
-                            if suitability.get("assessed", True) else None))
+                            if suitability.get("assessed", True) else None),
+        # §7: a valuation resting on a period the company has since
+        # superseded may not be published as research-valid, however sound
+        # its arithmetic.
+        financial_base_stale=_dcf_base_staleness(facts)[0])
 
 
 def _valuation_unavailable_record(facts: dict, failure) -> dict:
@@ -2292,6 +2353,99 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
                                else DataCompleteness.REDUCED))
         facts["current_financial_state"] = state.to_dict()
         facts["_current_financial_state"] = state
+
+        # Actualization V2 seam. THE single place the current reported period
+        # is decided; the renderer, the research pipeline and the DCF must
+        # never each pick one, which is how two halves of a report end up
+        # describing different quarters.
+        #
+        # Under the default `v1` mode this computes nothing and attaches
+        # nothing: `resolve_actual_state` returns immediately and the payload
+        # above is unchanged. Only an explicitly configured compare/v2 mode
+        # runs the V2 resolver.
+        #
+        # Reported Actuals Source Integration runs FIRST, because the whole
+        # point is that the resolver was choosing correctly among candidates
+        # that could not include the newest earnings release. It is inert
+        # under its own default too, and a failure in it is non-fatal: the
+        # resolver simply sees what CompanyFacts could already show it, which
+        # is what it sees today.
+        (source_candidates, source_facts_overlay,
+         source_observation) = _reported_actual_candidates(
+             symbol, sec_extras, state, company_facts)
+        if source_observation is not None:
+            facts["reported_actual_sources"] = source_observation
+        from finance.reported_actuals import unified as unified_module
+        try:
+            actual_resolution, actual_observation = (
+                actualization_runtime.resolve_actual_state(
+                    company_facts,
+                    v1_period_end=state.latest_quarterly_period
+                    or state.latest_annual_period,
+                    v1_primary_source=None,
+                    as_of=state.valuation_date,
+                    # The V1 state's per-metric periods, so the resolver can
+                    # record a FALLBACK for every metric the newer release
+                    # does not carry -- which is what makes §12's "revenue
+                    # current, cash fallback" answerable downstream.
+                    prior_state_metrics=unified_module.prior_state_metrics(state),
+                    extra_candidates=source_candidates,
+                    extra_facts=source_facts_overlay))
+        except actualization_runtime.ActualizationFailure as failure:
+            # v2 fails closed rather than falling back: a silent fallback
+            # means the report carries whichever layer answered last.
+            actual_resolution = None
+            actual_observation = None
+            warnings.append(
+                f"ACTUALIZATION_UNRESOLVED: {failure.message}")
+        if actual_observation is not None and (
+                actual_observation.mode != actualization_runtime.
+                ActualizationMode.V1 or actual_observation.failure_code):
+            facts["actualization"] = actual_observation.to_dict()
+            facts["_actual_state_resolution"] = actual_resolution
+
+        # -- Unified actual fact set: the selected period and the selected
+        # NUMBERS advance together. When Actualization V2 is the layer of
+        # record and has resolved a period, the CanonicalFinancialState is
+        # REBUILT from the merged fact base (CompanyFacts + the resolved
+        # period's validated reported-actual facts). Everything downstream --
+        # canonical evidence, growth, the DCF packet, research -- already
+        # reads `_current_financial_state`, so they all advance with it.
+        #
+        # Under v1 or compare this is inert: `unified.company_facts is
+        # company_facts`, `unified.active` is False, and the state built above
+        # is untouched -- production output is byte-for-byte what it was.
+        unified = unified_module.build_unified_actual_facts(
+            company_facts, resolution=actual_resolution,
+            observation=actual_observation, facts_overlay=source_facts_overlay,
+            v1_state=state)
+        if unified.active:
+            company_facts = unified.company_facts
+            state = build_current_financial_state(
+                company_facts, symbol,
+                historical_metrics={
+                    name: (entry or {}).get("value")
+                    for name, entry in (facts.get("fundamental_metrics") or {}).items()
+                    if isinstance(entry, dict)},
+                management_guidance=(sec_extras or {}).get("guidance"),
+                submissions=(sec_extras or {}).get("submissions"),
+                data_completeness=(DataCompleteness.COMPLETE
+                                   if plan.mode == AnalysisMode.FULL
+                                   else DataCompleteness.REDUCED))
+            facts["current_financial_state"] = state.to_dict()
+            facts["_current_financial_state"] = state
+            # §13: the rebuilt state is the one selection policy. The unified
+            # fact set's per-metric freshness is finalised from what it
+            # actually selected, not from what the resolver expected.
+            unified.reconcile_with_state(state)
+            for note in unified.notes:
+                warnings.append(f"UNIFIED_ACTUAL_FACTS: {note}")
+        facts["unified_actual_facts"] = unified.to_dict()
+        facts["_unified_actual_facts"] = unified
+        # The requalification map the research-evidence boundary applies so a
+        # fallback metric never wears the word "current" (§16). Empty unless a
+        # per-metric fallback actually occurred.
+        facts["actualization_freshness"] = unified.research_freshness_view()
         # Phase H.9, sections 1-8. One canonical set of CURRENT metrics in
         # its own namespace, so the Snapshot renderer and every research role
         # read the same figures. Before this, `fundamental_metrics` (computed
@@ -2357,6 +2511,31 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
         for finding in canonical.findings:
             warnings.append(f"{finding['code']}: {finding['message']}")
         warnings.extend(canonical.warnings)
+
+        # Hard-safety self-check (§25): what the resolver SAID vs what the
+        # rebuilt state SELECTED, now that canonical evidence exists too. A
+        # clean run produces no findings; each one becomes a warning.
+        if unified.active:
+            from finance import actualization as _act
+            _ttm = _act.reconstruct_ttm(company_facts, state.financial_as_of)
+            _dcf_base = _act.assess_dcf_base_freshness(
+                unified.resolved_period,
+                state.latest_quarterly_period or state.latest_annual_period
+                or state.financial_as_of)
+            _q_ends = {}
+            for _m in ("revenue", "operating_income", "net_income",
+                       "operating_cash_flow", "capital_expenditure"):
+                _built = ttm_module.build_ttm(
+                    company_facts, _m, reference_end=state.financial_as_of)
+                _q_ends[_m] = [span.partition("..")[2]
+                               for span in (_built.quarters_included or ())]
+            for _counter, _details in unified_module.check_hard_safety(
+                    unified, rebuilt_state=state, ttm=_ttm,
+                    canonical_evidence=canonical, dcf_base_assessment=_dcf_base,
+                    ttm_quarter_ends=_q_ends).items():
+                for _detail in _details:
+                    warnings.append(f"{_counter}: {_detail}")
+
         facts["_sec_company_facts"] = company_facts
         facts["management_guidance"] = (sec_extras or {}).get("guidance")
         # Phase H.11, sections 11-14. Coverage per METRIC. One missing row
@@ -4646,6 +4825,13 @@ def build_compact_synthesis_payload(result: AnalysisResult) -> dict:
     # this payload has a budget a real fixture already sits close to.
     if facts.get("dcf_packet_failure"):
         compact["dcf_packet_failure"] = facts["dcf_packet_failure"]
+    # §16: the boundary where research roles receive facts requalifies any
+    # metric a fallback would otherwise let wear the word "current". Present
+    # only when a per-metric fallback actually occurred, so an ordinary
+    # payload is unchanged.
+    freshness = facts.get("actualization_freshness") or {}
+    if freshness.get("requalified"):
+        compact["actualization_freshness"] = freshness
     return compact
 
 

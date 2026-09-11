@@ -598,6 +598,18 @@ class SecCurrentGuidanceTool(_SecTool):
     """
 
     name = "finance.sec.current_guidance"
+
+    @property
+    def timeout_seconds(self):
+        """Derived, because this tool's work depends on the extraction mode.
+
+        A flat 30s (inherited from `_SecTool`) was correct while this tool only
+        fetched and pattern-matched. Once a semantic read can run inside it,
+        the clock has to know that -- otherwise the tool times out and, since
+        guidance is non-fatal, the statements disappear without a word.
+        """
+        return config.finance_guidance_tool_timeout_seconds()
+
     description = (
         # NOTE: says "capex", never "capital expenditure". `shortlist_requires_
         # relevance` gates this tool on a token overlap with the user's message,
@@ -632,6 +644,7 @@ class SecCurrentGuidanceTool(_SecTool):
 
     def execute(self, arguments):
         from finance import guidance as guidance_module
+        from finance.extraction import runtime as extraction_runtime
 
         coordinator, cik, company_name = self._resolve(arguments["symbol"])
         symbol = arguments["symbol"]
@@ -644,6 +657,7 @@ class SecCurrentGuidanceTool(_SecTool):
 
         releases = []
         notes = []
+        extraction_observations = []
         for filing in filings:
             accession = filing["accession"]
             try:
@@ -662,9 +676,16 @@ class SecCurrentGuidanceTool(_SecTool):
             except ToolFailure as failure:
                 notes.append(f"{filing['filed']}: {failure.message}")
                 continue
-            releases.append(guidance_module.extract_guidance_from_text(
+            # Routed through the extraction seam rather than calling V1
+            # directly. Under the default mode (`v1`) this is the same call
+            # it always was; the seam exists so `compare` can measure V2
+            # against it in a live run without V2 deciding anything.
+            release, observation = extraction_runtime.extract_release(
                 guidance_module.html_to_text(exhibit), symbol, accession, document,
-                filing["filed"], expected_fiscal_year=fiscal_year))
+                filing["filed"], fiscal_year=fiscal_year)
+            releases.append(release)
+            if observation.mode != "v1" or observation.failure_code:
+                extraction_observations.append(observation.to_dict())
 
         # Phase H.6: `fiscal_year` is no longer a FILTER. Passing the calendar
         # year and rejecting anything that named a different one is what
@@ -684,6 +705,13 @@ class SecCurrentGuidanceTool(_SecTool):
             "superseded_guidance": [r.to_dict() for r in superseded],
             "releases_examined": len(releases),
             "notes": notes,
+            # §23. Present only when something other than the default ran, so
+            # a normal payload is byte-for-byte what it was. A reader in
+            # compare mode gets the disagreement counts and V2's rejection
+            # codes; a reader in v1 mode is not told about a layer that did
+            # not run.
+            **({"extraction": extraction_observations}
+               if extraction_observations else {}),
             "provenance": submissions.freshness_dict(now),
             "untrusted_content": True, "source_type": "market_data_provider",
             "_log_meta": {"provider": "sec", "dataset": "current_guidance",

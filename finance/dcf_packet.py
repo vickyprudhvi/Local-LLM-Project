@@ -43,10 +43,15 @@ class ValuationStatus:
     MODEL_ARITHMETIC_INVALID = "MODEL_ARITHMETIC_INVALID"
     FORECAST_PATH_INVALID = "FORECAST_PATH_INVALID"
     NOT_APPLICABLE_FOR_BUSINESS_MODEL = "NOT_APPLICABLE_FOR_BUSINESS_MODEL"
+    # The model ran and its arithmetic is sound, but it rests on a period the
+    # company has since superseded. A fifth distinct cause, and not the
+    # model's fault -- which is exactly why it needs its own name rather than
+    # being folded into MODEL_ARITHMETIC_INVALID.
+    FINANCIAL_BASE_STALE = "FINANCIAL_BASE_STALE"
 
     ALL = (VALID_FOR_RESEARCH, LIMITED, INPUT_PACKET_INVALID,
            MODEL_ARITHMETIC_INVALID, FORECAST_PATH_INVALID,
-           NOT_APPLICABLE_FOR_BUSINESS_MODEL)
+           NOT_APPLICABLE_FOR_BUSINESS_MODEL, FINANCIAL_BASE_STALE)
 
 
 # How each status is explained to a reader. The wording is part of the
@@ -65,6 +70,9 @@ STATUS_EXPLANATION = {
         "value. The model is working; the forecast does not support this method.",
     ValuationStatus.NOT_APPLICABLE_FOR_BUSINESS_MODEL:
         "A standard discounted-cash-flow valuation does not apply to this business model.",
+    ValuationStatus.FINANCIAL_BASE_STALE:
+        "The valuation rests on financial results the company has since superseded, "
+        "so it describes a period that is over.",
 }
 
 
@@ -263,7 +271,8 @@ def classify_valuation(*, packet_failure=None,
                        dcf_available: bool = False,
                        dcf_validation_status: Optional[str] = None,
                        business_model=None,
-                       suitability_status: Optional[str] = None) -> str:
+                       suitability_status: Optional[str] = None,
+                       financial_base_stale: bool = False) -> str:
     """One status, decided by cause, in order of what a reader needs first."""
     if getattr(business_model, "standard_fcff_suitability", None) == "NOT_SUITABLE":
         return ValuationStatus.NOT_APPLICABLE_FOR_BUSINESS_MODEL
@@ -276,6 +285,13 @@ def classify_valuation(*, packet_failure=None,
         return ValuationStatus.MODEL_ARITHMETIC_INVALID
     if not dcf_available:
         return ValuationStatus.INPUT_PACKET_INVALID
+    if financial_base_stale:
+        # Ranked BELOW the causes above and ABOVE both LIMITED and
+        # VALID_FOR_RESEARCH. A model that never applied, never ran, or broke
+        # its own arithmetic is a more fundamental fact than one that ran
+        # correctly on old data -- but running on old data still stops the
+        # answer being published.
+        return ValuationStatus.FINANCIAL_BASE_STALE
     if suitability_status in ("LIMITED", "NOT_SUITABLE"):
         return ValuationStatus.LIMITED
     return ValuationStatus.VALID_FOR_RESEARCH

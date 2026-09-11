@@ -652,6 +652,192 @@ def guidance_ingestion_enabled():
     return _bool("GUIDANCE_INGESTION_ENABLED", True)
 
 
+# ---- Finance Extraction V2 ----
+#
+# V2 replaces the natural-language extraction layer only: documents ->
+# candidates. Everything below validated candidates is unchanged. The default
+# stays v1 until the benchmark says otherwise -- a new extractor does not get
+# production by being new.
+
+
+def finance_extraction_mode():
+    """'v1' (default), 'v2', or 'compare'.
+
+    compare runs both and RECORDS the disagreements without choosing between
+    them: the point is measurement, and an extractor that silently won
+    because it was newer would be exactly the thing this mode exists to
+    prevent.
+    """
+    mode = _str("FINANCE_EXTRACTION_MODE", "v1").strip().lower()
+    return mode if mode in ("v1", "v2", "compare") else "v1"
+
+
+def finance_actualization_mode():
+    """'v1' (default), 'v2', or 'compare'.
+
+    Which layer decides the CURRENT REPORTED PERIOD -- the answer everything
+    downstream inherits: revenue, margins, debt, latest-quarter growth, the
+    DCF base, the research claims.
+
+    v1 is the existing planner, unchanged and still the default. compare runs
+    the V2 resolver beside it, RETURNS V1'S ANSWER and records the
+    disagreement; a compare mode that preferred the newer resolver would be
+    v2-by-default wearing a diagnostic's name. v2 uses the V2 resolution and
+    fails closed rather than falling back, because a silent fallback means the
+    report carries whichever layer answered last.
+    """
+    mode = _str("FINANCE_ACTUALIZATION_MODE", "v1").strip().lower()
+    return mode if mode in ("v1", "v2", "compare") else "v1"
+
+
+def finance_reported_actuals_mode():
+    """'v1' (default), 'v2', or 'compare'.
+
+    Whether filed EARNINGS-RELEASE EXHIBITS are read as a source of reported
+    actual results, alongside the SEC CompanyFacts path.
+
+    The Actualization resolver already chooses correctly between a newer
+    complete Q4/FY release and an older Q3 10-Q. What it could not do was see
+    the release: an 8-K earnings exhibit is almost never represented in
+    CompanyFacts, so the candidate it would have selected never reached it.
+
+    v1 fetches nothing and produces no candidate. compare reads the releases
+    and RECORDS what it found without offering the candidates, because a
+    compare mode that changed which period was selected would be v2 by
+    default. v2 offers them to the resolver and fails closed.
+
+    Note that this switch alone changes nothing: under
+    FINANCE_ACTUALIZATION_MODE=v1, which is the production default, the
+    actualization runtime returns before it looks at any candidate.
+    """
+    mode = _str("FINANCE_REPORTED_ACTUALS_MODE", "v1").strip().lower()
+    return mode if mode in ("v1", "v2", "compare") else "v1"
+
+
+def finance_reported_actuals_max_filings():
+    """How many candidate earnings filings one run may read.
+
+    Each costs a filing index and an exhibit, both through the shared cache.
+    Small on purpose: the newest release is the one that can advance the
+    period, and the ones behind it are provenance.
+    """
+    return _int("FINANCE_REPORTED_ACTUALS_MAX_FILINGS", 3)
+
+
+def finance_extraction_max_sections():
+    """How many document sections one extraction may read."""
+    return _int("FINANCE_EXTRACTION_MAX_SECTIONS", 4)
+
+
+def finance_extraction_max_section_chars():
+    """Character budget per section. A whole filing is never sent."""
+    return _int("FINANCE_EXTRACTION_MAX_SECTION_CHARS", 6000)
+
+
+def finance_extraction_max_output_tokens():
+    """Output-token ceiling for one section read.
+
+    1200 was the original guess and it was wrong for the same reason
+    `research_stage_max_output_tokens` documents at length: a reasoning model
+    spends budget on THINKING tokens that never appear in `message.content`.
+    Measured on the configured model, a trivial `{"ok": true}` reply cost 693
+    completion tokens with an empty body at a 100-token cap -- the entire
+    budget consumed before any JSON was emitted. A guidance section is a far
+    larger reading task than that.
+
+    8000 was the first correction and it was still too tight, which the live
+    benchmark showed immediately: on a 2.2k-character semiconductor outlook
+    the model returned completion_tokens=8002 against the 8000 cap with an
+    EMPTY body, twice in a row, and the same on the next case. That is the
+    "permanently at the edge of its budget" pathology
+    `research_stage_max_output_tokens` documents -- a 548-character section
+    had already been measured at 7210 tokens, so 8000 was never headroom.
+
+    20000 is sized from that measurement rather than guessed: ~7.2k tokens of
+    thinking on a small section, and the real sections are up to 6k characters.
+    It is a CEILING, not a target.
+    """
+    return _int("FINANCE_EXTRACTION_MAX_OUTPUT_TOKENS", 20000)
+
+
+def finance_extraction_timeout_seconds():
+    """Wall-clock ceiling for one section read, DERIVED FROM ITS BUDGET.
+
+    The same coupling `research_stage_timeout_seconds` exists to enforce. The
+    extractor previously passed no timeout at all and inherited
+    `brain.ask_local_raw`'s bare 120-second default, so raising the token
+    budget to stop truncation would have silently converted truncation
+    failures into timeout failures. A configured value is a FLOOR: it can
+    raise the limit but cannot sit below what the budget requires.
+    """
+    configured = _int("FINANCE_EXTRACTION_TIMEOUT_SECONDS", 120)
+    derived = (int(finance_extraction_max_output_tokens()
+                   / _ASSUMED_MIN_TOKENS_PER_SECOND)
+               + _STAGE_TIMEOUT_OVERHEAD_SECONDS)
+    return max(configured, derived)
+
+
+def finance_guidance_tool_timeout_seconds():
+    """Wall clock for the whole current-guidance tool, DERIVED FROM ITS WORK.
+
+    The third instance of one bug. `research_stage_timeout_seconds` documents
+    the first two: a budget and the time to spend it drift apart the moment
+    either moves. Here the drift was across a LAYER rather than across two
+    constants -- the tool carried a flat 30s from `_SecTool`, and wiring the
+    semantic extractor into it added a model call of 60-200s per section
+    inside that 30s.
+
+    The result was the worst available failure. `finance.sec.current_guidance`
+    is deliberately non-fatal (workflow.py: "a missing or unreachable earnings
+    release degrades confidence, never the run"), so the tool timed out and
+    every guidance statement SILENTLY VANISHED from the analysis. Found by the
+    canaries, which read empty guidance the moment compare mode was switched
+    on.
+
+    So the tool's clock is now a function of what may run inside it. Under v1
+    nothing extra runs and this is the 30s it always was. The configured value
+    is a FLOOR: it can raise the limit but can no longer sit below what the
+    configured extraction bounds require.
+    """
+    base = _int("FINANCE_GUIDANCE_TOOL_TIMEOUT_SECONDS", 30)
+    if finance_extraction_mode() == "v1":
+        return base
+    # Worst case: every release contributes its full section budget, and each
+    # section takes its full model timeout. Typically far less -- one section
+    # per release at ~60-200s -- but a ceiling that assumes the good case is
+    # the bug this function exists to prevent.
+    return base + (guidance_max_releases()
+                   * finance_extraction_max_sections()
+                   * finance_extraction_timeout_seconds())
+
+
+def finance_extraction_min_confidence():
+    """Below this a candidate is refused as too uncertain to accept.
+
+    Fail closed: an omitted statement costs a reader nothing, and an accepted
+    wrong one is used.
+    """
+    try:
+        return float(os.environ.get("FINANCE_EXTRACTION_MIN_CONFIDENCE", 0.5))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def finance_extraction_model_identity():
+    """A NAME for the model, for cache keys and provenance. Never a secret."""
+    return _str("FINANCE_EXTRACTION_MODEL", _str("LOCAL_MODEL", "local"))
+
+
+def finance_extraction_v1_fallback_enabled():
+    """May a FAILED V2 extraction fall back to V1?
+
+    Off by default (section 20: no silent fallback). When switched on the
+    fallback is labelled in provenance, so a reader can tell which layer
+    answered.
+    """
+    return _bool("FINANCE_EXTRACTION_V1_FALLBACK", False)
+
+
 def research_run_artifacts_enabled():
     """Whether each research-pipeline run is written to disk for replay.
 
