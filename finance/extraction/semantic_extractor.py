@@ -106,9 +106,37 @@ _TABLE_RUN_MIN_NUMERIC_ROWS = 2
 _HAS_DIGIT = re.compile(r"\d")
 
 
-def _looks_like_a_table_row(fragment: str) -> bool:
+def _looks_like_a_table_row(fragment: str, max_words: int = _TABLE_ROW_MAX_WORDS) -> bool:
     words = fragment.split()
-    return 0 < len(words) <= _TABLE_ROW_MAX_WORDS
+    return 0 < len(words) <= max_words
+
+
+# A LIST-INTRO sentence ("For Q3 2026, we anticipate:") establishes prospective
+# context for every item under it. Flattened HTML `<li>` guidance rows become
+# one full sentence each, and each one commonly carries no forward-looking
+# verb of its own -- "Gross Bookings of $58.25 billion to $60.25 billion,
+# representing growth of 18% to 22% YoY on a constant-currency basis." reads
+# as a plain measurement, not an outlook, in isolation. `_FORWARD_SENTENCE`
+# is right to require a verb for a sentence with no established context (a
+# bare "Gross Bookings of $X billion" with no lead-in could just as easily be
+# a reported-results row) -- the gap is that a row under an ALREADY-
+# established list-intro was held to the same bar and silently dropped,
+# taking a live release's Gross Bookings and non-GAAP EPS guidance with it
+# while the two rows that happened to also say "outlook" survived.
+#
+# A trailing colon is the structural signal a list-intro leaves behind
+# regardless of which forward-looking word introduced it, so once one is
+# found the rows beneath it are read under its established context, through
+# the SAME run-absorption mechanism and the SAME stop guards
+# (REPORTED_RESULTS_MARKER, run-length cap, char budget) as a tabulated
+# caption -- only the per-row word allowance is wider, because a guidance row
+# routinely carries a qualifying clause a results-table row never does.
+_LIST_INTRO_RE = re.compile(r":\s*\.?\s*$")
+_LIST_INTRO_ROW_MAX_WORDS = 50
+
+
+def _is_list_intro(fragment: str) -> bool:
+    return bool(_LIST_INTRO_RE.search(fragment.strip()))
 
 
 @dataclass(frozen=True)
@@ -175,10 +203,17 @@ def select_sections(text: str,
         # Absorb the run of short fragments that follows, stopping at the
         # first one long enough to be prose -- which is where the table ends
         # and the safe-harbor footnote begins.
+        #
+        # A list-intro caption ("we anticipate:") gets the wider per-row
+        # allowance above: its rows are full sentences, not flattened table
+        # cells, and a guidance row's qualifying clause routinely runs past
+        # the narrow table-row cap that correctly bounds an actual table.
+        row_max_words = (_LIST_INTRO_ROW_MAX_WORDS if _is_list_intro(fragment)
+                         else _TABLE_ROW_MAX_WORDS)
         run_start, run, numeric_rows = index, [], 0
         while index < len(fragments) and len(run) < _TABLE_RUN_MAX_ROWS:
             row = " ".join(fragments[index].split())
-            if not row or not _looks_like_a_table_row(row):
+            if not row or not _looks_like_a_table_row(row, row_max_words):
                 break
             # A reported-results caption ENDS the run. Without this the rule
             # walked a guidance sentence straight into the condensed income

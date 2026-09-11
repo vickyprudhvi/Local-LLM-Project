@@ -28,6 +28,7 @@ from finance.extraction.schema import (
     ValueType,
 )
 from finance.extraction.semantic_extractor import (
+    DocumentSection,
     ExtractionFailure,
     LocalModelGuidanceExtractor,
     select_sections,
@@ -605,3 +606,169 @@ def test_section_selection_is_bounded():
 def test_no_section_means_no_model_call():
     """Cost bounding: a document with nothing forward-looking is not sent."""
     assert select_sections("Revenue was $67 billion for the year.") == []
+
+
+# ---------------------------------------------------------------------------
+# GENERALIZED READER-RECALL phase. A live release stated next-quarter
+# guidance as "Outlook for Q3 2026 ... For Q3 2026, we anticipate: <revenue-
+# like KPI>, <growth rate>, <adjusted EPS>, <adjusted EBITDA>" and the report
+# came back "management guidance: none extracted". Two independent defects
+# compounded: section selection dropped bulleted rows with no forward verb
+# of their own (covered in test_finance_extraction_section_selection.py),
+# and the ONE candidate that WAS proposed was refused as AMBIGUOUS_TARGET_
+# PERIOD because `parse_target_period` kept a narrower, duplicate regex that
+# required the literal token "FY" and rejected the plain calendar phrasing
+# ("Q3 2026") the release actually used -- while `finance.guidance`'s own
+# canonical resolver, which V1 already relies on, has always accepted it.
+# ---------------------------------------------------------------------------
+
+# Fixture B: next-quarter adjusted EPS in plain calendar-quarter phrasing.
+def test_calendar_quarter_phrasing_resolves_to_the_correct_fiscal_period():
+    metric = _accept(_candidate(
+        metric_id=N.ADJUSTED_EPS, value_type=ValueType.RANGE, low=0.84, high=0.88,
+        unit="PER_SHARE", basis="NON_GAAP",
+        target_period="Q3 2026", target_period_type="QUARTER",
+        source_sentence="Non-GAAP EPS of $0.84 to $0.88."),
+        document="For Q3 2026, we anticipate: Non-GAAP EPS of $0.84 to $0.88.")
+    assert metric.name == N.ADJUSTED_EPS
+    assert metric.fiscal_period == "Q3 FY2026"
+    assert metric.target_period_type == "NEXT_QUARTER"
+    assert metric.basis == "adjusted"
+
+
+@pytest.mark.parametrize("label, expected_label", [
+    ("Q3 2026", "Q3 FY2026"),
+    ("Q3 FY2026", "Q3 FY2026"),
+    ("third quarter 2026", "Q3 FY2026"),
+    ("FY2027", "FY2027"),
+    ("fiscal 2027", "FY2027"),
+])
+def test_the_validator_and_v1_agree_on_every_period_spelling(label, expected_label):
+    """One canonical period resolver, not two disagreeing on the same label."""
+    from finance.extraction.validator import parse_target_period
+    period = parse_target_period(label)
+    assert period is not None, f"{label!r} was rejected as ambiguous"
+    assert period.label == expected_label
+
+
+def test_a_genuinely_ambiguous_period_is_still_refused():
+    """The fix must not turn AMBIGUOUS_TARGET_PERIOD into an always-accept.
+
+    "next year" names no year at all and stays refused -- the canonical
+    resolver is more capable, not less strict.
+    """
+    code, _reason = _reject(_candidate(
+        metric_id=N.CONSOLIDATED_REVENUE, value_type=ValueType.POINT, value=90.0,
+        unit="USD_BILLION", target_period="next year",
+        source_sentence="Next year we expect revenue guidance of $90 billion."))
+    assert code == RejectionCode.AMBIGUOUS_TARGET_PERIOD
+
+
+# Fixture C: an operating KPI unsupported by the revenue taxonomy must not
+# become REVENUE_GROWTH -- neither under its own unsupported name nor
+# re-labelled as revenue_growth by a misreading.
+_BOOKINGS_DOC = ("For Q3 2026, we anticipate: Gross Bookings of $58.25 billion to "
+                 "$60.25 billion, representing growth of 18% to 22% YoY on a "
+                 "constant-currency basis.")
+_BOOKINGS_SENTENCE = ("Gross Bookings of $58.25 billion to $60.25 billion, "
+                      "representing growth of 18% to 22% YoY on a "
+                      "constant-currency basis.")
+
+
+def test_an_unsupported_operating_kpi_is_refused_under_its_own_name():
+    code, reason = _reject(_candidate(
+        metric_id="gross_bookings", value_type=ValueType.RANGE, low=58.25, high=60.25,
+        unit="USD_BILLION", target_period="Q3 2026", target_period_type="QUARTER",
+        basis="NON_GAAP", source_sentence=_BOOKINGS_SENTENCE),
+        document=_BOOKINGS_DOC)
+    assert code == RejectionCode.UNKNOWN_METRIC
+
+
+def test_an_unsupported_operating_kpi_cannot_be_relabelled_as_revenue_growth():
+    """The dangerous direction: the same sentence, proposed AS consolidated
+    revenue growth. Grounding must catch that the sentence names a component
+    KPI, not consolidated revenue, regardless of how the model labels it."""
+    code, reason = _reject(_candidate(
+        metric_id=N.CONSOLIDATED_REVENUE_GROWTH, value_type=ValueType.RANGE,
+        low=18.0, high=22.0, unit="PERCENT",
+        target_period="Q3 2026", target_period_type="QUARTER", basis="NON_GAAP",
+        source_sentence=_BOOKINGS_SENTENCE),
+        document=_BOOKINGS_DOC)
+    assert code == RejectionCode.METRIC_NOT_GROUNDED
+
+
+# Fixture D: a SUPPORTED operating KPI (a segment/component identity the
+# taxonomy does carry) retains its own identity rather than being refused or
+# folded into the consolidated metric.
+def test_a_supported_operating_kpi_keeps_its_own_identity():
+    doc = "For Q3 2026, we anticipate: Cloud segment revenue growth of 20% to 24% YoY."
+    metric = _accept(_candidate(
+        metric_id=N.SEGMENT_REVENUE_GROWTH, value_type=ValueType.RANGE,
+        low=20.0, high=24.0, unit="PERCENT",
+        target_period="Q3 2026", target_period_type="QUARTER", basis="GAAP",
+        source_sentence="Cloud segment revenue growth of 20% to 24% YoY."),
+        document=doc)
+    assert metric.name == N.SEGMENT_REVENUE_GROWTH
+    assert metric.name != N.CONSOLIDATED_REVENUE_GROWTH
+
+
+# Fixture F: GAAP EPS and adjusted (non-GAAP) EPS guided in the same release
+# must both survive, with distinct basis -- neither overwrites the other
+# merely because the metric family is EPS.
+def test_gaap_and_adjusted_eps_both_survive_with_distinct_basis():
+    doc = ("For Q3 2026, we anticipate: GAAP diluted EPS of $0.55 to $0.60. "
+          "Non-GAAP EPS of $0.84 to $0.88.")
+    validator = GuidanceCandidateValidator(document_text=doc, issued_at="2026-08-05")
+    gaap = _candidate(metric_id=N.EPS, value_type=ValueType.RANGE, low=0.55, high=0.60,
+                      unit="PER_SHARE", basis="GAAP",
+                      target_period="Q3 2026", target_period_type="QUARTER",
+                      source_sentence="GAAP diluted EPS of $0.55 to $0.60.")
+    adjusted = _candidate(metric_id=N.ADJUSTED_EPS, value_type=ValueType.RANGE,
+                          low=0.84, high=0.88, unit="PER_SHARE", basis="NON_GAAP",
+                          target_period="Q3 2026", target_period_type="QUARTER",
+                          source_sentence="Non-GAAP EPS of $0.84 to $0.88.")
+    accepted, rejected = validator.validate_all([gaap, adjusted])
+    assert len(accepted) == 2, [(c, code, r) for c, code, r in rejected]
+    names = {m.name for m in accepted}
+    assert names == {N.EPS, N.ADJUSTED_EPS}
+    bases = {m.name: m.basis for m in accepted}
+    assert bases[N.EPS] == "GAAP"
+    assert bases[N.ADJUSTED_EPS] == "adjusted"
+
+
+# Fixture A (reader layer): an outlook with three distinct guided metrics in
+# ONE section must all be proposed and all survive the boundary -- no
+# accidental cross-metric collapsing when several statements share a period.
+def test_three_distinct_guided_metrics_in_one_section_all_survive():
+    section_text = ("For Q3 2026, we anticipate: Segment revenue growth of "
+                    "10% to 14% YoY. Non-GAAP EPS of $0.84 to $0.88. "
+                    "Adjusted EBITDA of $2.86 billion to $2.96 billion.")
+    payload = {"statements": [
+        {"metric_id": "segment_revenue_growth", "value_type": "range",
+         "low": 10.0, "high": 14.0, "unit": "PERCENT", "target_period": "Q3 2026",
+         "target_period_type": "QUARTER", "basis": "GAAP", "action": "NEW",
+         "prospective": True,
+         "source_sentence": "Segment revenue growth of 10% to 14% YoY.",
+         "confidence": 1.0},
+        {"metric_id": "adjusted_earnings_per_share", "value_type": "range",
+         "low": 0.84, "high": 0.88, "unit": "PER_SHARE", "target_period": "Q3 2026",
+         "target_period_type": "QUARTER", "basis": "NON_GAAP", "action": "NEW",
+         "prospective": True, "source_sentence": "Non-GAAP EPS of $0.84 to $0.88.",
+         "confidence": 1.0},
+        {"metric_id": "adjusted_ebitda", "value_type": "range",
+         "low": 2.86, "high": 2.96, "unit": "USD_BILLION", "target_period": "Q3 2026",
+         "target_period_type": "QUARTER", "basis": "NON_GAAP", "action": "NEW",
+         "prospective": True,
+         "source_sentence": "Adjusted EBITDA of $2.86 billion to $2.96 billion.",
+         "confidence": 1.0},
+    ]}
+    extractor = _scripted([payload])
+    sections = [DocumentSection(label="Forward-looking statements", text=section_text,
+                                start=0, end=len(section_text))]
+    candidates = extractor.extract(sections, issued_at="2026-08-05")
+    assert len(candidates) == 3
+    validator = GuidanceCandidateValidator(document_text=section_text, issued_at="2026-08-05")
+    accepted, rejected = validator.validate_all(candidates)
+    assert len(accepted) == 3, [(code, r) for _c, code, r in rejected]
+    names = {m.name for m in accepted}
+    assert names == {N.SEGMENT_REVENUE_GROWTH, N.ADJUSTED_EPS, N.ADJUSTED_EBITDA}

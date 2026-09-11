@@ -476,29 +476,30 @@ def prospective_semantics(candidate: GuidanceCandidate,
         "figure as forward-looking")
 
 
-_PERIOD_LABEL = re.compile(r"(?i)^(?:(Q[1-4])\s+)?FY\s?(\d{4})$")
-
-
 def parse_target_period(label: Optional[str]) -> Optional[gm.GuidancePeriod]:
     """A model-supplied period label to the domain's own period object.
 
     One representation for actual periods, guidance targets and comparison
-    periods (§13). A label this cannot parse is ambiguous and is refused
-    rather than guessed at.
+    periods (section 13) -- `finance.guidance.parse_guidance_period`, the
+    SAME canonical resolver V1 already uses to read a period straight out of
+    release prose. This module previously kept its own narrower regex
+    (`^(?:(Q[1-4])\\s+)?FY\\s?(\\d{4})$`), which required the literal token
+    "FY" and rejected the plain calendar phrasing a release actually uses --
+    "Outlook for Q3 2026" / "For Q3 2026, we anticipate: ... Adjusted EBITDA
+    of $2.86 billion to $2.96 billion." The model correctly transcribed the
+    period exactly as written; the duplicated, narrower parser is what
+    turned a well-formed, unambiguous next-quarter statement into
+    AMBIGUOUS_TARGET_PERIOD. Two period parsers disagreeing on the same
+    label is the same class of bug as two concept maps disagreeing on the
+    same field -- one of them is authoritative and the other should not
+    exist.
+
+    A label this cannot parse is ambiguous and is refused rather than
+    guessed at, exactly as before.
     """
     if not label:
         return None
-    match = _PERIOD_LABEL.match(label.strip())
-    if match is None:
-        return None
-    quarter, year = match.group(1), int(match.group(2))
-    if quarter:
-        return gm.GuidancePeriod(label=f"{quarter.upper()} FY{year}",
-                                 period_type=gm.GuidancePeriodType.QUARTER,
-                                 fiscal_year=year, quarter=int(quarter[1]))
-    return gm.GuidancePeriod(label=f"FY{year}",
-                             period_type=gm.GuidancePeriodType.ANNUAL,
-                             fiscal_year=year)
+    return gm.parse_guidance_period(label.strip(), "")
 
 
 # ---------------------------------------------------------------------------

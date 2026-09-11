@@ -229,6 +229,85 @@ def test_the_section_stays_within_its_character_budget():
 
 
 # ---------------------------------------------------------------------------
+# A list-intro colon establishes context for the rows beneath it (§ the
+# REPORTING-CURRENCY... no -- the READER-RECALL phase: a live release stated
+# "For Q3 2026, we anticipate:" followed by one full sentence per guided
+# metric, several of which carried no forward-looking verb of their own
+# ("Gross Bookings of $58.25 billion to $60.25 billion, representing growth
+# of 18% to 22% YoY..."). Those rows are prose, not table cells, so the
+# existing 12-word table-row cap silently dropped them -- while the two rows
+# that happened to also say "outlook" survived, producing a management-
+# guidance report that looked complete while missing most of what the
+# release actually guided.
+# ---------------------------------------------------------------------------
+
+LIST_INTRO = (
+    "Outlook for Q4 . "
+    "For Q4, we anticipate: . "
+    "Segment revenue of $5.0 billion to $5.5 billion, representing growth "
+    "of 10% to 14% YoY on a constant-currency basis. "
+    "Our outlook assumes typical seasonal demand patterns. "
+    "Adjusted diluted EPS of $0.40 to $0.44, representing growth of 12% to "
+    "18% YoY. "
+    "Our outlook translates to Adjusted EBITDA of $700 million to $740 "
+    "million. "
+)
+
+
+def test_a_colon_list_intro_pulls_in_prose_rows_with_no_forward_vocabulary():
+    """The defect: a guidance row inherits its lead-in's prospective context
+    and must reach the reader even though it names no verb of its own."""
+    body = _sent(LIST_INTRO)
+    assert "5.0 billion to $5.5 billion" in body, "revenue-like guidance dropped"
+    assert "growth of 10% to 14%" in body, "growth-rate guidance dropped"
+    assert "0.40 to $0.44" in body, "EPS guidance dropped"
+    assert "700 million to $740" in body, "EBITDA guidance survives (control)"
+
+
+def test_list_intro_absorption_still_stops_at_a_reported_results_table():
+    """The wider per-row allowance must not reopen the historical-table hole
+    `test_a_results_table_below_a_guidance_sentence_is_not_absorbed` closed."""
+    text = (LIST_INTRO
+            + "Condensed Consolidated Statements of Income . "
+              "Three Months Ended April 30, Twelve Months Ended April 30, . "
+              "Total revenue $ 4,571,779 $ 3,992,758 . ")
+    body = _sent(text)
+    assert "Consolidated Statements of Income" not in body
+    assert "Three Months Ended" not in body
+    assert "4,571,779" not in body
+    # ...while the outlook rows before it still arrive.
+    assert "700 million to $740" in body
+
+
+def test_list_intro_absorption_still_respects_the_char_budget():
+    rows = " ".join(
+        f"Segment {n} revenue of $1.0 billion to $2.0 billion, representing "
+        f"growth of {n}% to {n + 2}% YoY on a constant-currency basis."
+        for n in range(200))
+    text = "For next quarter, we anticipate: " + rows
+    sections = select_sections(text, max_chars=800)
+    assert sections
+    assert all(len(s.text) <= 800 for s in sections), [len(s.text) for s in sections]
+
+
+def test_a_forward_sentence_without_a_colon_keeps_the_narrow_table_cap():
+    """The widened allowance is keyed on the colon, not on every seed.
+
+    A plain forward-looking sentence with no list-intro colon must keep the
+    existing behaviour exactly: a long prose sentence after it is not a table
+    row and is not absorbed, regardless of its word count.
+    """
+    text = ("We expect continued momentum next year. "
+            "The company operates in a highly competitive market where "
+            "pricing pressure and customer concentration remain relevant "
+            "considerations for the periods ahead and management continues "
+            "to monitor macroeconomic conditions closely across all regions. ")
+    body = _sent(text)
+    assert "expect continued momentum" in body
+    assert "highly competitive market" not in body
+
+
+# ---------------------------------------------------------------------------
 # No regression on the path that already worked
 # ---------------------------------------------------------------------------
 
