@@ -50,6 +50,7 @@ from finance import entity as entity_module
 from finance import suitability as suitability_module
 from finance.evidence import build_evidence_index
 from finance import actualization_runtime
+from finance import reporting_currency
 from finance.freshness import (
     DCF_CURRENT_GUIDANCE_NOT_CONSIDERED,
     DCF_STALE_BALANCE_SHEET_INPUT,
@@ -2149,6 +2150,10 @@ def _valuation_status(facts: dict) -> str:
     dcf = facts.get("dcf") or {}
     failure = facts.get("dcf_packet_failure")
     suitability = facts.get("dcf_suitability") or {}
+    state = facts.get("_current_financial_state")
+    currency_status = getattr(state, "reporting_currency_status", None)
+    currency_blocks_current_state = (
+        currency_status in reporting_currency.ReportingSeriesStatus.BLOCKS_CURRENT_STATE)
     return dcf_packet.classify_valuation(
         packet_failure=failure,
         dcf_available=bool(dcf.get("available")),
@@ -2165,8 +2170,11 @@ def _valuation_status(facts: dict) -> str:
                             if suitability.get("assessed", True) else None),
         # §7: a valuation resting on a period the company has since
         # superseded may not be published as research-valid, however sound
-        # its arithmetic.
-        financial_base_stale=_dcf_base_staleness(facts)[0])
+        # its arithmetic. REPORTING_CURRENCY_SERIES_SELECTION is the same
+        # rule applied to a currency switch: the financial base is a real,
+        # completed period, just not the one the issuer's own statements
+        # currently report in.
+        financial_base_stale=_dcf_base_staleness(facts)[0] or currency_blocks_current_state)
 
 
 def _valuation_unavailable_record(facts: dict, failure) -> dict:
@@ -3392,6 +3400,18 @@ def _freshness_readiness_signals(facts: dict) -> Tuple[List[str], List[str]]:
     note = state.get("reporting_framework_note")
     if note:
         limiting.append(note)
+
+    # REPORTING_CURRENCY_SERIES_SELECTION: a readable (USD) series exists but
+    # has been superseded by a newer, incompatible-currency series (or the
+    # current period is genuinely ambiguous between currencies). Section 20:
+    # research readiness must reflect this, not merely a limiting caveat --
+    # the "current" figures above are not the issuer's current state at all.
+    currency_status = state.get("reporting_currency_status")
+    if currency_status in reporting_currency.ReportingSeriesStatus.BLOCKS_CURRENT_STATE:
+        resolution = state.get("reporting_currency_resolution") or {}
+        blocking.append(resolution.get("resolution_reason") or note or (
+            "This issuer's current reporting currency could not be reconciled with the "
+            "financial series this analysis is anchored to."))
 
     revenue = (state.get("flows") or {}).get("revenue") or {}
     ttm = revenue.get("ttm") or {}

@@ -48,6 +48,7 @@ import tools.config as config
 from finance import net_debt as nd
 from finance import period_facts as pf
 from finance import profitability as prof
+from finance import reporting_currency as reporting_currency_module
 from finance import structural_breaks as sb
 from finance import taxonomy as taxonomy_module
 from finance import ttm as ttm_module
@@ -651,6 +652,14 @@ class CurrentFinancialState:
     # Phase H.7 additions.
     taxonomy: Optional[str] = None
     reporting_framework_note: Optional[str] = None
+    # REPORTING_CURRENCY_SERIES_SELECTION phase. `reporting_currency_status`
+    # is one of finance/reporting_currency.py::ReportingSeriesStatus; a value
+    # in `BLOCKS_CURRENT_STATE` means a readable (USD) series exists but a
+    # newer, incompatible-currency series has superseded it, so this state
+    # must not be treated as current downstream (see `valuation_freshness`
+    # below, and finance/dcf_packet.py's FINANCIAL_BASE_STALE gate).
+    reporting_currency_status: Optional[str] = None
+    reporting_currency_resolution: Optional[dict] = None
     # Phase H.8. Reported and normalized profitability, side by side, with
     # every unusual-item adjustment itemized (sections 1-5).
     profitability: Optional[dict] = None
@@ -703,6 +712,8 @@ class CurrentFinancialState:
             "taxonomy": self.taxonomy,
             "reporting_framework_note": self.reporting_framework_note,
             "profitability": self.profitability,
+            "reporting_currency_status": self.reporting_currency_status,
+            "reporting_currency_resolution": self.reporting_currency_resolution,
         }
 
 
@@ -743,6 +754,16 @@ def build_current_financial_state(company_facts: dict, symbol: str,
     balance, warnings = planner.select_balance_sheet()
     framework_note = (taxonomy_module.unsupported_taxonomy_reason(company_facts)
                       or taxonomy_module.reporting_currency_note(company_facts))
+    # REPORTING_CURRENCY_SERIES_SELECTION: the ONE place this is decided (see
+    # finance/reporting_currency.py's module docstring for the failure this
+    # closes). `reporting_currency_note` above only fires when NO USD fact
+    # exists anywhere in the issuer's history; it stays silent for an issuer
+    # that reported in USD for years and then switched -- exactly the case
+    # that requires this resolver.
+    currency_resolution = reporting_currency_module.resolve_reporting_series(company_facts)
+    if (currency_resolution.selection_status
+            in reporting_currency_module.ReportingSeriesStatus.BLOCKS_CURRENT_STATE):
+        framework_note = framework_note or currency_resolution.resolution_reason
     if framework_note:
         # Phase H.7: without this the pipeline reported "this company
         # published no financials", which is a far stronger claim than "this
@@ -899,7 +920,9 @@ def build_current_financial_state(company_facts: dict, symbol: str,
     findings.extend(profitability_state.findings)
     warnings.extend(profitability_state.warnings)
 
-    freshness = _classify_valuation_freshness(findings, balance, flows, bs_date, annual_end)
+    freshness = _classify_valuation_freshness(
+        findings, balance, flows, bs_date, annual_end,
+        currency_status=currency_resolution.selection_status)
 
     audit = _build_freshness_audit(
         symbol, valuation_date, flows, bs_date, annual_end, quarterly_end,
@@ -929,6 +952,8 @@ def build_current_financial_state(company_facts: dict, symbol: str,
         reporting_framework_note=framework_note,
         post_balance_sheet_events=tuple(e.to_dict() for e in all_events),
         freshness_audit=audit,
+        reporting_currency_status=currency_resolution.selection_status,
+        reporting_currency_resolution=currency_resolution.to_dict(),
     )
 
 
@@ -1159,8 +1184,16 @@ def _debt_change_finding(company_facts: dict, total_debt: SelectedValue,
         current_as_of=total_debt.as_of_date)
 
 
-def _classify_valuation_freshness(findings, balance, flows, bs_date, annual_end) -> str:
+def _classify_valuation_freshness(findings, balance, flows, bs_date, annual_end,
+                                  currency_status: Optional[str] = None) -> str:
     """Section 13. Distinct from data completeness — see the module docstring."""
+    if currency_status in reporting_currency_module.ReportingSeriesStatus.BLOCKS_CURRENT_STATE:
+        # REPORTING_CURRENCY_SERIES_SELECTION: whatever balance/flow figures
+        # were selected below come from a currency series the issuer has
+        # since superseded (or one that cannot be disambiguated at all). They
+        # are not a valid "current" state at any freshness grade above this.
+        return ValuationFreshness.STALE_INVALID
+
     codes = {f["code"] for f in findings}
     if (DCF_STALE_BALANCE_SHEET_INPUT in codes or DCF_STALE_FLOW_INPUT in codes
             or DCF_CURRENT_GUIDANCE_NOT_CONSIDERED in codes):
