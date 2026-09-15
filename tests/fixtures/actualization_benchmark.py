@@ -655,7 +655,7 @@ ALL_CASES: Tuple[ActualizationCase, ...] = (
         description="FY results arrive against FY guidance and next-year guidance.",
         filings=HISTORY_THROUGH_Q3 + (_q4_release(), _fy_10k()),
         as_of="2026-11-01",
-        guidance=(GuidanceStatement("revenue", "FY"),
+        guidance=(GuidanceStatement("revenue", "FY2026"),
                   GuidanceStatement("revenue", "Q1 FY2027"),
                   GuidanceStatement("earnings_per_share", "FY2027")),
         dcf_base_period_end=Q4_FY26_END,

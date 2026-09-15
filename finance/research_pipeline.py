@@ -442,8 +442,18 @@ def _carries_content(text) -> bool:
     `statement`, the fields a reader actually reads -- accepted anything that
     was not whitespace. A live report rendered a blank Bull Case bullet
     through the second while the first was working perfectly.
+
+    Delegates the placeholder-WORD/PHRASE half of the rule to
+    `finance.content_policy.carries_content` -- the SAME check `finance.
+    report_model._reject_empty` applies at report construction. A THIRD
+    divergent rule here (length only) is what let a boilerplate non-answer
+    well past `_MIN_CLAIM_CHARS` ("Not applicable at this time.") pass
+    validation and reach compact output as a real-looking bullet, when the
+    later, structural gate would have refused it -- too late, after
+    publication, to matter.
     """
-    return isinstance(text, str) and len(text.strip()) >= _MIN_CLAIM_CHARS
+    from finance.content_policy import carries_content
+    return carries_content(text, min_chars=_MIN_CLAIM_CHARS)
 
 
 def _claim_text(container, key, max_len):
@@ -477,7 +487,7 @@ def _string_list(d, key, min_items=0, max_items=6, max_len=400):
     if not isinstance(v, list):
         raise _Invalid(f"'{key}' must be a list")
     kept = [str(x).strip()[:max_len] for x in v[:max_items]
-            if isinstance(x, str) and len(x.strip()) >= _MIN_CLAIM_CHARS]
+            if isinstance(x, str) and _carries_content(x)]
     if len(kept) < min_items:
         raise _Invalid(
             f"'{key}' must have at least {min_items} item(s) with actual content; "
@@ -689,6 +699,38 @@ _SEMANTIC_STUB_TEXT = (
     "[withheld: this passage drew a conclusion the metric does not support for this "
     "business model and was removed by automated screening]")
 
+# A leaked internal reference is a different fault again -- the conclusion may
+# be perfectly correct, the sentence just names something inside this program
+# (a field path, an enum constant a stage read off the evidence packet) rather
+# than something a reader can act on. Reusing `_SEMANTIC_STUB_TEXT`'s wording
+# ("does not support for this business model") would misdescribe the fault.
+_INTERNAL_REFERENCE_LABEL = "INTERNAL_IMPLEMENTATION_REFERENCE"
+_INTERNAL_REFERENCE_STUB_TEXT = (
+    "[withheld: this passage named something internal to this program rather than "
+    "something a reader can act on, and was removed by automated screening]")
+
+# Two more faults with the same consequence and their own wording. Both are
+# checked against AVAILABILITY (does the cited horizon/kind exist at all in
+# this run's evidence), never against wording tone or a claimed NUMBER, which
+# is what makes them SEMANTIC_MISUSE rather than OVERSTATEMENT: the verdict
+# comes from what this analysis actually built, not a judgment call that
+# could reasonably go either way.
+_GUIDANCE_HORIZON_STUB_TEXT = (
+    "[withheld: this passage described management guidance as covering a period "
+    "the company did not guide, and was removed by automated screening]")
+_GROWTH_FREQUENCY_STUB_TEXT = (
+    "[withheld: this passage described a growth rate using a period this analysis "
+    "could not build, and was removed by automated screening]")
+
+# Label -> replacement text. Falls back to `_SEMANTIC_STUB_TEXT` for every
+# existing SEMANTIC_MISUSE producer (business-model misuse, stale citation),
+# so this is additive and changes no existing wording.
+_SEMANTIC_STUB_TEXT_BY_LABEL = {
+    _INTERNAL_REFERENCE_LABEL: _INTERNAL_REFERENCE_STUB_TEXT,
+    "GUIDANCE_PERIOD_MISSTATED": _GUIDANCE_HORIZON_STUB_TEXT,
+    "GROWTH_FREQUENCY_MISMATCH": _GROWTH_FREQUENCY_STUB_TEXT,
+}
+
 # Keyed by the FIELD NAME as it appears at the top level of a stage's
 # validated output (list indices and nested keys are resolved to their root
 # field before lookup). Anything not listed defaults to DROP.
@@ -811,7 +853,7 @@ def apply_quarantine(validated: dict, findings) -> Tuple[dict, List[dict], List]
                   else _policy_for(finding.field_path))
         applied = _remove_at_path(
             output, finding.field_path, stub=(policy == QUARANTINE_STUB),
-            stub_text=(_SEMANTIC_STUB_TEXT
+            stub_text=(_SEMANTIC_STUB_TEXT_BY_LABEL.get(finding.label, _SEMANTIC_STUB_TEXT)
                        if finding.severity == cp_module.Severity.SEMANTIC_MISUSE else None))
         if not applied:
             continue
@@ -945,7 +987,10 @@ def _validate_claim_fidelity(validated: dict, index) -> dict:
     # stage -- survives.
     findings = (findings
                 + _business_model_claim_findings(validated, index)
-                + _stale_citation_findings(validated, index))
+                + _stale_citation_findings(validated, index)
+                + _internal_reference_findings(validated)
+                + _guidance_horizon_findings(validated, index)
+                + _growth_frequency_findings(validated, index))
 
     # Phase H.5, Phase 2: OVERSTATEMENT findings quarantine their field; only
     # FABRICATION (and overstatement on a FAIL-policy field) still fails the
@@ -1197,6 +1242,156 @@ def _business_model_claim_findings(validated, index) -> list:
                 severity=Severity.SEMANTIC_MISUSE,
                 field_path=field_path,
                 matched_span=(violation.get("metric_id") or "")))
+    return findings
+
+
+def _guidance_metrics_from_index(index) -> dict:
+    """Reconstruct a `finance.claim_validation.scan_for_guidance_period_
+    mismatch`-shaped dict from the flat evidence index, rather than adding a
+    `guidance_metrics` parameter to every one of this module's five call
+    sites. `finance/evidence.py::build_evidence_index` already indexes every
+    current guidance statement under `dcf.guidance.<name>.<period>.current`,
+    each carrying its own canonical `fiscal_period` label
+    (`source_periods[0]`) -- the SAME label `finance.guidance.
+    parse_guidance_period` already knows how to read, so classifying it
+    QUARTER vs ANNUAL here is the canonical resolver again, never a second
+    guess at what the label means.
+    """
+    from finance.guidance import parse_guidance_period, GuidancePeriodType
+
+    metrics = {}
+    for evidence_id, item in (index or {}).items():
+        if not evidence_id.startswith("dcf.guidance.") or not evidence_id.endswith(".current"):
+            continue
+        periods = getattr(item, "source_periods", None) or []
+        label = periods[0] if periods else None
+        if not label:
+            continue
+        period = parse_guidance_period(label, "")
+        target_period_type = (
+            "CURRENT_FISCAL_YEAR" if period and period.period_type == GuidancePeriodType.ANNUAL
+            else "NEXT_QUARTER" if period and period.period_type == GuidancePeriodType.QUARTER
+            else "OTHER")
+        metrics[evidence_id] = {"target_period": label, "fiscal_period": label,
+                                "target_period_type": target_period_type}
+    return metrics
+
+
+def _guidance_horizon_findings(validated, index) -> list:
+    """A claim describing guidance as full-year merely because a quarterly
+    label and an annual label share the same year token (both say "2026").
+
+    `finance.claim_validation.scan_for_guidance_period_mismatch` already
+    implements this rule and was never called from anywhere in the pipeline
+    -- the same "built, tested in isolation, never wired" shape as
+    `finance.actualization.retire_realized_guidance`.
+    """
+    from finance.claim_validation import (
+        GUIDANCE_PERIOD_MISMATCH_RULE_ID, scan_for_guidance_period_mismatch)
+    from finance.content_policy import Finding, Severity, _is_prose_field, _walk_fields
+
+    guidance_metrics = _guidance_metrics_from_index(index)
+    if not guidance_metrics:
+        return []
+
+    findings = []
+    for field_path, text in _walk_fields(validated):
+        if not _is_prose_field(field_path):
+            continue
+        for label in scan_for_guidance_period_mismatch(text, guidance_metrics):
+            findings.append(Finding(
+                rule_id=GUIDANCE_PERIOD_MISMATCH_RULE_ID, label=label,
+                severity=Severity.SEMANTIC_MISUSE, field_path=field_path,
+                matched_span=text[:60]))
+    return findings
+
+
+# Item 2: a growth claim must not name a period/frequency this run could not
+# actually build. `finance.growth` computes TTM_YOY, LATEST_QUARTER_YOY and
+# FY_YOY independently and `finance.canonical` publishes only the kinds that
+# succeeded, each under its OWN evidence id (see finance/canonical.py,
+# section "the growth family, each member under its own id") -- so a claim
+# naming a kind that was never published is describing a fact this analysis
+# never had, which is exactly what happened live: TTM growth could not be
+# built, only the latest-quarter figure could, and a claim called that figure
+# "TTM revenue growth" anyway.
+_GROWTH_ATTRIBUTION_RE = re.compile(
+    r"(?i)\brevenue\s+growth\b|\bgrowth\s+(?:of|rate)\b|\bgrew\b\s+\d|\byoy\b|"
+    r"\byear[\s-]over[\s-]year\b")
+_GROWTH_KIND_VOCAB = (
+    ("TTM", re.compile(r"(?i)\btrailing[\s-]twelve[\s-]months?\b|\bTTM\b"),
+     "current.revenue_growth_ttm_yoy_growth"),
+    ("LATEST_QUARTER", re.compile(
+        r"(?i)\blatest\s+quarter\b|\bmost\s+recent\s+quarter\b|\bQ[1-4]\s+(?:FY\s?)?20\d{2}\b"),
+     "current.revenue_growth_latest_quarter_yoy_growth"),
+    ("FULL_YEAR", re.compile(
+        r"(?i)\bfull[\s-]year\b|\bfull\s+fiscal\s+year\b|\blast\s+fiscal\s+year\b"),
+     "historical.revenue_growth_fy_yoy_growth"),
+)
+GROWTH_FREQUENCY_MISMATCH_RULE_ID = "CV-603"
+GROWTH_FREQUENCY_MISMATCH_LABEL = "GROWTH_FREQUENCY_MISMATCH"
+
+
+def _growth_frequency_findings(validated, index) -> list:
+    """A growth claim naming a kind (TTM / latest-quarter / full-year) this
+    run never published for that metric is describing a fact it never had --
+    checked against availability, never against the claimed NUMBER (this
+    module's claim-fidelity checks are deliberately never numeric)."""
+    from finance.content_policy import Finding, Severity, _is_prose_field, _walk_fields
+
+    findings = []
+    for field_path, text in _walk_fields(validated):
+        if not _is_prose_field(field_path) or not _GROWTH_ATTRIBUTION_RE.search(text):
+            continue
+        for _kind, vocab, evidence_id in _GROWTH_KIND_VOCAB:
+            if not vocab.search(text):
+                continue
+            if (index or {}).get(evidence_id) is not None:
+                continue
+            findings.append(Finding(
+                rule_id=GROWTH_FREQUENCY_MISMATCH_RULE_ID,
+                label=GROWTH_FREQUENCY_MISMATCH_LABEL,
+                severity=Severity.SEMANTIC_MISUSE, field_path=field_path,
+                matched_span=text[:60]))
+            break
+    return findings
+
+
+def _internal_reference_findings(validated) -> list:
+    """Every leaked internal-implementation reference, as quarantinable Findings.
+
+    `finance/report_model.py::_reject_empty` already refuses to CONSTRUCT a
+    report carrying one of these -- a live run crashed there uncaught, on
+    `limiting_factors` text a stage wrote that named an internal enum
+    constant it had read off the evidence packet. That check is the right
+    LAST boundary (`report_model.py` is the last place before a reader), but
+    it must not be the ONLY one: section 17 is explicit that a semantic
+    violation in role output is stubbed, never fatal, and an uncaught
+    `ValueError` all the way from stage output to report construction is
+    exactly the cascade-fatal failure that rule exists to prevent.
+
+    Path-aware and applied to every stage's output (via
+    `_validate_claim_fidelity`), not only `final_investment_synthesizer`'s
+    `limiting_factors` -- the field that happened to crash live is one of
+    many free-text fields any stage can write into.
+    """
+    from finance.content_policy import (
+        Finding, Severity, _is_prose_field, _walk_fields, contains_internal_reference)
+
+    findings = []
+    for field_path, text in _walk_fields(validated):
+        # `evidence_ids`/`evidence_cited` legitimately hold literal
+        # "dcf.guidance.x.current"-style ids by design -- they are not prose
+        # and must never be quarantined, or a real citation is destroyed.
+        if not _is_prose_field(field_path):
+            continue
+        if contains_internal_reference(text):
+            findings.append(Finding(
+                rule_id="CP-001",
+                label=_INTERNAL_REFERENCE_LABEL,
+                severity=Severity.SEMANTIC_MISUSE,
+                field_path=field_path,
+                matched_span=text[:40]))
     return findings
 
 

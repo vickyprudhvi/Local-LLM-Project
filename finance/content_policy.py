@@ -51,6 +51,51 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 
+# ---------------------------------------------------------------------------
+# EMPTY-CLAIM PHASE, item 4. ONE rule for "does this string say anything",
+# used by every caller that gates on it -- there were previously two:
+# `finance/report_model.py::_reject_empty` (structural, refuses to CONSTRUCT
+# a report) rejected placeholder WORDS ("n/a", "tbd", ".", ...) with no
+# length floor, while `finance/research_pipeline.py::_string_list` (the
+# validation-time filter that is supposed to keep a placeholder out of the
+# published output in the first place) rejected only text under
+# `_MIN_CLAIM_CHARS` characters. A boilerplate non-answer well past that
+# floor -- "Not applicable at this time." (28 characters) -- cleared the
+# validation-time filter and reached a compact report as a real-looking
+# bullet, because the LATE, structural gate was never consulted at
+# validation time and the EARLY gate did not know the placeholder-word list.
+_PLACEHOLDER_TEXT = frozenset({
+    "", ".", "-", "--", "...", "n/a", "na", "n.a.", "tbd", "tba", "none",
+    "no", "unknown", "?", "pending",
+    # Whole-phrase non-answers a model can use to fill a min_items slot
+    # without saying anything -- caught by PHRASE, since each is well past
+    # any reasonable character-count floor.
+    "not applicable", "not applicable at this time", "no limiting factors",
+    "no limiting factors identified", "no significant limiting factors",
+    "none identified", "none at this time", "not available",
+    "no data available", "no concerns", "no concerns identified",
+    "no known risks", "no known risks identified", "no material concerns",
+    "not currently applicable", "no conditions identified",
+})
+
+
+def carries_content(text, min_chars: int = 1) -> bool:
+    """Is this string an actual claim, or an empty/placeholder non-answer?
+
+    `min_chars` lets a caller keep its own minimum-length floor (research_
+    pipeline.py's claim fields require 12 characters of substance) while
+    sharing the SAME placeholder-word rejection every caller needs -- a
+    string can fail either test independently, and both must agree on the
+    placeholder vocabulary so a bullet that clears one clears both.
+    """
+    if not isinstance(text, str):
+        return False
+    stripped = text.strip()
+    if len(stripped) < min_chars:
+        return False
+    return stripped.lower().rstrip(".") not in _PLACEHOLDER_TEXT
+
+
 class Severity:
     """Phase H.5 (validation rework), Phase 2 — what a match COSTS.
 
@@ -394,6 +439,13 @@ NON_PROSE_FIELDS = frozenset({
     "aggregated_risk", "model_risk", "evidence_balance", "severity",
     "confidence", "claim_type", "claim_id", "role",
     "evidence_cited", "evidence_ids",
+    # Deterministic classification enums, never LLM-authored prose -- same
+    # kind of field as `severity`/`role` above.
+    # `category`: research_pipeline.py::classify_risk_category.
+    # `valuation_method_status`: set from
+    # business_model.valuation_method_status in the evidence index (see
+    # research_pipeline.py::_business_model_policy_from_index).
+    "category", "valuation_method_status",
 })
 
 

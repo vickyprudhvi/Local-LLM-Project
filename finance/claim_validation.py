@@ -738,6 +738,7 @@ def scan_structure_for_unsupported_claims(value, providers_present: Optional[Set
 # section 21.
 
 GUIDANCE_PERIOD_MISSTATED = "GUIDANCE_PERIOD_MISSTATED"
+GUIDANCE_PERIOD_MISMATCH_RULE_ID = "CV-602"
 
 # How a claim spells an ANNUAL horizon, and how it spells a QUARTERLY one.
 # Deliberately narrow: a claim that names no period at all makes no period

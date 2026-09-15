@@ -85,6 +85,49 @@ def test_real_claims_still_validate():
     assert len(out) == 2
 
 
+# ---------------------------------------------------------------------------
+# Item 4 (GENERALIZED READER-RECALL/EMPTY-LIMITING-FACTORS phase). A blank
+# `limiting_factors` bullet reached compact output DESPITE this file's own
+# fix, because a boilerplate NON-ANSWER well past `_MIN_CLAIM_CHARS`
+# ("Not applicable at this time." is 28 characters) cleared
+# `_string_list`'s length-only filter -- the placeholder-WORD rejection
+# `finance.report_model._reject_empty` already knew about lived only at
+# report construction, too late to stop `_string_list` from publishing it.
+# Both now share ONE rule (`finance.content_policy.carries_content`).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("boilerplate", [
+    "Not applicable at this time.",
+    "No limiting factors identified.",
+    "No significant limiting factors.",
+    "None identified.",
+    "Not currently applicable",
+])
+def test_g_a_boilerplate_non_answer_past_the_length_floor_is_still_a_placeholder(
+        boilerplate):
+    assert len(boilerplate.strip()) >= 12, "the fixture must clear the OLD length-only filter"
+    kept = R._string_list({"limiting_factors": [boilerplate]}, "limiting_factors")
+    assert kept == [], f"{boilerplate!r} must not survive as a real limiting factor"
+
+
+def test_a_real_limiting_factor_past_the_length_floor_still_survives():
+    kept = R._string_list(
+        {"limiting_factors": ["Guidance assumes margin expansion not yet evidenced."]},
+        "limiting_factors")
+    assert kept == ["Guidance assumes margin expansion not yet evidenced."]
+
+
+def test_g_the_report_model_still_refuses_the_same_boilerplate_if_it_ever_arrives():
+    """The structural backstop, for the SAME phrase, proving both layers
+    agree rather than one silently being stricter than the other."""
+    with pytest.raises(ValueError, match="empty"):
+        StockAnalysisReportModel(
+            symbol="TEST", status=ReportStatus(headline="**COMPLETE**."),
+            conditions=(("Limiting factors",
+                        ("A real limiting factor about guidance.",
+                         "Not applicable at this time.")),))
+
+
 @pytest.mark.parametrize("blank", ["", "   ", ".", "N/A"])
 def test_a_blank_risk_fails_the_risk_reviewer_schema(blank):
     raw = {

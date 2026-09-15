@@ -770,22 +770,80 @@ class GuidanceActualization:
         }
 
 
-def _metric_summary(metric) -> dict:
-    return {"name": getattr(metric, "name", None),
-            "fiscal_period": getattr(metric, "fiscal_period", None),
-            "status": getattr(metric, "status", None)}
+def _metric_field(metric, name: str, default=None):
+    """One accessor for a live `GuidanceMetric` and its serialized dict form.
 
-
-def _period_end_for(metric, period_ends: Dict[str, str]) -> Optional[str]:
-    """The calendar end of a guided period label, where one is known.
-
-    Taken from the reported candidates rather than computed: the issuer's own
-    fiscal calendar is what decides when "FY2026" ends, and inventing a second
-    fiscal-calendar parser is exactly what §6 of the actualization brief
-    forbids.
+    By the time `workflow.py` has both `management_guidance` and an
+    actualization resolution, guidance has already been serialized to a plain
+    dict by `finance.sec.current_guidance` -- `finance.guidance` never hands
+    back the live object past that tool boundary. A helper that only tried
+    `getattr` would silently read `None` off every field of a dict metric and
+    retire nothing, which is the live failure this function exists to close.
     """
-    label = getattr(metric, "fiscal_period", None)
-    return period_ends.get(label) if label else None
+    if isinstance(metric, dict):
+        return metric.get(name, default)
+    return getattr(metric, name, default)
+
+
+def _metric_summary(metric) -> dict:
+    return {"name": _metric_field(metric, "name"),
+            "fiscal_period": _metric_field(metric, "fiscal_period"),
+            "status": _metric_field(metric, "status")}
+
+
+# SEC XBRL's own fiscal-period vocabulary -- what a `ReportedActualCandidate`
+# actually carries in `fiscal_period` (see finance/extraction/document_
+# resolver.py, which reads it straight off `entry["fp"]`). Never a label a
+# guidance release wrote in its own prose.
+_XBRL_FISCAL_PERIODS = frozenset({"Q1", "Q2", "Q3", "Q4", "FY"})
+
+
+def _candidate_period_key(candidate) -> Optional[Tuple[int, str]]:
+    """(fiscal year, "Q1".."Q4"/"FY") for one reported-actual candidate."""
+    fiscal_year = getattr(candidate, "fiscal_year", None)
+    fiscal_period = (getattr(candidate, "fiscal_period", None) or "").strip().upper()
+    if not fiscal_year or fiscal_period not in _XBRL_FISCAL_PERIODS:
+        return None
+    return (fiscal_year, fiscal_period)
+
+
+def _metric_period_key(metric) -> Optional[Tuple[int, str]]:
+    """(fiscal year, "Q1".."Q4"/"FY") for one guidance metric's TARGET period.
+
+    From `finance.guidance.parse_guidance_period` -- the SAME canonical period
+    resolver `finance/extraction/validator.py::parse_target_period` already
+    delegates to, never a second, independent label parser (that duplication
+    is exactly what silently dropped a real AMBIGUOUS_TARGET_PERIOD rejection
+    in the prior reader-recall phase). A label this cannot parse -- a
+    multi-year framework, a bare "several years" -- fails open: retiring a
+    forecast we cannot confidently match to a reported period would silently
+    drop a live outlook, which is a worse failure than leaving it current one
+    cycle too long.
+    """
+    from finance.guidance import GuidancePeriodType, parse_guidance_period
+
+    label = _metric_field(metric, "fiscal_period")
+    if not label:
+        return None
+    period = parse_guidance_period(label, "")
+    if period is None:
+        return None
+    if period.period_type == GuidancePeriodType.QUARTER and period.quarter:
+        return (period.fiscal_year, f"Q{period.quarter}")
+    if period.period_type == GuidancePeriodType.ANNUAL:
+        return (period.fiscal_year, "FY")
+    return None
+
+
+def _period_end_for(metric, period_ends: Dict[Tuple[int, str], str]) -> Optional[str]:
+    """The calendar end of a guided period, from a reported candidate that
+    covers the SAME (fiscal year, quarter/FY) -- never computed. The
+    issuer's own fiscal calendar is what decides when "Q3 FY2026" ends, and
+    inventing a second fiscal-calendar parser is exactly what §6 of the
+    actualization brief forbids.
+    """
+    key = _metric_period_key(metric)
+    return period_ends.get(key) if key else None
 
 
 def retire_realized_guidance(metrics, resolution) -> GuidanceActualization:
@@ -800,16 +858,19 @@ def retire_realized_guidance(metrics, resolution) -> GuidanceActualization:
 
     result = GuidanceActualization()
     candidates = _resolution_candidates(resolution)
-    period_ends = {c.fiscal_period: c.period_end
-                   for c in candidates if c.fiscal_period and c.period_end}
+    period_ends: Dict[Tuple[int, str], str] = {}
+    for c in candidates:
+        key = _candidate_period_key(c)
+        if key and c.period_end:
+            period_ends[key] = c.period_end
 
     for metric in metrics or ():
-        label = getattr(metric, "fiscal_period", None)
+        label = _metric_field(metric, "fiscal_period")
         target_end = _period_end_for(metric, period_ends)
         if target_end and period_has_actuals(label, target_end, candidates):
             result.realized.append(_with_status(metric, GuidanceStatus.REALIZED))
             result.reasons.append(
-                f"{getattr(metric, 'name', 'a metric')} guidance for {label} is no "
+                f"{_metric_field(metric, 'name', 'a metric')} guidance for {label} is no "
                 f"longer an outlook: actual results for {target_end} have been "
                 "reported. The statement is kept as history.")
         else:
@@ -833,8 +894,11 @@ def _resolution_candidates(resolution) -> list:
 
 def _with_status(metric, status):
     """A copy carrying the new status. `GuidanceMetric` is frozen by design."""
+    reason = "actual results for this period are in"
     if hasattr(metric, "with_status"):
-        return metric.with_status(status, "actual results for this period are in")
+        return metric.with_status(status, reason)
+    if isinstance(metric, dict):
+        return {**metric, "status": status, "status_reason": reason}
     return metric
 
 

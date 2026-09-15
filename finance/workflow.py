@@ -2139,6 +2139,41 @@ def _dcf_base_staleness(facts: dict):
     return (not assessment.may_be_research_valid), assessment
 
 
+def _retire_completed_guidance(guidance_payload, actual_resolution):
+    """A period whose actuals Actualization has resolved cannot remain
+    current guidance -- `finance.actualization.retire_realized_guidance`
+    (Fixture D). It was correct in isolation and, until this wiring, was
+    never called from anywhere in this pipeline: the guidance layer's own
+    supersession only retires a statement when a NEWER release restates it,
+    which does not happen every quarter a company reports, so a completed
+    quarter's guidance could sit in current coverage indefinitely.
+
+    Returns `(updated_payload, reasons)`. `updated_payload` is `None` when
+    nothing changed (v1 has no resolution to check against, under `compare`
+    the point is measurement rather than changing what is current -- the
+    same seam every other Actualization consumer in this module already
+    respects; no guidance at all; or nothing to retire), so the caller's
+    existing `sec_extras["guidance"]` is left untouched byte-for-byte.
+    """
+    if actual_resolution is None or not guidance_payload:
+        return None, []
+
+    from finance import actualization as actualization_module
+
+    all_statements = (guidance_payload.get("all_metrics")
+                      or list((guidance_payload.get("metrics") or {}).values()))
+    retirement = actualization_module.retire_realized_guidance(
+        all_statements, actual_resolution)
+    if not retirement.realized:
+        return None, []
+
+    updated = dict(guidance_payload)
+    updated["all_metrics"] = retirement.current
+    updated["metrics"] = guidance_module.name_keyed_view(retirement.current)
+    updated["realized_guidance"] = retirement.realized
+    return updated, list(retirement.reasons)
+
+
 def _valuation_status(facts: dict) -> str:
     """Part 4: the single valuation verdict for this analysis.
 
@@ -2545,18 +2580,28 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
                     warnings.append(f"{_counter}: {_detail}")
 
         facts["_sec_company_facts"] = company_facts
-        facts["management_guidance"] = (sec_extras or {}).get("guidance")
+
+        guidance_payload, guidance_retirement_reasons = _retire_completed_guidance(
+            (sec_extras or {}).get("guidance"), actual_resolution)
+        if guidance_payload is not None:
+            sec_extras = dict(sec_extras or {})
+            sec_extras["guidance"] = guidance_payload
+        warnings.extend(f"GUIDANCE_RETIRED_REALIZED: {reason}"
+                        for reason in guidance_retirement_reasons)
+        guidance_payload = (sec_extras or {}).get("guidance")
+
+        facts["management_guidance"] = guidance_payload
         # Phase H.11, sections 11-14. Coverage per METRIC. One missing row
         # (revenue) used to speak for the whole matrix, so an issuer with
         # current capital-expenditure guidance was reported as having none.
         facts["guidance_matrix"] = guidance_module.build_guidance_matrix(
-            ((sec_extras or {}).get("guidance") or {}).get("metrics"),
+            (guidance_payload or {}).get("metrics"),
             superseded=(sec_extras or {}).get("superseded_guidance"),
             releases_examined=(sec_extras or {}).get("guidance_releases_examined"),
             # Every current statement, not only the one the name-keyed view
             # had room for. A company that guides a quarter and a full year
             # states more than the per-name projection can show.
-            all_metrics=((sec_extras or {}).get("guidance") or {}).get("all_metrics"))
+            all_metrics=(guidance_payload or {}).get("all_metrics"))
         facts["superseded_guidance"] = (sec_extras or {}).get("superseded_guidance") or []
         # None means ingestion never ran; 0 means it ran and found no
         # earnings release. Collapsing them with `or 0` would erase the

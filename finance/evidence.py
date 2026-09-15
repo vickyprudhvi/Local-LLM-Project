@@ -573,22 +573,41 @@ def build_evidence_index(compact_payload: dict) -> Dict[str, EvidenceItem]:
          compact_payload.get("data_completeness"))
 
     guidance = compact_payload.get("management_guidance") or {}
-    for name, metric in (guidance.get("metrics") or {}).items():
+    # GENERALIZED READER-RECALL / claim-horizon phase: every CURRENT statement,
+    # not only the one the name-keyed `metrics` view had room for -- a company
+    # guiding both a quarter and a full year has both, and each is indexed
+    # under its OWN period so a role citing the quarterly one cannot be
+    # confused with the annual one merely because they share a metric name.
+    # The label states the canonical `fiscal_period` ("Q4 FY2026") rather than
+    # a bare fiscal year ("fiscal 2026") -- the bare year is what let a
+    # quarterly outlook be described as full-year guidance, since both
+    # legitimately contain the token "2026".
+    guidance_statements = (guidance.get("all_metrics")
+                          or list((guidance.get("metrics") or {}).values()))
+    for metric in guidance_statements:
         if not isinstance(metric, dict) or metric.get("low") is None:
             continue
-        index[f"dcf.guidance.{name}.current"] = EvidenceItem(
-            evidence_id=f"dcf.guidance.{name}.current",
+        name = metric.get("name")
+        if not name:
+            continue
+        period_label = metric.get("fiscal_period") or f"fiscal {metric.get('fiscal_year')}"
+        period_slug = (period_label or "").lower().replace(" ", "_")
+        evidence_id = f"dcf.guidance.{name}.{period_slug}.current"
+        index[evidence_id] = EvidenceItem(
+            evidence_id=evidence_id,
             label=(f"Current management guidance: {name.replace('_', ' ')} "
-                   f"(fiscal {metric.get('fiscal_year')}, {metric.get('basis')})"),
+                   f"({period_label}, {metric.get('basis')})"),
             value=f"{metric.get('low')} to {metric.get('high')}",
             evidence_type="management_guidance",
             units=metric.get("unit"),
+            source_periods=[period_label] if period_label else None,
             # FORWARD-LOOKING, and labelled as such on the item itself so no
             # stage can present it as something the company reported.
             source_type="management_guidance",
             derivation=(f"Stated by management in {guidance.get('source_document')} on "
-                        f"{guidance.get('guidance_date')}. This is a forward-looking "
-                        "projection by the company, not a reported historical fact."),
+                        f"{guidance.get('guidance_date')}, for {period_label}. This is a "
+                        "forward-looking projection by the company, not a reported "
+                        "historical fact, and it does not describe any other period."),
         )
 
     # Phase H.9, section 22, made structural. The compact report already

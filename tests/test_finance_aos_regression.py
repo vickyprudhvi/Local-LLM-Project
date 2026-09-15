@@ -390,7 +390,12 @@ def test_guidance_is_citable_and_labelled_forward_looking(wired):
 
     result = run_aos(wired)
     index = build_evidence_index(build_compact_synthesis_payload(result))
-    item = index.get("dcf.guidance.revenue_growth.current")
+    # Section 17/claim-horizon phase: the key is now period-qualified
+    # ("dcf.guidance.revenue_growth.fy2026.current", not the bare
+    # "...revenue_growth.current") so a quarterly and an annual statement of
+    # the same metric are never the same citable id -- find it by prefix.
+    item = next((v for k, v in index.items()
+                if k.startswith("dcf.guidance.revenue_growth.")), None)
     assert item is not None
     assert item.source_type == AssumptionSourceType.MANAGEMENT_GUIDANCE
     assert "forward-looking" in (item.derivation or "").lower()

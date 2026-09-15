@@ -2384,6 +2384,21 @@ _HORIZON_PREFERENCE = {
 }
 
 
+def _statement_field(statement, name: str, default=None):
+    """One accessor for a live `GuidanceMetric` and its serialized dict form.
+
+    A guidance-retirement pass (finance/actualization.py::retire_realized_
+    guidance) may hand back plain dicts -- by the time a caller has both
+    guidance and an actualization resolution, guidance has usually already
+    been serialized past the point where it is still a live object. Selection
+    must produce the SAME answer either way, or which statement wins the
+    name-keyed slot would depend on which layer last touched it.
+    """
+    if isinstance(statement, dict):
+        return statement.get(name, default)
+    return getattr(statement, name, default)
+
+
 def preferred_for_assumption(statements: Sequence[GuidanceMetric]
                              ) -> Optional[GuidanceMetric]:
     """The statement a twelve-month consumer should read, among several.
@@ -2397,9 +2412,9 @@ def preferred_for_assumption(statements: Sequence[GuidanceMetric]
         # newest statement, because that is what supersession means. Sorting
         # the issue date ascending here picked a company's expired
         # next-quarter guidance over the one it had just published.
-        return (_HORIZON_PREFERENCE.get(metric.target_period_type, 5),
-                _descending(metric.issued_at),
-                _descending(metric.fiscal_period))
+        return (_HORIZON_PREFERENCE.get(_statement_field(metric, "target_period_type"), 5),
+                _descending(_statement_field(metric, "issued_at")),
+                _descending(_statement_field(metric, "fiscal_period")))
 
     ranked = sorted(statements, key=rank)
     return ranked[0] if ranked else None
@@ -2424,7 +2439,7 @@ def name_keyed_view(statements: Sequence[GuidanceMetric]) -> Dict[str, GuidanceM
     """The one-per-name projection of a multi-horizon statement set."""
     by_name: Dict[str, List[GuidanceMetric]] = {}
     for metric in statements:
-        by_name.setdefault(metric.name, []).append(metric)
+        by_name.setdefault(_statement_field(metric, "name"), []).append(metric)
     return {name: preferred_for_assumption(group) for name, group in by_name.items()}
 
 

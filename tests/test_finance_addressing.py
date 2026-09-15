@@ -158,7 +158,12 @@ def test_the_non_prose_set_covers_every_enum_field_the_stages_emit():
         for path, _text in cp._walk_fields(checkpoint.output or {}):
             emitted.add(cp._leaf_name(path))
     # Every field this project classifies as non-prose must actually exist.
-    assert cp.NON_PROSE_FIELDS <= emitted | {"evidence_ids"}, (
+    # `valuation_method_status` is set from a business-model evidence item
+    # this fixture's INDEX does not carry (see
+    # research_pipeline.py::_business_model_policy_from_index), so it is
+    # never populated here even though it is a real, deterministic field --
+    # same reason `evidence_ids` already needed this exemption.
+    assert cp.NON_PROSE_FIELDS <= emitted | {"evidence_ids", "valuation_method_status"}, (
         cp.NON_PROSE_FIELDS - emitted)
 
 

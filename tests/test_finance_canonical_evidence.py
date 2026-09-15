@@ -528,6 +528,77 @@ def test_a_citation_with_no_current_twin_produces_no_finding():
 
 
 # ---------------------------------------------------------------------------
+# A leaked internal reference is stubbed, never fatal (section 17)
+#
+# THE LIVE FAILURE: `finance/report_model.py::_reject_empty` raised an
+# uncaught ValueError when a stage's `limiting_factors` text named something
+# internal to this program -- a field path or an enum constant it had read
+# off the evidence packet -- because nothing upstream of that last boundary
+# ever screened for it. `apply_quarantine` already stubs every other class of
+# semantic violation instead of crashing the whole analysis; this is that
+# same treatment, generalized to leaked internal references. Fictional
+# fixture text, not the triggering issuer's actual sentence.
+# ---------------------------------------------------------------------------
+
+def test_a_leaked_internal_reference_is_found_and_stubbed_not_raised():
+    output = {"limiting_factors": [
+        "Management guidance requires significant margin expansion from "
+        "CURRENT_QUARTER_GUIDANCE to meet the implied full-year target."]}
+    findings = R._internal_reference_findings(output)  # noqa: SLF001
+    assert [f.field_path for f in findings] == ["limiting_factors[0]"]
+    assert findings[0].label == R._INTERNAL_REFERENCE_LABEL  # noqa: SLF001
+    assert findings[0].severity == "semantic_misuse"
+
+    result, _records, fatal = R.apply_quarantine(output, findings)
+    assert fatal == []
+    assert len(result["limiting_factors"]) == 1, "stubbed, never dropped"
+    stubbed = result["limiting_factors"][0]
+    assert "withheld" in stubbed
+    assert "CURRENT_QUARTER_GUIDANCE" not in stubbed
+    # The wording must describe the ACTUAL fault, not business-model misuse.
+    assert "business model" not in stubbed
+
+
+def test_a_clean_limiting_factor_produces_no_finding():
+    output = {"limiting_factors": [
+        "Management guidance requires meaningful margin expansion next year "
+        "to meet the implied full-year target."]}
+    assert R._internal_reference_findings(output) == []  # noqa: SLF001
+
+
+def test_evidence_id_fields_are_never_scanned_or_quarantined():
+    """`evidence_ids`/`evidence_cited` legitimately hold literal 'dcf.x.y'
+    ids by design -- flagging them would destroy a real citation."""
+    output = {"claims": [{"claim": "Revenue grew 12% year over year.",
+                          "evidence_ids": ["dcf.guidance.revenue.current"],
+                          "evidence_cited": ["dcf.guidance.revenue.current"]}]}
+    assert R._internal_reference_findings(output) == []  # noqa: SLF001
+
+
+def test_internal_reference_findings_are_wired_into_stage_validation():
+    """The scan must run for every stage via `_validate_claim_fidelity`, not
+    only be reachable in isolation."""
+    import inspect
+    source = inspect.getsource(R._validate_claim_fidelity)  # noqa: SLF001
+    assert "_internal_reference_findings" in source
+
+
+def test_the_stubbed_text_survives_the_report_models_own_last_boundary():
+    """The exact site of the live crash: `report_model.py::_reject_empty`
+    must no longer raise once quarantine has already run."""
+    from finance import report_model as RM
+
+    output = {"limiting_factors": [
+        "Management guidance requires significant margin expansion from "
+        "CURRENT_QUARTER_GUIDANCE to meet the implied full-year target."]}
+    findings = R._internal_reference_findings(output)  # noqa: SLF001
+    quarantined, _records, fatal = R.apply_quarantine(output, findings)
+    assert fatal == []
+    RM._reject_empty("the 'Limiting factors' conditions",  # noqa: SLF001
+                     quarantined["limiting_factors"])
+
+
+# ---------------------------------------------------------------------------
 # Section 22 — a percentage the report will not print is not citable either
 # ---------------------------------------------------------------------------
 
@@ -598,3 +669,122 @@ def test_genuinely_absent_guidance_still_says_so():
     from finance import forward_assumptions as FA
     path = FA.build_growth_path(FA.GrowthEvidence(ttm_yoy=0.05), forecast_years=5)
     assert "No current guidance was available" in path.entries[0].derivation
+
+
+# ---------------------------------------------------------------------------
+# Item 3: a Q4 FY2026 guidance item is not FY2026 guidance merely because
+# both contain the token "2026". `finance.claim_validation.
+# scan_for_guidance_period_mismatch` already implemented this rule and, like
+# `retire_realized_guidance`, was never called from anywhere in the pipeline.
+# ---------------------------------------------------------------------------
+
+def _guidance_index(*fiscal_periods):
+    from finance.evidence import EvidenceItem
+    return {
+        f"dcf.guidance.revenue_growth.{i}.current": EvidenceItem(
+            evidence_id=f"dcf.guidance.revenue_growth.{i}.current",
+            label="x", value="93.0 to 93.0", source_periods=[period])
+        for i, period in enumerate(fiscal_periods)
+    }
+
+
+def test_e_a_quarterly_guidance_item_cannot_be_described_as_full_year():
+    index = _guidance_index("Q4 FY2026")
+    findings = R._guidance_horizon_findings(  # noqa: SLF001
+        {"limiting_factors": ["Management guides FY2026 revenue growth to 93%."]}, index)
+    assert findings and findings[0].label.startswith("GUIDANCE_PERIOD_MISSTATED")
+
+
+def test_e_the_same_figure_named_by_its_real_quarter_is_clean():
+    index = _guidance_index("Q4 FY2026")
+    findings = R._guidance_horizon_findings(  # noqa: SLF001
+        {"limiting_factors": ["Q4 FY2026 revenue growth guidance is 93%."]}, index)
+    assert findings == []
+
+
+def test_f_the_same_rule_applies_to_a_margin_claim():
+    index = _guidance_index("Q4 FY2026")
+    findings = R._guidance_horizon_findings(  # noqa: SLF001
+        {"claims": ["Management guides FY2026 operating margin to expand."]}, index)
+    assert findings and findings[0].label.startswith("GUIDANCE_PERIOD_MISSTATED")
+
+
+def test_annual_guidance_may_be_described_as_annual():
+    """No false positive: when the guidance really IS annual, saying so is
+    fine."""
+    index = _guidance_index("FY2026")
+    findings = R._guidance_horizon_findings(  # noqa: SLF001
+        {"limiting_factors": ["Management guides FY2026 revenue growth to 93%."]}, index)
+    assert findings == []
+
+
+def test_a_guidance_horizon_mismatch_is_stubbed_not_fatal():
+    output = {"limiting_factors": ["Management guides FY2026 revenue growth to 93%."]}
+    index = _guidance_index("Q4 FY2026")
+    findings = R._guidance_horizon_findings(output, index)  # noqa: SLF001
+    result, _records, fatal = R.apply_quarantine(output, findings)
+    assert fatal == []
+    assert len(result["limiting_factors"]) == 1
+    assert "withheld" in result["limiting_factors"][0]
+    assert "FY2026" not in result["limiting_factors"][0]
+
+
+# ---------------------------------------------------------------------------
+# Item 2: a latest-quarter YoY fact must never become a TTM claim in
+# research prose. Checked against AVAILABILITY (finance/canonical.py
+# publishes each growth kind under its own evidence id only when it could
+# actually be built), never against the claimed number.
+# ---------------------------------------------------------------------------
+
+def _growth_index(*available_evidence_ids):
+    from finance.evidence import EvidenceItem
+    return {eid: EvidenceItem(evidence_id=eid, label="x", value=0.86)
+           for eid in available_evidence_ids}
+
+
+def test_c_a_latest_quarter_fact_cannot_be_described_as_ttm():
+    index = _growth_index("current.revenue_growth_latest_quarter_yoy_growth")
+    findings = R._growth_frequency_findings(  # noqa: SLF001
+        {"claims": ["TTM revenue growth of 86% reflects strong momentum."]}, index)
+    assert findings and findings[0].label == "GROWTH_FREQUENCY_MISMATCH"
+
+
+def test_d_a_ttm_fact_may_be_described_as_ttm():
+    index = _growth_index("current.revenue_growth_ttm_yoy_growth")
+    findings = R._growth_frequency_findings(  # noqa: SLF001
+        {"claims": ["TTM revenue growth of 86% reflects strong momentum."]}, index)
+    assert findings == []
+
+
+def test_the_same_fact_correctly_labelled_latest_quarter_is_clean():
+    index = _growth_index("current.revenue_growth_latest_quarter_yoy_growth")
+    findings = R._growth_frequency_findings(  # noqa: SLF001
+        {"claims": ["Latest-quarter revenue growth of 86% reflects strong momentum."]},
+        index)
+    assert findings == []
+
+
+def test_a_full_year_growth_claim_with_no_fy_evidence_is_flagged():
+    index = _growth_index("current.revenue_growth_latest_quarter_yoy_growth")
+    findings = R._growth_frequency_findings(  # noqa: SLF001
+        {"claims": ["Full-year revenue growth of 12% is expected."]}, index)
+    assert findings and findings[0].label == "GROWTH_FREQUENCY_MISMATCH"
+
+
+def test_a_growth_frequency_mismatch_is_stubbed_not_fatal():
+    output = {"claims": ["TTM revenue growth of 86% reflects strong momentum.",
+                         "Margins remain healthy across segments."]}
+    index = _growth_index("current.revenue_growth_latest_quarter_yoy_growth")
+    findings = R._growth_frequency_findings(output, index)  # noqa: SLF001
+    result, _records, fatal = R.apply_quarantine(output, findings)
+    assert fatal == []
+    assert len(result["claims"]) == 2, "stubbed in place, never dropped from a min_items field"
+    assert "withheld" in result["claims"][0]
+    assert "TTM" not in result["claims"][0]
+
+
+def test_text_with_no_growth_attribution_is_never_scanned():
+    index = _growth_index()  # nothing available at all
+    findings = R._growth_frequency_findings(  # noqa: SLF001
+        {"claims": ["The company operates in a competitive market."]}, index)
+    assert findings == []

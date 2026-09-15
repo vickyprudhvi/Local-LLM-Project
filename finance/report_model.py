@@ -166,21 +166,14 @@ def _reject_empty(label: str, texts) -> None:
                 "a field inside this program rather than something a reader can act on")
 
 
-# Placeholder text that is not empty and is not a claim either. Kept beside
-# the schema's own `_MIN_CLAIM_CHARS` rule rather than duplicating the
-# threshold: this boundary is about the SHAPE of a non-answer, and the schema
-# is about length.
-_PLACEHOLDER_TEXT = frozenset({
-    "", ".", "-", "--", "...", "n/a", "na", "n.a.", "tbd", "tba", "none",
-    "no", "unknown", "?", "pending",
-})
-
-
 def _carries_content(text) -> bool:
-    if not isinstance(text, str):
-        return False
-    stripped = text.strip()
-    return bool(stripped) and stripped.lower().rstrip(".") not in _PLACEHOLDER_TEXT
+    """The ONE placeholder-content rule, shared with `finance/research_
+    pipeline.py::_string_list` via `finance.content_policy.carries_content`
+    -- see that function's docstring for the live failure two divergent
+    rules produced (a boilerplate non-answer that cleared the validation-time
+    length filter and reached compact output as a real-looking bullet)."""
+    from finance.content_policy import carries_content
+    return carries_content(text)
 
 
 @dataclass(frozen=True)
