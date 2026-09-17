@@ -22,6 +22,7 @@ from brain import ask_claude, ask_local_raw, load_system_prompt
 from ears import listen_push_to_talk
 from finance import workflow as finance_workflow
 from finance.extraction import runtime as finance_extraction_runtime
+from finance.documents import runtime as finance_documents_runtime
 from interaction_log import log_turn
 from mcp_layer import FilesystemRootValidator, McpError, MultiMcpRuntimeManager
 from mcp_management.access_classifier import (
@@ -81,6 +82,14 @@ console = Console()
 # call is made and no model is loaded. Only an explicitly configured
 # `compare`/`v2` mode reaches the model.
 finance_extraction_runtime.register_model_client(ask_local_raw)
+
+# Same composition root, same reasoning, for the Financial Document Package
+# pipeline's two new readers (actual-table fallback, financing-event
+# reader). Under the default `v1` `finance_document_pipeline_mode`, neither
+# factory is ever called: `finance.documents.runtime.build_document_pipeline`
+# returns before a package is even resolved.
+finance_documents_runtime.register_actuals_model_client(ask_local_raw)
+finance_documents_runtime.register_event_model_client(ask_local_raw)
 
 _FS_YES_WORDS = {"y", "yes", "approve", "approved", "ok", "okay"}
 _FS_NO_WORDS = {"n", "no", "decline", "declined", "cancel"}

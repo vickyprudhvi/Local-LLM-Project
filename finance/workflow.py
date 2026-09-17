@@ -1623,6 +1623,52 @@ def _reported_actual_candidates(symbol, sec_extras, state, company_facts):
     return result.candidates, result.facts_overlay, result.observation.to_dict()
 
 
+def _document_pipeline_candidates(symbol, sec_extras, state, company_facts,
+                                  reported_actual_candidates):
+    """(candidates, facts overlay, diagnostics or None). Non-fatal.
+
+    Runs the Financial Document Package pipeline (`finance/documents/`):
+    document-package resolution across 10-K/10-Q/earnings-release/financing
+    8-K, an LLM actual-table fallback gated on the structured/deterministic
+    paths NOT already resolving the target period, and financing-event
+    extraction. Under the default `v1` mode nothing is fetched and nothing
+    is attached, exactly like `_reported_actual_candidates` above -- a normal
+    run is byte-for-byte what it was.
+
+    A failure here degrades to what the two existing sources already see and
+    is recorded rather than raised, for the same reason
+    `_reported_actual_candidates` is non-fatal: an optional upstream source
+    being unreachable must never turn into a refused report.
+    """
+    from finance.documents import runtime as document_pipeline_runtime
+    from tools import config as config_module
+
+    if config_module.finance_document_pipeline_mode() == \
+            document_pipeline_runtime.DocumentPipelineMode.V1:
+        return (), {}, None
+    try:
+        from finance.extraction import document_resolver as period_resolver
+
+        target_period_end = state.latest_quarterly_period or state.latest_annual_period
+        structured_completeness = None
+        resolution = period_resolver.resolve(company_facts, as_of=state.valuation_date)
+        if resolution.selected and resolution.selected.period_end == target_period_end:
+            structured_completeness = resolution.selected.statement_completeness
+        result = document_pipeline_runtime.build_document_pipeline(
+            symbol, (sec_extras or {}).get("submissions"), company_facts,
+            as_of=state.valuation_date, target_period_end=target_period_end,
+            structured_completeness=structured_completeness,
+            reported_actuals_candidates=reported_actual_candidates)
+    except Exception as failure:                              # noqa: BLE001
+        return (), {}, {"mode": config_module.finance_document_pipeline_mode(),
+                        "failure_code": "DOCUMENT_PIPELINE_FAILED",
+                        "notes": [f"{type(failure).__name__}: {failure}"]}
+    diagnostics = result.diagnostics.to_dict()
+    if result.events:
+        diagnostics["financing_events"] = [event.to_dict() for event in result.events]
+    return result.candidates, result.facts_overlay, diagnostics
+
+
 def _dcf_inputs_from_facts(symbol, facts, forecast_years):
     """Assemble DCF equity-bridge inputs from normalized data (Problem 3).
     Returns None when a REQUIRED input is genuinely unavailable — never a
@@ -2418,6 +2464,22 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
              symbol, sec_extras, state, company_facts)
         if source_observation is not None:
             facts["reported_actual_sources"] = source_observation
+
+        # Financial Document Package pipeline (Phase H.16). Inert under its
+        # own `v1` default. Its candidates and facts overlay are merged
+        # alongside the reported-actuals source's, so both feed the SAME
+        # resolver call below rather than a second one.
+        (document_candidates, document_facts_overlay,
+         document_diagnostics) = _document_pipeline_candidates(
+             symbol, sec_extras, state, company_facts, source_candidates)
+        if document_diagnostics is not None:
+            facts["document_pipeline"] = document_diagnostics
+        if document_candidates or document_facts_overlay:
+            from finance.reported_actuals.candidates import merge_company_facts
+            source_candidates = tuple(source_candidates) + tuple(document_candidates)
+            source_facts_overlay = merge_company_facts(
+                source_facts_overlay, document_facts_overlay)
+
         from finance.reported_actuals import unified as unified_module
         try:
             actual_resolution, actual_observation = (

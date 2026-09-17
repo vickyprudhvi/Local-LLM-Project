@@ -838,6 +838,102 @@ def finance_extraction_v1_fallback_enabled():
     return _bool("FINANCE_EXTRACTION_V1_FALLBACK", False)
 
 
+# ---- Financial Document Package pipeline (Phase H.16) ----
+#
+# One flag gates the whole upstream layer: document-package resolution, the
+# LLM actual-table fallback, and financing-event extraction. `v1` (default)
+# never resolves a package, never fetches a filing beyond what the existing
+# pipeline already fetches, and never calls a model -- identical in cost to
+# not having the layer at all.
+
+def finance_document_pipeline_mode():
+    """'v1' (default), 'v2', or 'compare'.
+
+    compare resolves the document package and runs both new extractors, but
+    RECORDS what they found rather than offering it -- the existing answer is
+    unchanged. v2 offers validated actual-fact candidates to the existing
+    canonical resolver through the same `extra_candidates`/`extra_facts` seam
+    `finance.reported_actuals` already uses, and fails closed on failure.
+    """
+    mode = _str("FINANCE_DOCUMENT_PIPELINE_MODE", "v1").strip().lower()
+    return mode if mode in ("v1", "v2", "compare") else "v1"
+
+
+def finance_document_pipeline_max_financing_events():
+    """How many financing-eligible 8-Ks one run may read."""
+    return _int("FINANCE_DOCUMENT_PIPELINE_MAX_FINANCING_EVENTS", 8)
+
+
+def finance_actuals_extraction_max_sections():
+    """How many reported-statement tables one actuals-fallback read may see."""
+    return _int("FINANCE_ACTUALS_EXTRACTION_MAX_SECTIONS", 4)
+
+
+def finance_actuals_extraction_max_section_chars():
+    """Character budget per rendered table. A whole filing is never sent."""
+    return _int("FINANCE_ACTUALS_EXTRACTION_MAX_SECTION_CHARS", 6000)
+
+
+def finance_actuals_extraction_max_output_tokens():
+    """Output-token ceiling for one table read. See `finance_extraction_
+    max_output_tokens` for why this is sized in the thousands rather than
+    guessed small: the same reasoning-model thinking-token pathology applies."""
+    return _int("FINANCE_ACTUALS_EXTRACTION_MAX_OUTPUT_TOKENS", 20000)
+
+
+def finance_actuals_extraction_timeout_seconds():
+    """Wall-clock ceiling for one table read, DERIVED FROM ITS BUDGET."""
+    configured = _int("FINANCE_ACTUALS_EXTRACTION_TIMEOUT_SECONDS", 120)
+    derived = (int(finance_actuals_extraction_max_output_tokens()
+                   / _ASSUMED_MIN_TOKENS_PER_SECOND)
+               + _STAGE_TIMEOUT_OVERHEAD_SECONDS)
+    return max(configured, derived)
+
+
+def finance_actuals_extraction_min_confidence():
+    """Below this an actual-fact candidate is refused.
+
+    Higher than guidance's floor (0.5): this layer asserts a REPORTED figure
+    that may become part of the canonical financial state, not a forward
+    statement held to its own separate compatibility rules.
+    """
+    try:
+        return float(os.environ.get("FINANCE_ACTUALS_EXTRACTION_MIN_CONFIDENCE", 0.6))
+    except (TypeError, ValueError):
+        return 0.6
+
+
+def finance_event_extraction_max_section_chars():
+    """Character budget for one financing-event filing's body text."""
+    return _int("FINANCE_EVENT_EXTRACTION_MAX_SECTION_CHARS", 8000)
+
+
+def finance_event_extraction_max_output_tokens():
+    return _int("FINANCE_EVENT_EXTRACTION_MAX_OUTPUT_TOKENS", 20000)
+
+
+def finance_event_extraction_timeout_seconds():
+    """Wall-clock ceiling for one event read, DERIVED FROM ITS BUDGET."""
+    configured = _int("FINANCE_EVENT_EXTRACTION_TIMEOUT_SECONDS", 120)
+    derived = (int(finance_event_extraction_max_output_tokens()
+                   / _ASSUMED_MIN_TOKENS_PER_SECOND)
+               + _STAGE_TIMEOUT_OVERHEAD_SECONDS)
+    return max(configured, derived)
+
+
+def finance_event_extraction_min_confidence():
+    """Below this a financing-event candidate is refused.
+
+    Funded-vs-committed status feeds a hard-safety invariant
+    (`UNDRAWN_FACILITY_COUNTED_AS_FUNDED_DEBT` must stay zero), so the floor
+    matches the actuals layer's rather than guidance's lower one.
+    """
+    try:
+        return float(os.environ.get("FINANCE_EVENT_EXTRACTION_MIN_CONFIDENCE", 0.6))
+    except (TypeError, ValueError):
+        return 0.6
+
+
 def research_run_artifacts_enabled():
     """Whether each research-pipeline run is written to disk for replay.
 
