@@ -317,7 +317,13 @@ def _score_event_case(case, run: RunResult) -> None:
         if not text:
             continue
         items = _items_for(case, expected.accession)
-        sections = select_event_sections(text)
+        sections, section_failure = select_event_sections(text)
+        if not sections:
+            run.event_items.append(ItemResult(
+                case.case_id, expected.accession, Outcome.NOT_PROPOSED,
+                detail=f"no section to show the model ({section_failure})",
+                failure_class=FailureClass.SECTION_SELECTION))
+            continue
         extractor = LocalModelEventExtractor(ask_local_raw)
         started = time.monotonic()
         raw_candidates = _extract_with_retry(
@@ -349,26 +355,80 @@ def _score_event_case(case, run: RunResult) -> None:
         if matching_accepted:
             resolved = matching_accepted[0]
             funded_ok = resolved.funded == bool(expected.funded)
-            amount_ok = (expected.amount is None or resolved.amount is None
-                        or _close_enough(resolved.amount, expected.amount))
             if not funded_ok:
                 _record_hard_safety(
                     run, "UNDRAWN_FACILITY_COUNTED_AS_FUNDED_DEBT"
                     if resolved.funded and not expected.funded
                     else "FUNDED_STATUS_MISREAD")
-            if funded_ok and amount_ok:
+
+            # Phase H.20: check every expected (role, value) pair against the
+            # model's COMBINED primary+supplementary amounts, regardless of
+            # which one it called "primary" -- a model reporting the
+            # transaction total as primary and the per-share price as
+            # supplementary (or vice versa) is not a defect; both amounts
+            # present with their OWN correct role is what matters. This
+            # order-independence is what distinguishes a genuine wrong-role
+            # acceptance (the expected role is ABSENT at that value, and a
+            # different, economically incompatible role is present there
+            # instead) from a harmless reordering.
+            resolved_amounts = [(resolved.amount_role, resolved.amount)] + \
+                [(s.role, s.value) for s in resolved.supplementary_amounts]
+            expected_amounts = [(expected.expected_amount_role, expected.amount)] + \
+                list(expected.expected_supplementary)
+
+            # `expected.amount` is only a fixture-authoring convenience for
+            # "which value did I write first" -- it carries no claim about
+            # which slot (primary vs. supplementary) the MODEL must use. A
+            # model that reports the same value the fixture calls "primary"
+            # under its supplementary slot instead (live H.20 finding: FIN-
+            # ACQ/FIN-PARTIAL) is not a defect, so this check is a plain
+            # value-membership test across BOTH slots; role correctness for
+            # every explicitly-typed pair is enforced separately below.
+            resolved_values = [v for _r, v in resolved_amounts]
+            amount_ok = (expected.amount is None
+                        or any(v is not None and _close_enough(v, expected.amount)
+                               for v in resolved_values))
+
+            def _roles_at_value(pairs, value):
+                return [role for role, v in pairs
+                       if v is not None and _close_enough(v, value)]
+
+            amounts_ok = True
+            for exp_role, exp_value in expected_amounts:
+                if exp_role is None or exp_value is None:
+                    continue
+                roles_here = _roles_at_value(resolved_amounts, exp_value)
+                if exp_role in roles_here:
+                    continue
+                amounts_ok = False
+                if exp_role == "PER_SHARE_CONSIDERATION" and "TRANSACTION_VALUE" in roles_here:
+                    _record_hard_safety(run, "PER_SHARE_AS_TRANSACTION_TOTAL")
+                elif exp_role == "FACILITY_COMMITMENT" and "AMOUNT_DRAWN" in roles_here:
+                    _record_hard_safety(run, "FACILITY_COMMITMENT_AS_FUNDED_AMOUNT")
+                elif roles_here:
+                    _record_hard_safety(run, "WRONG_AMOUNT_ROLE_ACCEPTED")
+                # else: the (role, value) pair is simply MISSING -- a recall
+                # miss, not a wrong-role acceptance; no hard-safety hit.
+
+            if funded_ok and amount_ok and amounts_ok:
                 outcome = Outcome.DUPLICATE_PROPOSAL if duplicate else Outcome.PROPOSED_AND_ACCEPTED
                 run.event_items.append(ItemResult(
                     case.case_id, item_key, outcome,
                     accepted_value={"event_type": resolved.event_type,
-                                    "funded": resolved.funded, "amount": resolved.amount}))
+                                    "funded": resolved.funded, "amount": resolved.amount,
+                                    "amount_role": resolved.amount_role,
+                                    "supplementary_amounts":
+                                        [a.to_dict() for a in resolved.supplementary_amounts]}))
             else:
                 run.event_items.append(ItemResult(
                     case.case_id, item_key, Outcome.WRONG_PROPOSAL,
-                    detail=f"funded={resolved.funded} amount={resolved.amount}, expected "
-                           f"funded={expected.funded} amount={expected.amount}",
+                    detail=(f"funded={resolved.funded} amount={resolved.amount} "
+                           f"role={resolved.amount_role} "
+                           f"supplementary={[a.to_dict() for a in resolved.supplementary_amounts]}, "
+                           f"expected funded={expected.funded} amounts={expected_amounts}"),
                     accepted_value={"event_type": resolved.event_type,
-                                    "funded": resolved.funded, "amount": resolved.amount},
+                                    "funded": resolved.funded, "amount": resolved.amount,
+                                    "amount_role": resolved.amount_role},
                     failure_class=(FailureClass.FUNDED_STATUS if not funded_ok
                                   else FailureClass.VALUE_EXTRACTION)))
             continue

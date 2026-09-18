@@ -218,8 +218,11 @@ def _run_event_extraction(package: FinancialDocumentPackage, fetcher,
                 f"{doc.accession}: the financing-event filing could not be read "
                 f"({type(failure).__name__})")
             continue
-        sections = select_event_sections(text)
+        sections, failure_code = select_event_sections(text)
         if not sections:
+            diagnostics.notes.append(
+                f"{doc.accession}: no financing-eligible section could be shown to the "
+                f"model ({failure_code})")
             continue
         try:
             raw_candidates = extractor.extract(

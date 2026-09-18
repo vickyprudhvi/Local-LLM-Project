@@ -42,6 +42,7 @@ from tests.fixtures.reported_actuals_releases import (
     outlook_table,
     release,
 )
+from finance.documents.event_schema import EventAmountRole
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,15 @@ class ExpectedEvent:
     amount: Optional[float]
     should_be_accepted: bool
     note: str = ""
+    # Phase H.20. None means "not checked" (pre-H.20 cases, or a case whose
+    # point is something other than amount semantics); a real role means the
+    # live benchmark's per-item scoring also verifies the ACCEPTED event
+    # carries this exact role, not merely a grounded value.
+    expected_amount_role: Optional[str] = None
+    # Additional independently-typed amounts a case expects to survive
+    # alongside the primary one (spec section 8's "$5B commitment, $2B
+    # drawn" / "$95/share, $69B total" shapes). Each is (role, amount).
+    expected_supplementary: Tuple[Tuple[str, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -231,8 +241,28 @@ _add(DocumentPackageCase(
     ),
 ))
 
+# Real SEC 8-Ks are always ITEM-numbered (finance.documents.package only
+# ever classifies a form-8-K document FINANCING_EVENT, and a form 8-K is
+# defined by its Item structure) -- Phase H.19's `select_event_sections`
+# now selects a normalized ITEM BLOCK rather than a raw document prefix, so
+# a fixture with no "Item N.NN" heading at all would never reach the model
+# in production and is not a realistic financing-event document. Every
+# event fixture below is prefixed with the item's own SEC boilerplate
+# title, exactly as a real filing states it.
+_ITEM_TITLES = {
+    "2.01": "Completion of Acquisition or Disposition of Assets.",
+    "2.03": "Creation of a Direct Financial Obligation or an Obligation under "
+           "an Off-Balance Sheet Arrangement of a Registrant.",
+    "3.02": "Unregistered Sales of Equity Securities.",
+}
+
+
+def _item_prefixed(item_code: str, body: str) -> str:
+    return f"Item {item_code} {_ITEM_TITLES[item_code]} {body}"
+
+
 # 6. Financing event: committed facility, no drawdown language anywhere.
-_CREDIT_FACILITY_TEXT = (
+_CREDIT_FACILITY_TEXT = _item_prefixed("2.03",
     "On July 1, 2026, the Company entered into a $2.0 billion five-year "
     "revolving credit facility with a syndicate of lenders led by Example "
     "Bank, N.A. The facility is available to the Company for working "
@@ -258,7 +288,7 @@ _add(DocumentPackageCase(
 ))
 
 # 7. Financing event: funded term loan, drawdown language present.
-_DRAWN_TERM_LOAN_TEXT = (
+_DRAWN_TERM_LOAN_TEXT = _item_prefixed("2.03",
     "On July 1, 2026, the Company entered into a $1.5 billion term loan "
     "agreement and drew the full $1.5 billion, receiving net proceeds of "
     "approximately $1.48 billion after fees."
@@ -281,7 +311,7 @@ _add(DocumentPackageCase(
 ))
 
 # 8. Financing event: convertible-debt refinement of a bare 2.03 item.
-_CONVERTIBLE_TEXT = (
+_CONVERTIBLE_TEXT = _item_prefixed("2.03",
     "On August 1, 2026, the Company issued and sold $800 million aggregate "
     "principal amount of convertible senior notes due 2031 in a private "
     "placement, receiving net proceeds of approximately $784 million."
@@ -306,7 +336,7 @@ _add(DocumentPackageCase(
 ))
 
 # 9. Financing event: equity issuance, item 3.02.
-_EQUITY_TEXT = (
+_EQUITY_TEXT = _item_prefixed("3.02",
     "On August 15, 2026, the Company completed an underwritten public "
     "offering of 10,000,000 shares of common stock, issuing and selling "
     "the shares for aggregate net proceeds of approximately $450 million."
@@ -522,7 +552,7 @@ _add(DocumentPackageCase(
 ))
 
 # 16-17. Two more financing-event shapes named in spec section 13.
-_BRIDGE_FACILITY_TEXT = (
+_BRIDGE_FACILITY_TEXT = _item_prefixed("2.03",
     "On September 1, 2026, the Company entered into a $750 million senior "
     "unsecured bridge loan facility with a syndicate of lenders led by "
     "Example Bank, N.A., to provide interim financing pending the issuance "
@@ -548,7 +578,7 @@ _add(DocumentPackageCase(
     ),
 ))
 
-_REFINANCING_TEXT = (
+_REFINANCING_TEXT = _item_prefixed("2.03",
     "On September 15, 2026, the Company completed a refinancing of its "
     "existing 5.500% Senior Notes due 2027. The Company issued and sold "
     "$600 million aggregate principal amount of new 4.750% Senior Notes due "
@@ -571,6 +601,125 @@ _add(DocumentPackageCase(
                       note="issued and sold new notes to redeem the old ones "
                            "-- funded, and a REFINANCING refinement of a bare "
                            "2.03 item"),
+    ),
+))
+
+# ---------------------------------------------------------------------------
+# Phase H.20 additions -- amount-role coverage
+# ---------------------------------------------------------------------------
+
+# 18. Acquisition stating BOTH a per-share price and an explicit aggregate
+# transaction value -- section 8's "$95/share, $69B total" shape. The two
+# numbers describe two different economic quantities and must survive as
+# two independently-grounded, distinctly-typed amounts, never collapsed or
+# used to derive one from the other.
+_ACQUISITION_PER_SHARE_AND_TOTAL_TEXT = _item_prefixed("2.01",
+    "On October 1, 2026, the Company completed its acquisition of Example "
+    "Target, Inc. Each outstanding share of Example Target common stock was "
+    "converted into the right to receive $95.00 in cash, without interest, "
+    "representing an aggregate transaction value of approximately "
+    "$69.0 billion."
+)
+_add(DocumentPackageCase(
+    case_id="financing-acquisition-per-share-and-total",
+    classes=("financing_event", "amount_role", "acquisition"),
+    submissions=_submissions([
+        {"accession": "FIN-ACQ", "form": "8-K", "filed": "2026-10-01",
+         "items": "2.01", "description": "Completion of Acquisition of Assets",
+         "document": "acq8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-ACQ", "financing_events"),),
+    event_documents={"FIN-ACQ": _ACQUISITION_PER_SHARE_AND_TOTAL_TEXT},
+    expected_events=(
+        ExpectedEvent("FIN-ACQ", "ACQUISITION", funded=False, committed=False,
+                      amount=95.0, should_be_accepted=True,
+                      expected_amount_role=EventAmountRole.PER_SHARE_CONSIDERATION,
+                      expected_supplementary=((EventAmountRole.TRANSACTION_VALUE,
+                                              69_000_000_000.0),),
+                      note="the live-shadow defect, reproduced generically: $95.00 "
+                           "is a PER-SHARE price, never the deal's transaction value, "
+                           "which is separately and explicitly $69.0 billion"),
+    ),
+))
+
+# 19. Notes issuance: a clean, single PRINCIPAL_AMOUNT.
+_NOTES_PRINCIPAL_TEXT = _item_prefixed("2.03",
+    "On October 5, 2026, the Company issued and sold $750 million aggregate "
+    "principal amount of 5.500% Senior Notes due 2033 in a registered "
+    "public offering."
+)
+_add(DocumentPackageCase(
+    case_id="financing-notes-principal-amount",
+    classes=("financing_event", "amount_role", "notes_issuance"),
+    submissions=_submissions([
+        {"accession": "FIN-NOTES", "form": "8-K", "filed": "2026-10-05",
+         "items": "2.03", "description": "Issuance of Senior Notes",
+         "document": "notes8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-NOTES", "financing_events"),),
+    event_documents={"FIN-NOTES": _NOTES_PRINCIPAL_TEXT},
+    expected_events=(
+        ExpectedEvent("FIN-NOTES", "ISSUER_DEBT_ISSUANCE", funded=True,
+                      committed=False, amount=750_000_000.0, should_be_accepted=True,
+                      expected_amount_role=EventAmountRole.PRINCIPAL_AMOUNT,
+                      note="issued and sold -- funded, and the amount is the "
+                           "notes' own aggregate principal, not a facility "
+                           "commitment or a transaction value"),
+    ),
+))
+
+# 20. Revolving facility with a PARTIAL drawdown -- section 8's "$5B
+# commitment, of which $2B was drawn" shape. The commitment and the drawn
+# portion are different amounts with different roles, both grounded.
+_FACILITY_PARTIAL_DRAWDOWN_TEXT = _item_prefixed("2.03",
+    "On October 10, 2026, the Company entered into a $5.0 billion revolving "
+    "credit facility with a syndicate of lenders; at closing, the Company "
+    "drew $2.0 billion under the facility for general corporate purposes."
+)
+_add(DocumentPackageCase(
+    case_id="financing-facility-partial-drawdown",
+    classes=("financing_event", "amount_role", "partial_drawdown"),
+    submissions=_submissions([
+        {"accession": "FIN-PARTIAL", "form": "8-K", "filed": "2026-10-10",
+         "items": "2.03", "description": "Entry into Credit Agreement",
+         "document": "partial8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-PARTIAL", "financing_events"),),
+    event_documents={"FIN-PARTIAL": _FACILITY_PARTIAL_DRAWDOWN_TEXT},
+    expected_events=(
+        ExpectedEvent("FIN-PARTIAL", "ISSUER_DEBT_ISSUANCE", funded=True,
+                      committed=True, amount=5_000_000_000.0, should_be_accepted=True,
+                      expected_amount_role=EventAmountRole.FACILITY_COMMITMENT,
+                      expected_supplementary=((EventAmountRole.AMOUNT_DRAWN,
+                                              2_000_000_000.0),),
+                      note="the $5B commitment and the $2B drawn are different "
+                           "amounts; funded=true is grounded by the draw, not by "
+                           "the commitment"),
+    ),
+))
+
+# 21. Debt repayment/refinancing: a clean REPAYMENT_AMOUNT.
+_DEBT_REPAYMENT_TEXT = _item_prefixed("2.03",
+    "On October 15, 2026, the Company repaid $800 million in aggregate "
+    "principal amount of its outstanding senior notes at maturity, using "
+    "cash on hand."
+)
+_add(DocumentPackageCase(
+    case_id="financing-debt-repayment",
+    classes=("financing_event", "amount_role", "debt_repayment"),
+    submissions=_submissions([
+        {"accession": "FIN-REPAY", "form": "8-K", "filed": "2026-10-15",
+         "items": "2.03", "description": "Repayment of Senior Notes",
+         "document": "repay8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-REPAY", "financing_events"),),
+    event_documents={"FIN-REPAY": _DEBT_REPAYMENT_TEXT},
+    expected_events=(
+        ExpectedEvent("FIN-REPAY", "REFINANCING", funded=False, committed=False,
+                      amount=800_000_000.0, should_be_accepted=True,
+                      expected_amount_role=EventAmountRole.REPAYMENT_AMOUNT,
+                      note="a repayment, not a new draw -- funded describes money "
+                           "RECEIVED by the company, which did not happen here"),
     ),
 ))
 

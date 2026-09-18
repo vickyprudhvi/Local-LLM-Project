@@ -904,8 +904,21 @@ def finance_actuals_extraction_min_confidence():
 
 
 def finance_event_extraction_max_section_chars():
-    """Character budget for one financing-event filing's body text."""
+    """Character budget for one financing-event filing's body text.
+
+    Applies to a SELECTED, NORMALIZED Item-code block (Phase H.19), never
+    to a raw document prefix -- see `finance.documents.text_normalization`'s
+    module docstring for why that ordering is load-bearing.
+    """
     return _int("FINANCE_EVENT_EXTRACTION_MAX_SECTION_CHARS", 8000)
+
+
+def finance_event_extraction_max_sections():
+    """How many Item-code blocks one financing-event filing may show the
+    model. A filing naming several relevant items (1.01 and 2.03, say)
+    gets one section per item rather than one section for the whole
+    document."""
+    return _int("FINANCE_EVENT_EXTRACTION_MAX_SECTIONS", 4)
 
 
 def finance_event_extraction_max_output_tokens():
