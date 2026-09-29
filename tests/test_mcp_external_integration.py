@@ -172,9 +172,13 @@ def test_duplicate_local_name_does_not_overwrite_existing_tool(tmp_path):
 
 def test_executable_server_full_roundtrip(configured):
     c = configured()  # start -> initialize -> tools/list already done
-    assert c.executor.execute(ToolCall("1", "mcp.test.echo_text", {"text": "hi"})).data == {"text": "hi"}
-    assert c.executor.execute(ToolCall("2", "mcp.test.add_numbers", {"a": 17, "b": 25})).data == {"sum": 42}
-    assert c.executor.execute(ToolCall("3", "mcp.test.read_test_file", {"path": "hello.txt"})).data == {"content": "Hello from MCP!"}
+    # Phase H.24: results are additively marked untrusted; original fields survive.
+    d1 = c.executor.execute(ToolCall("1", "mcp.test.echo_text", {"text": "hi"})).data
+    assert d1["text"] == "hi" and d1["untrusted_content"] is True
+    d2 = c.executor.execute(ToolCall("2", "mcp.test.add_numbers", {"a": 17, "b": 25})).data
+    assert d2["sum"] == 42 and d2["untrusted_content"] is True
+    d3 = c.executor.execute(ToolCall("3", "mcp.test.read_test_file", {"path": "hello.txt"})).data
+    assert d3["content"] == "Hello from MCP!" and d3["untrusted_content"] is True
     c.session.shutdown()
     assert c.session.client._proc is None  # clean shutdown
 
@@ -200,12 +204,14 @@ def test_local_policy_overrides_server_advertised_permission(configured):
 
 def test_echo_runs_without_confirmation(configured):
     r = _run(configured(), "mcp.test.echo_text", {"text": "Phase E works."})
-    assert r.success is True and r.data == {"text": "Phase E works."}
+    assert (r.success is True and r.data["text"] == "Phase E works."
+            and r.data["untrusted_content"] is True)
 
 
 def test_read_file_from_workspace(configured):
     r = _run(configured(), "mcp.test.read_test_file", {"path": "hello.txt"})
-    assert r.success is True and r.data == {"content": "Hello from MCP!"}
+    assert (r.success is True and r.data["content"] == "Hello from MCP!"
+            and r.data["untrusted_content"] is True)
 
 
 # ---- write (Phase C confirmation) ----

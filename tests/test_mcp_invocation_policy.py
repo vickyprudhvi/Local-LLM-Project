@@ -68,7 +68,9 @@ def test_exact_file_uri_replaces_model_path_with_trusted_uri(tmp_path):
     )
 
     result = tool.execute({"uri": str(p)})
-    assert result == {"text": "converted"}
+    # Phase H.24: the exact_file_uri (markitdown) result is additively marked
+    # untrusted too, same as every other MCP server's result.
+    assert result["text"] == "converted" and result["untrusted_content"] is True
     called_uri = client.call_tool.call_args[0][1]["uri"]
     assert called_uri.startswith("file:///")
     assert called_uri.endswith("doc.txt")
@@ -252,5 +254,5 @@ def test_no_policy_passes_arguments_unchanged():
     )
 
     result = tool.execute({"a": 1})
-    assert result == {"ok": True}
+    assert result["ok"] is True and result["untrusted_content"] is True
     client.call_tool.assert_called_once_with("add", {"a": 1}, timeout=20.0)
