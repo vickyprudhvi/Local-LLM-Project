@@ -859,6 +859,27 @@ def finance_document_pipeline_mode():
     return mode if mode in ("v1", "v2", "compare") else "v1"
 
 
+def finance_sec_provider():
+    """'current' (default), 'edgartools', or 'compare' -- Phase H.29 spike.
+
+    'current' (the only mode ever used in production): the existing
+    `finance.sec_provider.SecEdgarClient` path, completely unchanged. Nothing
+    in this mode imports `finance.documents.edgartools_adapter` or the
+    `edgar` package.
+
+    'edgartools': the adapter answers filing-discovery/retrieval questions
+    instead of the current client. Spike-only; never selected automatically.
+
+    'compare': BOTH paths run; the current path's answer is still what the
+    rest of the pipeline uses (identical behavior to 'current'), and the
+    EdgarTools adapter's answer is recorded alongside it for diagnostics only
+    -- the same non-silent-substitution discipline as `finance_extraction_
+    mode`/`finance_document_pipeline_mode`'s own 'compare' modes.
+    """
+    mode = _str("FINANCE_SEC_PROVIDER", "current").strip().lower()
+    return mode if mode in ("current", "edgartools", "compare") else "current"
+
+
 def finance_document_pipeline_max_financing_events():
     """How many financing-eligible 8-Ks one run may read."""
     return _int("FINANCE_DOCUMENT_PIPELINE_MAX_FINANCING_EVENTS", 8)
@@ -1074,6 +1095,16 @@ def sec_user_agent():
     deliberately carries a real contact per SEC's own guidance, so it must
     come from configuration, never source."""
     return _str("SEC_USER_AGENT", None)
+
+
+def edgar_identity():
+    """Phase H.29 spike: the identity EdgarTools' own `edgar.set_identity()`
+    requires (name + contact, no key/secret). Same discipline as
+    `sec_user_agent()` -- read at call time, never hardcoded. Only consulted
+    by `finance.documents.edgartools_adapter`, which is only reached when
+    `finance_sec_provider()` is 'edgartools' or 'compare' (default 'current'
+    never imports that module at all)."""
+    return _str("EDGAR_IDENTITY", None)
 
 
 def sec_min_request_interval_ms():
