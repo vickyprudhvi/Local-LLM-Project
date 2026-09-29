@@ -18,8 +18,11 @@ import memory_store
 import tool_dispatch
 import tool_loop
 import tools.config as app_config
-from brain import ask_claude, load_system_prompt
+from brain import ask_claude, ask_local_raw, load_system_prompt
 from ears import listen_push_to_talk
+from finance import workflow as finance_workflow
+from finance.extraction import runtime as finance_extraction_runtime
+from finance.documents import runtime as finance_documents_runtime
 from interaction_log import log_turn
 from mcp_layer import FilesystemRootValidator, McpError, MultiMcpRuntimeManager
 from mcp_management.access_classifier import (
@@ -41,6 +44,7 @@ from mcp_management.provisioning_models import AutoProvisioningApproval
 from mcp_management.registry import get_installed
 from mcp_management.runtime_activation import ensure_selected_server_active
 from router import route_and_answer
+from tools.base import ToolValidationError
 from tools.models import (
     MCP_DOCUMENT_AUTHORIZATION_CONSUMED,
     MCP_DOCUMENT_AUTHORIZATION_EXPIRED,
@@ -56,6 +60,36 @@ from tools.models import (
 from voice import speak
 
 console = Console()
+
+# ---------------------------------------------------------------------------
+# Composition root for the finance extraction layer
+# ---------------------------------------------------------------------------
+#
+# The semantic guidance extractor needs a model; `finance/` must never import
+# one. This module already owns both halves -- the configured local-model
+# capability (`ask_local_raw`) and the tool layer that runs the extraction --
+# so the wiring belongs here and nowhere else.
+#
+# Done at IMPORT, deliberately. Registering inside a request handler, or after
+# `synthesize_report` where an `ask_local_fn` happens to be in scope, would
+# make extraction behaviour depend on whether some earlier turn had run --
+# and guidance extraction happens BEFORE synthesis, so a registration made
+# there could only ever take effect on a LATER analysis in the same process.
+# The whole capability would work or not work depending on call order.
+#
+# Registration is free: it stores a factory and calls nothing. Under the
+# default `v1` mode `extract_release` never builds an extractor, so no model
+# call is made and no model is loaded. Only an explicitly configured
+# `compare`/`v2` mode reaches the model.
+finance_extraction_runtime.register_model_client(ask_local_raw)
+
+# Same composition root, same reasoning, for the Financial Document Package
+# pipeline's two new readers (actual-table fallback, financing-event
+# reader). Under the default `v1` `finance_document_pipeline_mode`, neither
+# factory is ever called: `finance.documents.runtime.build_document_pipeline`
+# returns before a package is even resolved.
+finance_documents_runtime.register_actuals_model_client(ask_local_raw)
+finance_documents_runtime.register_event_model_client(ask_local_raw)
 
 _FS_YES_WORDS = {"y", "yes", "approve", "approved", "ok", "okay"}
 _FS_NO_WORDS = {"n", "no", "decline", "declined", "cancel"}
@@ -777,6 +811,50 @@ def _is_bare_approval_token(user_text):
     return normalized in _ALL_APPROVAL_TOKEN_WORDS
 
 
+def _maybe_run_full_stock_analysis(user_text):
+    """Phase H.1 orchestration hook: bypass ad hoc tool selection for a
+    deterministically-detected full-stock-analysis request.
+
+    Detection is lexical and side-effect-free
+    (`finance.workflow.detect_full_stock_analysis_request`) and runs BEFORE
+    Phase G.1 capability selection and Phase B tool selection — so a matched
+    request never reaches either. It executes the EXISTING
+    `finance.workflow.run_full_stock_analysis` through `tool_loop.EXECUTOR` /
+    `tool_loop.REGISTRY` — the SAME process-wide ToolRegistry/ToolExecutor the
+    ordinary local tool loop uses, never a parallel one — so cache inspection,
+    quota planning, dataset retrieval, normalization, metrics, and
+    `finance.dcf_model` all run exactly as they do when called directly.
+
+    Only the report's PROSE is written by the local LLM
+    (`finance.workflow.synthesize_report`); every number in it was already
+    computed upstream. Returns None for every request `detect_...` does not
+    recognize, so this changes nothing about how any other request — including
+    an unrelated finance question like a plain quote lookup — is handled.
+    """
+    symbol = finance_workflow.detect_full_stock_analysis_request(user_text)
+    if symbol is None:
+        return None
+
+    # H.4 corrective patch: report_detail defaults to "compact" (~800-1,500
+    # words) — a request explicitly asking for a "detailed"/"full" report
+    # (finance.workflow.detect_report_detail) restores today's complete
+    # report unchanged. Detection is lexical, from the user's own text plus
+    # configuration only — never inferred from anything else.
+    report_detail = finance_workflow.detect_report_detail(user_text)
+
+    console.print(
+        f"[dim]stock analysis: detected a full-stock-analysis request for "
+        f"{symbol!r}; running the FullStockAnalysis workflow directly "
+        f"(Phase B tool selection is bypassed for this turn; report_detail="
+        f"{report_detail!r}).[/dim]"
+    )
+    try:
+        result = finance_workflow.run_full_stock_analysis(tool_loop.EXECUTOR, symbol)
+    except ToolValidationError as e:  # e.g. STOCK_ANALYSIS_ENABLED=false, bad symbol
+        return str(e), dict(_ZERO_METRICS)
+    return finance_workflow.synthesize_report(result, ask_local_raw, report_detail=report_detail)
+
+
 def _process_local_request_with_capability_selection(manager, runtime_manager, user_text, prompt, history,
                                                       system_prompt, attempted_fs_requests,
                                                       resume_budget=1):
@@ -788,6 +866,12 @@ def _process_local_request_with_capability_selection(manager, runtime_manager, u
     `_run_local_turn` directly. It is the only place `_run_local_turn` is
     called from in production code.
 
+    A deterministic full-stock-analysis check runs FIRST (see
+    `_maybe_run_full_stock_analysis`): it needs no MCP capability selection —
+    the finance tools are always-registered BaseTools, not MCP-provisioned —
+    so it is checked before `manager` is even consulted. Every other request
+    behaves exactly as before.
+
     A read-only capability/server-selection check runs BEFORE Phase B. For
     SELECTED, Phase G.2 then lazily activates ONLY the selected server_id
     (Task 4/5) — no other server is touched, and nothing starts merely because
@@ -797,6 +881,11 @@ def _process_local_request_with_capability_selection(manager, runtime_manager, u
     activation (e.g. MCP_SERVER_NOT_INSTALLED) return immediately: no Phase B
     shortlist, no local LLM completion, no ToolExecutor call.
     """
+    stock_outcome = _maybe_run_full_stock_analysis(user_text)
+    if stock_outcome is not None:
+        reply, metrics = stock_outcome
+        return reply, metrics, None
+
     if manager is None:
         # No trusted catalog available in this configuration at all.
         return _run_local_turn(manager, runtime_manager, user_text, prompt, history, system_prompt,
@@ -960,7 +1049,7 @@ def main():
                     if outcome.resumed_text is None:
                         if outcome.speak is not None:
                             console.print(f"[cyan]{outcome.speak}[/cyan]")
-                            speak(outcome.speak)
+                            # speak(outcome.speak)
                             history.append({"role": "user", "content": user_text})
                             history.append({"role": "assistant", "content": outcome.speak})
                         pending_fs_request_id = outcome.next_pending_id
@@ -1022,7 +1111,7 @@ def main():
                         system_prompt, attempted_fs_requests, resume_budget=1,
                         previous_allowed_roots=outcome.previous_allowed_roots)
                     console.print(f"[cyan]{reply}[/cyan]")
-                    speak(reply)
+                    # speak(reply)
                     total_time_sec = time.perf_counter() - turn_start
                     log_turn(question=outcome.resumed_text, mode="local", tool=None,
                             prompt_tokens=0, completion_tokens=0, total_time_sec=total_time_sec)
@@ -1041,7 +1130,7 @@ def main():
             if pending_fs_request_id is None and _is_bare_approval_token(user_text):
                 reply = "No pending approval request."
                 console.print(f"[cyan]{reply}[/cyan]")
-                speak(reply)
+                # speak(reply)
                 history.append({"role": "user", "content": user_text})
                 history.append({"role": "assistant", "content": reply})
                 continue
@@ -1067,7 +1156,7 @@ def main():
                 reply, extra_metrics = dispatch(decision, user_text, prompt, history, system_prompt)
 
             console.print(f"[cyan]{reply}[/cyan]")
-            speak(reply)
+            # speak(reply)
 
             total_time_sec = time.perf_counter() - turn_start
             prompt_tokens = (decision.prompt_tokens or 0) + (extra_metrics.get("prompt_tokens") or 0)

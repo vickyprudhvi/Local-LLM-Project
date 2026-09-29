@@ -256,6 +256,170 @@
         "argument_mode": "exact_file_uri"
       },
       "enabled": true
+    },
+    "official-edgartools": {
+      "server_id": "edgartools",
+      "display_name": "EdgarTools SEC Research MCP",
+      "description": "Read-only conversational SEC EDGAR research: company lookup, filing discovery, filing section text, and disclosure search. Evaluated in Phase H.22 and registered in Phase H.23 for agent-facing research only -- the automated FinancialDocumentPackage pipeline continues to use its own SEC fetcher and does not consume this server.",
+      "capabilities": [
+        "sec_filing_research"
+      ],
+      "risk_category": "network_sec_filing_research",
+      "transport": "stdio",
+      "required_runtimes": [
+        "python"
+      ],
+      "installer": {
+        "type": "python_venv",
+        "package": "edgartools",
+        "version": "5.58.0",
+        "lock_file": "config/mcp_locks/edgartools-5.58.0.txt",
+        "python_constraint": ">=3.10"
+      },
+      "launch": {
+        "entrypoint_type": "console_script",
+        "console_script": "edgartools-mcp"
+      },
+      "lock_environment": {
+        "python_version": "3.13",
+        "platform": "win_amd64"
+      },
+      "required_inputs": [
+        {
+          "name": "EDGAR_IDENTITY",
+          "type": "environment_variable",
+          "required": true,
+          "user_approval_required": true
+        }
+      ],
+      "expected_tools": [
+        "edgar_company",
+        "edgar_search",
+        "edgar_filing",
+        "edgar_read",
+        "edgar_compare",
+        "edgar_ownership",
+        "edgar_monitor",
+        "edgar_trends",
+        "edgar_screen",
+        "edgar_text_search",
+        "edgar_fund",
+        "edgar_proxy",
+        "edgar_notes"
+      ],
+      "default_tool_policy": {
+        "default_permission": "denied",
+        "tools": {
+          "edgar_company": { "enabled": true, "permission": "read" },
+          "edgar_search": { "enabled": true, "permission": "read" },
+          "edgar_filing": { "enabled": true, "permission": "read" },
+          "edgar_read": { "enabled": true, "permission": "read" },
+          "edgar_compare": { "enabled": true, "permission": "read" },
+          "edgar_ownership": { "enabled": true, "permission": "read" },
+          "edgar_monitor": { "enabled": true, "permission": "read" },
+          "edgar_trends": { "enabled": true, "permission": "read" },
+          "edgar_screen": { "enabled": true, "permission": "read" },
+          "edgar_text_search": { "enabled": true, "permission": "read" },
+          "edgar_fund": { "enabled": true, "permission": "read" },
+          "edgar_proxy": { "enabled": true, "permission": "read" },
+          "edgar_notes": { "enabled": true, "permission": "read" }
+        }
+      },
+      "granular_capabilities": [
+        "sec_company_lookup",
+        "sec_filing_lookup",
+        "sec_filing_section_read",
+        "sec_filing_search",
+        "sec_full_text_search",
+        "sec_filing_comparison",
+        "sec_ownership_research",
+        "sec_filing_monitor",
+        "sec_financial_trends",
+        "sec_company_screen",
+        "sec_fund_research",
+        "sec_proxy_research",
+        "sec_notes_research"
+      ],
+      "selection_hints": {
+        "explicit_names": [
+          "edgartools",
+          "sec edgar",
+          "sec filing",
+          "sec research"
+        ],
+        "actions": {
+          "sec_company_lookup": [
+            "company profile",
+            "company overview",
+            "tell me about this company"
+          ],
+          "sec_filing_lookup": [
+            "latest 10-k",
+            "latest 10-q",
+            "latest 8-k",
+            "find this filing",
+            "get filing"
+          ],
+          "sec_filing_section_read": [
+            "read risk factors",
+            "read mda",
+            "read business section",
+            "read filing section"
+          ],
+          "sec_filing_search": [
+            "list filings",
+            "find company",
+            "search filings by form"
+          ],
+          "sec_full_text_search": [
+            "search filing text",
+            "full text search",
+            "search disclosures"
+          ],
+          "sec_filing_comparison": [
+            "compare companies",
+            "compare disclosures",
+            "peer comparison"
+          ],
+          "sec_ownership_research": [
+            "insider transactions",
+            "institutional holders",
+            "form 4",
+            "13f holdings"
+          ],
+          "sec_filing_monitor": [
+            "latest sec filings",
+            "recent filings feed",
+            "what was just filed"
+          ],
+          "sec_financial_trends": [
+            "revenue trend",
+            "financial trends",
+            "growth rate over time"
+          ],
+          "sec_company_screen": [
+            "screen companies",
+            "find companies by industry",
+            "companies by exchange"
+          ],
+          "sec_fund_research": [
+            "fund holdings",
+            "etf data",
+            "money market fund"
+          ],
+          "sec_proxy_research": [
+            "executive compensation",
+            "proxy statement",
+            "ceo pay"
+          ],
+          "sec_notes_research": [
+            "financial statement notes",
+            "disclosure detail",
+            "note disclosures"
+          ]
+        }
+      },
+      "enabled": true
     }
   }
 }

@@ -248,6 +248,925 @@ def mcp_provisioning_enabled():
     return _bool("MCP_PROVISIONING_ENABLED", True)
 
 
+# ---- Phase H.1: market data, cache, quota, DCF, stock analysis ----
+# The Alpha Vantage provider is a TRUSTED LOCAL tool over tools/http_safety.py.
+# The API key is read here, at call time, and is NEVER written to a cache key,
+# a cache record, a log line, an exception message, or a test snapshot.
+def market_data_enabled():
+    return _bool("MARKET_DATA_ENABLED", True)
+
+
+def alphavantage_api_key():
+    """The provider credential. Read at call time so a missing key disables only
+    market data (reported as MARKET_DATA_API_KEY_MISSING) and never breaks startup."""
+    return _str("ALPHAVANTAGE_API_KEY", None)
+
+
+def alphavantage_endpoint():
+    return _str("ALPHAVANTAGE_ENDPOINT", "https://www.alphavantage.co/query")
+
+
+def market_data_connect_timeout():
+    return _int("MARKET_DATA_CONNECT_TIMEOUT_SECONDS", 5)
+
+
+def market_data_read_timeout():
+    return _int("MARKET_DATA_READ_TIMEOUT_SECONDS", 20)
+
+
+def max_market_data_bytes():
+    return _int("MAX_MARKET_DATA_BYTES", 8_000_000)
+
+
+# ---- cache ----
+def market_data_cache_path():
+    return _str("MARKET_DATA_CACHE_PATH", "app_data/finance_cache/market_data.sqlite3")
+
+
+def market_data_cache_enabled():
+    return _bool("MARKET_DATA_CACHE_ENABLED", True)
+
+
+def market_data_stale_if_error_seconds():
+    """How far past expiry a cached record may still be served when a refresh
+    fails. Serving one is always reported as stale — never as fresh."""
+    return _int("MARKET_DATA_STALE_IF_ERROR_SECONDS", 7 * 24 * 3600)
+
+
+def market_data_negative_ttl_seconds():
+    """TTL for a CONTROLLED negative result (e.g. a provider-confirmed unknown
+    symbol). Never used for transport failures."""
+    return _int("MARKET_DATA_NEGATIVE_TTL_SECONDS", 3600)
+
+
+# ---- quota ----
+def alphavantage_daily_call_limit():
+    """Estimated daily external-call budget. NOT a claim about the user's plan —
+    provider rate-limit responses are always treated as authoritative."""
+    return _int("ALPHAVANTAGE_DAILY_CALL_LIMIT", 25)
+
+
+def market_data_max_retries():
+    return _int("MARKET_DATA_MAX_RETRIES", 2)
+
+
+def market_data_retry_base_delay_ms():
+    return _int("MARKET_DATA_RETRY_BASE_DELAY_MS", 500)
+
+
+def market_data_use_adjusted_prices():
+    """Whether to request split/dividend-ADJUSTED price history.
+
+    TIME_SERIES_DAILY_ADJUSTED is a premium Alpha Vantage endpoint; on a free key
+    it fails with MARKET_DATA_ENTITLEMENT_REQUIRED. Defaults off so a free key
+    never spends a call on a guaranteed failure. Turn on if your plan includes it.
+    """
+    return _bool("MARKET_DATA_USE_ADJUSTED_PRICES", False)
+
+
+def market_data_min_request_interval_ms():
+    """Minimum spacing between EXTERNAL provider calls, process-wide.
+
+    Alpha Vantage's free tier allows roughly one request per second. Pacing is
+    cheaper than tripping the throttle and retrying, and cache hits bypass it
+    entirely. Set to 0 to disable (tests do this).
+    """
+    return _int("MARKET_DATA_MIN_REQUEST_INTERVAL_MS", 1200)
+
+
+# ---- stock analysis workflow ----
+def stock_analysis_enabled():
+    return _bool("STOCK_ANALYSIS_ENABLED", True)
+
+
+# ---- compact synthesis payload (bounds what reaches the local LLM) ----
+def stock_analysis_compact_history_years():
+    """How many of the most recent ANNUAL periods per statement are included
+    in the synthesis payload. Quarterly periods are never included in
+    synthesis at all — nothing that calculates from them needs them there."""
+    return _int("STOCK_ANALYSIS_COMPACT_HISTORY_YEARS", 5)
+
+
+def stock_analysis_compact_price_observations():
+    """How many of the most recent daily closes are included as illustrative
+    price points, separate from and much smaller than the full OHLCV history
+    used to calculate technical indicators (which is never sent to the LLM)."""
+    return _int("STOCK_ANALYSIS_COMPACT_PRICE_OBSERVATIONS", 10)
+
+
+def stock_analysis_compact_max_warnings():
+    return _int("STOCK_ANALYSIS_COMPACT_MAX_WARNINGS", 20)
+
+
+def stock_analysis_compact_max_provenance_entries():
+    return _int("STOCK_ANALYSIS_COMPACT_MAX_PROVENANCE_ENTRIES", 20)
+
+
+def stock_analysis_earnings_max_annual():
+    return _int("STOCK_ANALYSIS_EARNINGS_MAX_ANNUAL", 5)
+
+
+def stock_analysis_earnings_max_quarterly():
+    return _int("STOCK_ANALYSIS_EARNINGS_MAX_QUARTERLY", 8)
+
+
+# ---- staged research pipeline (bull/bear/rebuttal/manager/risk/final) ----
+# Adapted from TauricResearch/TradingAgents' role structure (bull researcher,
+# bear researcher, research manager, risk reviewer) at commit
+# a33fd4c0f134485a43553a2c23a63cb14adbd88f — NOT imported as a runtime
+# dependency; see finance/research_pipeline.py for what was adapted vs.
+# deliberately excluded (its trader/portfolio-manager/order-execution
+# behavior, its unbounded free-text debate loop, and its 3-way risk debate
+# over a trade proposal).
+def stock_analysis_research_pipeline_enabled():
+    return _bool("STOCK_ANALYSIS_RESEARCH_PIPELINE_ENABLED", True)
+
+
+def research_stage_max_output_tokens(stage=None):
+    """Per-stage output token budget, passed to Ollama as options.num_predict.
+
+    COR corrective patch (Phase 1/live verification): 700 was tuned for the
+    old, shorter {point, evidence_cited} researcher schema. The Phase 3
+    per-claim rewrite ({claim_id, claim, evidence_ids, claim_type,
+    assumptions, confidence} x 2-5 claims) needs meaningfully more room --
+    confirmed live against real COR data, where 700 reliably truncated
+    bull_researcher's JSON mid-object (surfacing as "response did not
+    contain a parseable JSON object", NOT a content-policy violation) and
+    2500 reliably did not, across repeated trials. Raised to 3000 for
+    headroom above that confirmed-working figure.
+
+    MLI corrective patch: raised 3000 -> 8000. A reasoning model spends
+    output budget on THINKING tokens that never appear in
+    `message.content`, and that spend scales with prompt size. On MLI (119
+    evidence items, ~5.4k prompt tokens) bull_researcher reproducibly
+    returned completion_tokens=3002 against a 3000 cap with an EMPTY body --
+    the entire budget consumed before any JSON was emitted, surfacing as
+    "response did not contain a parseable JSON object" (a parse error, which
+    by design gets NO repair attempt) and taking the whole pipeline down.
+    The same call at 8000 returns valid JSON in ~4.4k tokens. Note this is
+    a CEILING, not a target: stages that need less still use less, so the
+    higher bound costs nothing on smaller companies.
+
+    WM corrective patch: raised 8000 -> 16000, and made PER-STAGE.
+    8000 was measured, not guessed, and it was too tight. Four consecutive
+    live WM runs produced research_manager completion_tokens of 7719, 7587,
+    7691 against the 8000 cap -- within ~300 tokens of truncation every
+    single time. That is the mechanism behind "research_manager fails for a
+    different stock every time": it is not ticker-specific, it is a stage
+    running permanently at the edge of its budget, where any company whose
+    evidence produces slightly more text tips over. And because a truncated
+    response is indistinguishable from a malformed one without
+    `done_reason`, the failure did not even look like a budget problem.
+
+    Per-stage because the stages are not alike: research_manager reconciles
+    two full researcher outputs into a ten-field schema with seven lists,
+    and the final synthesizer carries the recommendation plus its
+    justification. `rebuttal_round` needs a fraction of that.
+    """
+    # 12,000, not 16,000. The largest usage ever MEASURED on this pipeline
+    # is 9,032 completion tokens (research_manager, live WM), so this is
+    # ~33% headroom over the observed peak and 50% above the 8,000 that
+    # demonstrably truncated. 16,000 was picked for comfort rather than
+    # from data, and it pushed the derived timeout (see
+    # `research_stage_timeout_seconds`) to 560s per attempt -- nearly half
+    # an hour of waiting across three attempts on a stage that is simply
+    # stuck.
+    base = _int("RESEARCH_STAGE_MAX_OUTPUT_TOKENS", 12000)
+    if not stage:
+        return base
+    override = _int(f"RESEARCH_STAGE_MAX_OUTPUT_TOKENS_{stage.upper()}", 0)
+    if override > 0:
+        return override
+    return int(base * _STAGE_OUTPUT_BUDGET_SCALE.get(stage, 1.0))
+
+
+# Relative output budget per stage, applied to
+# `RESEARCH_STAGE_MAX_OUTPUT_TOKENS`. A ceiling, never a target -- a stage
+# that needs less still uses less. Ratios reflect measured live usage:
+# research_manager and the two researchers are the heavy stages.
+_STAGE_OUTPUT_BUDGET_SCALE = {
+    "bull_researcher": 1.0,
+    "bear_researcher": 1.0,
+    "rebuttal_round": 0.6,
+    "research_manager": 1.25,
+    "risk_reviewer": 0.75,
+    "final_investment_synthesizer": 1.0,
+}
+
+
+# The throughput a stage's timeout is sized against. Deliberately BELOW
+# anything measured -- 60 tok/s observed on the configured cloud model, and
+# ~90 tok/s earlier the same day. Cloud latency varies with remote load, so
+# the floor assumes a bad day rather than a good one.
+_ASSUMED_MIN_TOKENS_PER_SECOND = 40
+# Prompt evaluation, queueing and network, on top of generation.
+_STAGE_TIMEOUT_OVERHEAD_SECONDS = 60
+
+
+def research_stage_timeout_seconds(stage=None):
+    """Wall-clock ceiling for one stage, DERIVED FROM ITS OUTPUT BUDGET.
+
+    CF corrective patch. These were two independent constants and they drifted
+    apart, which is a bug the moment either moves:
+
+        research_manager budget   20,000 tokens
+        measured throughput           60 tok/s
+        time to use the budget       333 s
+        configured timeout           300 s   <-- times out before it can finish
+
+    A stage allowed to generate N tokens must be allowed the time to generate
+    them; otherwise raising the budget to fix truncation silently converts
+    truncation failures into timeout failures, which is what happened here.
+    The budget was raised this morning to fix research_manager truncating at
+    8,000 tokens, the timeout was raised alongside it by guesswork rather than
+    arithmetic, and the first long CF run hit the gap.
+
+    So the timeout is now a FUNCTION of the budget, and the explicit setting
+    acts as a floor rather than a ceiling -- a configured value can raise the
+    limit but can no longer silently sit below what the budget requires.
+    """
+    configured = _int("RESEARCH_STAGE_TIMEOUT_SECONDS", 180)
+    budget = research_stage_max_output_tokens(stage)
+    derived = int(budget / _ASSUMED_MIN_TOKENS_PER_SECOND) + _STAGE_TIMEOUT_OVERHEAD_SECONDS
+    return max(configured, derived)
+
+
+def stock_analysis_synthesis_timeout_seconds():
+    """GE corrective patch: the SAME class of bug `research_stage_timeout_
+    seconds` was raised to fix, found in a DIFFERENT call site that never got
+    the same treatment -- finance/workflow.py::_ask_local_with_content_policy
+    (the report_detail="full" single-shot narrative call, and its one repair
+    attempt) called `ask_local_fn(messages)` with no explicit timeout at all,
+    silently inheriting `brain.ask_local_raw`'s bare 120-second default. That
+    call's prompt is the FULL compact payload (larger than any one research-
+    pipeline stage's prompt) and its completion has no `options.num_predict`
+    cap at all (unlike a pipeline stage, capped by
+    `research_stage_max_output_tokens`) -- a live GE run hit "Read timed out.
+    (read timeout=120)" on exactly this path. Defaults higher than
+    `research_stage_timeout_seconds` for that reason, not copied from it."""
+    return _int("STOCK_ANALYSIS_SYNTHESIS_TIMEOUT_SECONDS", 240)
+
+
+def research_material_scenario_spread():
+    """MLI corrective patch: bull-to-bear scenario range, as a fraction of
+    the base modeled value, at or above which research readiness is capped at
+    LIMITED (finance/workflow.py::_assumption_quality_limitations).
+
+    Needs calibration against this DCF's OWN typical spread, not an abstract
+    notion of "wide" -- observed live: MLI 97%, AMZN 127%, DIS 96%. A
+    threshold much below ~0.9 would mark essentially every analysis LIMITED
+    and make the signal worthless. 0.90 flags a bull-to-bear range wider than
+    the base value itself; tune as more tickers are observed."""
+    return float(_str("RESEARCH_MATERIAL_SCENARIO_SPREAD", "0.90"))
+
+
+def stock_analysis_include_news():
+    return _bool("STOCK_ANALYSIS_INCLUDE_NEWS", False)
+
+
+def stock_analysis_forecast_years():
+    return _int("STOCK_ANALYSIS_FORECAST_YEARS", 5)
+
+
+# ---- H.4 corrective patch: report length/detail mode ----
+# The full, historically-detailed report (bull/bear/rebuttal transcript,
+# complete assumption provenance, full sensitivity grid, ...) stays available
+# unchanged behind report_detail="full" -- see finance/workflow.py::
+# render_compact_report / synthesize_report. Nothing internal (deterministic
+# facts, DCF detail, evidence) is ever reduced by this setting -- only what
+# is RENDERED to the user.
+def stock_analysis_report_detail_default():
+    """'compact' (default) or 'full'. A user request containing an explicit
+    "detailed"/"full report" phrase overrides this for that one request
+    (finance/workflow.py::detect_report_detail) regardless of this setting."""
+    return _str("STOCK_ANALYSIS_REPORT_DETAIL", "compact")
+
+
+def stock_analysis_compact_report_target_words():
+    """Soft target for the compact report's rendered length. Not a hard
+    truncation limit -- the renderer's fixed section/bullet caps are what
+    actually bound the length; this is only the documented target tests
+    check against, mirroring the compact-synthesis-payload token target."""
+    return _int("STOCK_ANALYSIS_COMPACT_REPORT_TARGET_WORDS", 1500)
+
+
+def dcf_min_forecast_years():
+    return _int("DCF_MIN_FORECAST_YEARS", 1)
+
+
+def dcf_max_forecast_years():
+    return _int("DCF_MAX_FORECAST_YEARS", 15)
+
+
+def dcf_min_discount_rate():
+    return float(_str("DCF_MIN_DISCOUNT_RATE", "0.01"))
+
+
+def dcf_max_discount_rate():
+    return float(_str("DCF_MAX_DISCOUNT_RATE", "0.60"))
+
+
+def dcf_net_debt_policy():
+    """The default net-debt policy. Conservative by design: 'cash_only' never
+    assumes an unverified security is liquid. Switch to
+    'cash_and_marketable_securities' only alongside
+    dcf_short_term_investments_eligible=true — see finance.dcf.NetDebtPolicy."""
+    return _str("DCF_NET_DEBT_POLICY", "cash_only")
+
+
+def dcf_short_term_investments_eligible():
+    """Whether short-term investments are ELIGIBLE to net against debt under
+    the 'cash_and_marketable_securities' policy. False by default — this
+    project does not verify per-security liquidity, so eligibility is an
+    explicit operator opt-in, never inferred."""
+    return _bool("DCF_SHORT_TERM_INVESTMENTS_ELIGIBLE", False)
+
+
+# ---- Phase H.3 corrective patch: CapEx/D&A/NWC assumption hierarchy ----
+# Explicitly configured LAST-RESORT defaults only — used when NO reported
+# historical ratio exists at all. Never derived from a margin difference or
+# any other proxy; see finance/workflow.py::propose_assumptions and
+# docs/PHASE_H1_STOCK_ANALYSIS.md's DCF assumption section for the full
+# reported-history-first hierarchy this backs.
+def dcf_default_capex_pct_revenue():
+    return float(_str("DCF_DEFAULT_CAPEX_PCT_REVENUE", "0.05"))
+
+
+def dcf_default_depreciation_pct_revenue():
+    return float(_str("DCF_DEFAULT_DEPRECIATION_PCT_REVENUE", "0.04"))
+
+
+def dcf_default_working_capital_pct_revenue():
+    return float(_str("DCF_DEFAULT_WORKING_CAPITAL_PCT_REVENUE", "0.02"))
+
+
+def dcf_assumption_history_max_years():
+    """How many reported annual periods the CapEx/D&A/NWC historical-ratio
+    hierarchy may look back across (average of up to this many years)."""
+    return _int("DCF_ASSUMPTION_HISTORY_MAX_YEARS", 5)
+
+
+# ---- Phase H.4: forward assumptions ----
+def dcf_long_run_growth():
+    """The rate a forecast growth path FADES TOWARD across the horizon.
+
+    Not a terminal-growth assumption (that is `terminal_growth`, applied to
+    the perpetuity) — this is the year-5 end of the explicit forecast. It
+    exists because the previous behaviour held one historical CAGR flat
+    across every forecast year, which is not a neutral default but an
+    aggressive one: it asserts a company's current growth persists unchanged
+    for the whole horizon. Defaulted to a broad-economy nominal rate."""
+    return float(_str("DCF_LONG_RUN_GROWTH", "0.03"))
+
+
+def dcf_default_revenue_growth():
+    """LAST-RESORT growth, used only when NO growth evidence of any kind
+    exists — no guidance, no TTM trend, no reported year-over-year, no
+    history. Deliberately conservative; a company we know nothing about is
+    not assumed to grow faster than the economy."""
+    return float(_str("DCF_DEFAULT_REVENUE_GROWTH", "0.03"))
+
+
+def dcf_default_operating_margin():
+    """LAST-RESORT operating margin, used only when none was ever reported."""
+    return float(_str("DCF_DEFAULT_OPERATING_MARGIN", "0.10"))
+
+
+def forward_assumption_model_enabled():
+    """Whether the local model may PROPOSE a forward path at all.
+
+    When false the deterministic baseline is used directly. The model's
+    proposal is always validated and can always be rejected, so this is a
+    performance/latency switch rather than a safety one — the safety comes
+    from `finance/forward_assumptions.py::validate_proposal`, not from here."""
+    return _bool("FORWARD_ASSUMPTION_MODEL_ENABLED", True)
+
+
+def guidance_ingestion_enabled():
+    """Whether SEC-filed management guidance is fetched and extracted.
+
+    Costs two extra SEC requests per analysis (the filing index and the
+    earnings-release exhibit). Disabling it is a supported configuration:
+    the whole workflow is built to run with guidance unavailable (see
+    finance/freshness.py and section 20 of the phase spec)."""
+    return _bool("GUIDANCE_INGESTION_ENABLED", True)
+
+
+# ---- Finance Extraction V2 ----
+#
+# V2 replaces the natural-language extraction layer only: documents ->
+# candidates. Everything below validated candidates is unchanged. The default
+# stays v1 until the benchmark says otherwise -- a new extractor does not get
+# production by being new.
+
+
+def finance_extraction_mode():
+    """'v1' (default), 'v2', or 'compare'.
+
+    compare runs both and RECORDS the disagreements without choosing between
+    them: the point is measurement, and an extractor that silently won
+    because it was newer would be exactly the thing this mode exists to
+    prevent.
+    """
+    mode = _str("FINANCE_EXTRACTION_MODE", "v1").strip().lower()
+    return mode if mode in ("v1", "v2", "compare") else "v1"
+
+
+def finance_actualization_mode():
+    """'v1' (default), 'v2', or 'compare'.
+
+    Which layer decides the CURRENT REPORTED PERIOD -- the answer everything
+    downstream inherits: revenue, margins, debt, latest-quarter growth, the
+    DCF base, the research claims.
+
+    v1 is the existing planner, unchanged and still the default. compare runs
+    the V2 resolver beside it, RETURNS V1'S ANSWER and records the
+    disagreement; a compare mode that preferred the newer resolver would be
+    v2-by-default wearing a diagnostic's name. v2 uses the V2 resolution and
+    fails closed rather than falling back, because a silent fallback means the
+    report carries whichever layer answered last.
+    """
+    mode = _str("FINANCE_ACTUALIZATION_MODE", "v1").strip().lower()
+    return mode if mode in ("v1", "v2", "compare") else "v1"
+
+
+def finance_reported_actuals_mode():
+    """'v1' (default), 'v2', or 'compare'.
+
+    Whether filed EARNINGS-RELEASE EXHIBITS are read as a source of reported
+    actual results, alongside the SEC CompanyFacts path.
+
+    The Actualization resolver already chooses correctly between a newer
+    complete Q4/FY release and an older Q3 10-Q. What it could not do was see
+    the release: an 8-K earnings exhibit is almost never represented in
+    CompanyFacts, so the candidate it would have selected never reached it.
+
+    v1 fetches nothing and produces no candidate. compare reads the releases
+    and RECORDS what it found without offering the candidates, because a
+    compare mode that changed which period was selected would be v2 by
+    default. v2 offers them to the resolver and fails closed.
+
+    Note that this switch alone changes nothing: under
+    FINANCE_ACTUALIZATION_MODE=v1, which is the production default, the
+    actualization runtime returns before it looks at any candidate.
+    """
+    mode = _str("FINANCE_REPORTED_ACTUALS_MODE", "v1").strip().lower()
+    return mode if mode in ("v1", "v2", "compare") else "v1"
+
+
+def finance_reported_actuals_max_filings():
+    """How many candidate earnings filings one run may read.
+
+    Each costs a filing index and an exhibit, both through the shared cache.
+    Small on purpose: the newest release is the one that can advance the
+    period, and the ones behind it are provenance.
+    """
+    return _int("FINANCE_REPORTED_ACTUALS_MAX_FILINGS", 3)
+
+
+def finance_extraction_max_sections():
+    """How many document sections one extraction may read."""
+    return _int("FINANCE_EXTRACTION_MAX_SECTIONS", 4)
+
+
+def finance_extraction_max_section_chars():
+    """Character budget per section. A whole filing is never sent."""
+    return _int("FINANCE_EXTRACTION_MAX_SECTION_CHARS", 6000)
+
+
+def finance_extraction_max_output_tokens():
+    """Output-token ceiling for one section read.
+
+    1200 was the original guess and it was wrong for the same reason
+    `research_stage_max_output_tokens` documents at length: a reasoning model
+    spends budget on THINKING tokens that never appear in `message.content`.
+    Measured on the configured model, a trivial `{"ok": true}` reply cost 693
+    completion tokens with an empty body at a 100-token cap -- the entire
+    budget consumed before any JSON was emitted. A guidance section is a far
+    larger reading task than that.
+
+    8000 was the first correction and it was still too tight, which the live
+    benchmark showed immediately: on a 2.2k-character semiconductor outlook
+    the model returned completion_tokens=8002 against the 8000 cap with an
+    EMPTY body, twice in a row, and the same on the next case. That is the
+    "permanently at the edge of its budget" pathology
+    `research_stage_max_output_tokens` documents -- a 548-character section
+    had already been measured at 7210 tokens, so 8000 was never headroom.
+
+    20000 is sized from that measurement rather than guessed: ~7.2k tokens of
+    thinking on a small section, and the real sections are up to 6k characters.
+    It is a CEILING, not a target.
+    """
+    return _int("FINANCE_EXTRACTION_MAX_OUTPUT_TOKENS", 20000)
+
+
+def finance_extraction_timeout_seconds():
+    """Wall-clock ceiling for one section read, DERIVED FROM ITS BUDGET.
+
+    The same coupling `research_stage_timeout_seconds` exists to enforce. The
+    extractor previously passed no timeout at all and inherited
+    `brain.ask_local_raw`'s bare 120-second default, so raising the token
+    budget to stop truncation would have silently converted truncation
+    failures into timeout failures. A configured value is a FLOOR: it can
+    raise the limit but cannot sit below what the budget requires.
+    """
+    configured = _int("FINANCE_EXTRACTION_TIMEOUT_SECONDS", 120)
+    derived = (int(finance_extraction_max_output_tokens()
+                   / _ASSUMED_MIN_TOKENS_PER_SECOND)
+               + _STAGE_TIMEOUT_OVERHEAD_SECONDS)
+    return max(configured, derived)
+
+
+def finance_guidance_tool_timeout_seconds():
+    """Wall clock for the whole current-guidance tool, DERIVED FROM ITS WORK.
+
+    The third instance of one bug. `research_stage_timeout_seconds` documents
+    the first two: a budget and the time to spend it drift apart the moment
+    either moves. Here the drift was across a LAYER rather than across two
+    constants -- the tool carried a flat 30s from `_SecTool`, and wiring the
+    semantic extractor into it added a model call of 60-200s per section
+    inside that 30s.
+
+    The result was the worst available failure. `finance.sec.current_guidance`
+    is deliberately non-fatal (workflow.py: "a missing or unreachable earnings
+    release degrades confidence, never the run"), so the tool timed out and
+    every guidance statement SILENTLY VANISHED from the analysis. Found by the
+    canaries, which read empty guidance the moment compare mode was switched
+    on.
+
+    So the tool's clock is now a function of what may run inside it. Under v1
+    nothing extra runs and this is the 30s it always was. The configured value
+    is a FLOOR: it can raise the limit but can no longer sit below what the
+    configured extraction bounds require.
+    """
+    base = _int("FINANCE_GUIDANCE_TOOL_TIMEOUT_SECONDS", 30)
+    if finance_extraction_mode() == "v1":
+        return base
+    # Worst case: every release contributes its full section budget, and each
+    # section takes its full model timeout. Typically far less -- one section
+    # per release at ~60-200s -- but a ceiling that assumes the good case is
+    # the bug this function exists to prevent.
+    return base + (guidance_max_releases()
+                   * finance_extraction_max_sections()
+                   * finance_extraction_timeout_seconds())
+
+
+def finance_extraction_min_confidence():
+    """Below this a candidate is refused as too uncertain to accept.
+
+    Fail closed: an omitted statement costs a reader nothing, and an accepted
+    wrong one is used.
+    """
+    try:
+        return float(os.environ.get("FINANCE_EXTRACTION_MIN_CONFIDENCE", 0.5))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def finance_extraction_model_identity():
+    """A NAME for the model, for cache keys and provenance. Never a secret."""
+    return _str("FINANCE_EXTRACTION_MODEL", _str("LOCAL_MODEL", "local"))
+
+
+def finance_extraction_v1_fallback_enabled():
+    """May a FAILED V2 extraction fall back to V1?
+
+    Off by default (section 20: no silent fallback). When switched on the
+    fallback is labelled in provenance, so a reader can tell which layer
+    answered.
+    """
+    return _bool("FINANCE_EXTRACTION_V1_FALLBACK", False)
+
+
+# ---- Financial Document Package pipeline (Phase H.16) ----
+#
+# One flag gates the whole upstream layer: document-package resolution, the
+# LLM actual-table fallback, and financing-event extraction. `v1` (default)
+# never resolves a package, never fetches a filing beyond what the existing
+# pipeline already fetches, and never calls a model -- identical in cost to
+# not having the layer at all.
+
+def finance_document_pipeline_mode():
+    """'v1' (default), 'v2', or 'compare'.
+
+    compare resolves the document package and runs both new extractors, but
+    RECORDS what they found rather than offering it -- the existing answer is
+    unchanged. v2 offers validated actual-fact candidates to the existing
+    canonical resolver through the same `extra_candidates`/`extra_facts` seam
+    `finance.reported_actuals` already uses, and fails closed on failure.
+    """
+    mode = _str("FINANCE_DOCUMENT_PIPELINE_MODE", "v1").strip().lower()
+    return mode if mode in ("v1", "v2", "compare") else "v1"
+
+
+def finance_sec_provider():
+    """'current' (default), 'edgartools', or 'compare' -- Phase H.29 spike.
+
+    'current' (the only mode ever used in production): the existing
+    `finance.sec_provider.SecEdgarClient` path, completely unchanged. Nothing
+    in this mode imports `finance.documents.edgartools_adapter` or the
+    `edgar` package.
+
+    'edgartools': the adapter answers filing-discovery/retrieval questions
+    instead of the current client. Spike-only; never selected automatically.
+
+    'compare': BOTH paths run; the current path's answer is still what the
+    rest of the pipeline uses (identical behavior to 'current'), and the
+    EdgarTools adapter's answer is recorded alongside it for diagnostics only
+    -- the same non-silent-substitution discipline as `finance_extraction_
+    mode`/`finance_document_pipeline_mode`'s own 'compare' modes.
+    """
+    mode = _str("FINANCE_SEC_PROVIDER", "current").strip().lower()
+    return mode if mode in ("current", "edgartools", "compare") else "current"
+
+
+def finance_document_pipeline_max_financing_events():
+    """How many financing-eligible 8-Ks one run may read."""
+    return _int("FINANCE_DOCUMENT_PIPELINE_MAX_FINANCING_EVENTS", 8)
+
+
+def finance_actuals_extraction_max_sections():
+    """How many reported-statement tables one actuals-fallback read may see."""
+    return _int("FINANCE_ACTUALS_EXTRACTION_MAX_SECTIONS", 4)
+
+
+def finance_actuals_extraction_max_section_chars():
+    """Character budget per rendered table. A whole filing is never sent."""
+    return _int("FINANCE_ACTUALS_EXTRACTION_MAX_SECTION_CHARS", 6000)
+
+
+def finance_actuals_extraction_max_output_tokens():
+    """Output-token ceiling for one table read. See `finance_extraction_
+    max_output_tokens` for why this is sized in the thousands rather than
+    guessed small: the same reasoning-model thinking-token pathology applies."""
+    return _int("FINANCE_ACTUALS_EXTRACTION_MAX_OUTPUT_TOKENS", 20000)
+
+
+def finance_actuals_extraction_timeout_seconds():
+    """Wall-clock ceiling for one table read, DERIVED FROM ITS BUDGET."""
+    configured = _int("FINANCE_ACTUALS_EXTRACTION_TIMEOUT_SECONDS", 120)
+    derived = (int(finance_actuals_extraction_max_output_tokens()
+                   / _ASSUMED_MIN_TOKENS_PER_SECOND)
+               + _STAGE_TIMEOUT_OVERHEAD_SECONDS)
+    return max(configured, derived)
+
+
+def finance_actuals_extraction_min_confidence():
+    """Below this an actual-fact candidate is refused.
+
+    Higher than guidance's floor (0.5): this layer asserts a REPORTED figure
+    that may become part of the canonical financial state, not a forward
+    statement held to its own separate compatibility rules.
+    """
+    try:
+        return float(os.environ.get("FINANCE_ACTUALS_EXTRACTION_MIN_CONFIDENCE", 0.6))
+    except (TypeError, ValueError):
+        return 0.6
+
+
+def finance_event_extraction_max_section_chars():
+    """Character budget for one financing-event filing's body text.
+
+    Applies to a SELECTED, NORMALIZED Item-code block (Phase H.19), never
+    to a raw document prefix -- see `finance.documents.text_normalization`'s
+    module docstring for why that ordering is load-bearing.
+    """
+    return _int("FINANCE_EVENT_EXTRACTION_MAX_SECTION_CHARS", 8000)
+
+
+def finance_event_extraction_max_sections():
+    """How many Item-code blocks one financing-event filing may show the
+    model. A filing naming several relevant items (1.01 and 2.03, say)
+    gets one section per item rather than one section for the whole
+    document."""
+    return _int("FINANCE_EVENT_EXTRACTION_MAX_SECTIONS", 4)
+
+
+def finance_event_extraction_max_output_tokens():
+    return _int("FINANCE_EVENT_EXTRACTION_MAX_OUTPUT_TOKENS", 20000)
+
+
+def finance_event_extraction_timeout_seconds():
+    """Wall-clock ceiling for one event read, DERIVED FROM ITS BUDGET."""
+    configured = _int("FINANCE_EVENT_EXTRACTION_TIMEOUT_SECONDS", 120)
+    derived = (int(finance_event_extraction_max_output_tokens()
+                   / _ASSUMED_MIN_TOKENS_PER_SECOND)
+               + _STAGE_TIMEOUT_OVERHEAD_SECONDS)
+    return max(configured, derived)
+
+
+def finance_event_extraction_min_confidence():
+    """Below this a financing-event candidate is refused.
+
+    Funded-vs-committed status feeds a hard-safety invariant
+    (`UNDRAWN_FACILITY_COUNTED_AS_FUNDED_DEBT` must stay zero), so the floor
+    matches the actuals layer's rather than guidance's lower one.
+    """
+    try:
+        return float(os.environ.get("FINANCE_EVENT_EXTRACTION_MIN_CONFIDENCE", 0.6))
+    except (TypeError, ValueError):
+        return 0.6
+
+
+def research_run_artifacts_enabled():
+    """Whether each research-pipeline run is written to disk for replay.
+
+    Phase H.5, Phase 0. OFF by default: this is diagnostic capture, not a
+    product feature, and an artifact holds every stage's full output
+    (~100 KB per run). Turn it on when investigating a validation failure --
+    without it there is nothing to replay, which is exactly the position the
+    WM investigation was in (the 1-to-4-to-3 escalation existed only in a
+    transient console buffer and could not be re-examined)."""
+    return _bool("RESEARCH_RUN_ARTIFACTS_ENABLED", False)
+
+
+def finance_audit_trail_enabled():
+    """Whether to build the finance audit trail (Phase 52).
+
+    OFF by default: it is a debugging aid, not a product feature, and it
+    walks every canonical metric to assemble one traceable chain from a
+    filed fact to a valuation input. Turn it on when a number in a report
+    looks wrong and you want to see where it came from without reading a
+    prompt.
+    """
+    return _bool("FINANCE_AUDIT_TRAIL_ENABLED", False)
+
+
+def research_run_artifacts_dir():
+    return _str("RESEARCH_RUN_ARTIFACTS_DIR", "logs/research_runs")
+
+
+def research_stage_max_attempts():
+    """How many times ONE research-pipeline stage may be attempted before it
+    fails closed, counting the first attempt.
+
+    WM corrective patch. Previously fixed at 1 attempt, plus a single repair
+    for content-policy violations only — so a stage that got cut off at the
+    token limit, emitted one malformed brace, or cited one wrong evidence id
+    died outright and cascaded through every stage downstream. Those failures
+    are mechanical and stochastic, which is why `research_manager` seemed to
+    fail on a different ticker each run rather than on a specific one.
+
+    3 is deliberately small: each attempt is a full local-model call
+    (~60s on the measured WM run), and a stage that cannot produce valid JSON
+    in three tries has a real problem worth surfacing rather than grinding
+    on. Set to 1 to restore the old single-attempt behaviour."""
+    return _int("RESEARCH_STAGE_MAX_ATTEMPTS", 3)
+
+
+def guidance_max_releases():
+    """How many recent item-2.02 8-K earnings releases to examine. More than
+    one is needed so superseded guidance can be identified as superseded
+    rather than simply absent."""
+    return _int("GUIDANCE_MAX_RELEASES", 3)
+
+
+# ---- TSLA DCF validation patch: post-hoc result validation ----
+def dcf_allow_negative_terminal_fcff():
+    """False by default (fail closed): a NEGATIVE terminal-year FCFF fed into
+    the Gordon-growth perpetuity (TV = FCFF_(n+1) / (WACC - g)) does not
+    represent a going concern that grows forever -- it silently produces a
+    perpetuity value with the WRONG economic meaning (see finance/dcf.py's
+    `DcfValidationStatus.NEGATIVE_TERMINAL_FCFF`). Flip to true only if a
+    reviewed policy decision explicitly wants a negative-terminal-FCFF
+    perpetuity valued anyway rather than flagged invalid."""
+    return _bool("DCF_ALLOW_NEGATIVE_TERMINAL_FCFF", False)
+
+
+def dcf_scenario_monotonicity_check_enabled():
+    """Whether run_dcf() checks bull >= base >= bear ordering when scenario
+    NAMES are exactly {'base','bull','bear'} AND their assumptions are
+    constructed so that ordering is expected (see finance/dcf.py::
+    _scenario_monotonicity_check). On by default; the check only ever
+    DETECTS and reports a violation -- it never reorders or clamps a value."""
+    return _bool("DCF_SCENARIO_MONOTONICITY_CHECK_ENABLED", True)
+
+
+# ---- Phase H.3 corrective patch (Problem 10): reduced-mode confidence caps ----
+# The research-pipeline prompts already INSTRUCT the model to lower its own
+# self-reported confidence when material datasets were omitted (see
+# finance/research_pipeline.py's _final_synthesizer_prompt and _researcher_
+# prompt) -- these two settings are the deterministic BACKSTOP, exactly the
+# same "instruction alone is not enough" pattern as the content-policy scan:
+# whatever the model reports, it is clamped DOWN (never up, never rejected)
+# to these ceilings whenever finance.claim_validation-visible
+# 'plan.omitted.*' evidence entries exist in the index for that analysis.
+def research_reduced_mode_confidence_cap():
+    """Ceiling for the FinalInvestmentSynthesizer's numeric 'confidence'
+    (0.0-1.0) when any dataset was omitted from the analysis."""
+    return float(_str("RESEARCH_REDUCED_MODE_CONFIDENCE_CAP", "0.6"))
+
+
+def research_reduced_mode_confidence_enum_cap():
+    """Ceiling for the Bull/Bear Researchers' enum 'confidence'
+    (low/medium/high) when any dataset was omitted from the analysis."""
+    return _str("RESEARCH_REDUCED_MODE_CONFIDENCE_ENUM_CAP", "medium")
+
+
+# ---- Phase H.3: Yahoo Finance (yfinance) + SEC EDGAR providers ----
+# See docs/security/YAHOO_SEC_PROVIDER_REVIEW.md for the full review: yfinance
+# is UNOFFICIAL personal-use scraping (no sanctioned API, no key) and requires
+# explicit acknowledgement; SEC EDGAR is an official, documented, keyless
+# government API gated only by a required identifying User-Agent and a
+# published 10 req/s fair-access ceiling. Alpha Vantage remains available but
+# is demoted to an explicitly-configured secondary/news provider — it is
+# NEVER a silent fallback (automatic_fallback below defaults to false).
+
+def yahoo_finance_enabled():
+    return _bool("YAHOO_FINANCE_ENABLED", True)
+
+
+def yahoo_personal_use_acknowledged():
+    """Yahoo tools are not registered at all unless this is explicitly true —
+    see docs/security/YAHOO_SEC_PROVIDER_REVIEW.md §1.1. Off by default:
+    unlike a reviewed official API, unofficial scraping needs an explicit
+    opt-in, not just 'not disabled'."""
+    return _bool("YAHOO_PERSONAL_USE_ACKNOWLEDGED", False)
+
+
+def sec_edgar_enabled():
+    return _bool("SEC_EDGAR_ENABLED", True)
+
+
+def sec_user_agent():
+    """SEC rejects requests with no descriptive User-Agent. Read at call time,
+    like alphavantage_api_key() — a missing value disables only SEC tools
+    (a controlled error), never breaks startup. Never hardcoded: this
+    deliberately carries a real contact per SEC's own guidance, so it must
+    come from configuration, never source."""
+    return _str("SEC_USER_AGENT", None)
+
+
+def edgar_identity():
+    """Phase H.29 spike: the identity EdgarTools' own `edgar.set_identity()`
+    requires (name + contact, no key/secret). Same discipline as
+    `sec_user_agent()` -- read at call time, never hardcoded. Only consulted
+    by `finance.documents.edgartools_adapter`, which is only reached when
+    `finance_sec_provider()` is 'edgartools' or 'compare' (default 'current'
+    never imports that module at all)."""
+    return _str("EDGAR_IDENTITY", None)
+
+
+def sec_min_request_interval_ms():
+    """Minimum spacing between EXTERNAL SEC calls. SEC's fair-access ceiling
+    is 10 req/s (100ms); this project paces well under that by default since
+    nothing about a single-user analysis needs to approach the limit — see
+    docs/security/YAHOO_SEC_PROVIDER_REVIEW.md §2.2."""
+    return _int("SEC_MIN_REQUEST_INTERVAL_MS", 250)
+
+
+def sec_ticker_cik_cache_ttl_seconds():
+    """The ticker->CIK mapping file changes rarely; a long TTL avoids
+    re-fetching the ~800KB file on every symbol lookup."""
+    return _int("SEC_TICKER_CIK_CACHE_TTL_SECONDS", 7 * 24 * 3600)
+
+
+# ---- Phase H.3: dataset-specific provider selection ----
+# Explicit, per-capability, never a single "the" provider — see
+# docs/security/YAHOO_SEC_PROVIDER_REVIEW.md §3. Each is independently
+# configurable so e.g. disabling Yahoo can be paired with routing quotes to
+# Alpha Vantage instead, without code changes.
+
+def finance_quote_provider():
+    return _str("FINANCE_QUOTE_PROVIDER", "yahoo")
+
+
+def finance_price_history_provider():
+    return _str("FINANCE_PRICE_HISTORY_PROVIDER", "yahoo")
+
+
+def finance_corporate_actions_provider():
+    return _str("FINANCE_CORPORATE_ACTIONS_PROVIDER", "yahoo")
+
+
+def finance_us_fundamentals_provider():
+    return _str("FINANCE_US_FUNDAMENTALS_PROVIDER", "sec")
+
+
+def finance_company_profile_provider():
+    return _str("FINANCE_COMPANY_PROFILE_PROVIDER", "yahoo")
+
+
+def finance_analyst_estimates_provider():
+    return _str("FINANCE_ANALYST_ESTIMATES_PROVIDER", "yahoo")
+
+
+def finance_news_provider():
+    return _str("FINANCE_NEWS_PROVIDER", "alphavantage")
+
+
+def finance_secondary_provider():
+    return _str("FINANCE_SECONDARY_PROVIDER", "alphavantage")
+
+
+def finance_automatic_fallback():
+    """Whether a primary-provider failure may silently try the secondary
+    provider. False by default: per-dataset provider is always reported, and
+    a fallback that happened is always visible in the report rather than
+    invisible — see docs/security/YAHOO_SEC_PROVIDER_REVIEW.md §3."""
+    return _bool("FINANCE_AUTOMATIC_FALLBACK", False)
+
+
 # ---- Phase G.1: MCP capability detection / server selection ----
 def mcp_capability_debug_enabled():
     """Verbose per-request capability/selection logging — off by default so a

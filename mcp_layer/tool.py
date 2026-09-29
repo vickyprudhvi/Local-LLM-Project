@@ -5,6 +5,11 @@ surface (name, description, input_schema, permission) so the registry shortlists
 it and the executor runs it with no MCP awareness. execute() delegates to the MCP
 client and translates McpError into ToolFailure, which the executor normalizes
 into a ToolResult exactly like any built-in tool's controlled failure.
+
+Phase H.24: every successful result and every server-originated error message
+passes through tools.untrusted before returning, regardless of which MCP server
+produced it. This is the earliest point common to all MCP servers — the registry,
+executor, and tool-selection loop remain entirely MCP-unaware.
 """
 
 import os
@@ -13,6 +18,7 @@ from typing import Optional
 from mcp_layer.errors import McpError
 from tools.base import BaseTool, ToolFailure
 from tools.models import ToolPermission
+from tools.untrusted import mark_mcp_result_untrusted, sanitize_untrusted_text
 
 
 _MAX_MARKDOWN_OUTPUT_BYTES = 1 * 1024 * 1024
@@ -50,9 +56,14 @@ class McpTool(BaseTool):
         transformed, auth_id = self._apply_invocation_policy(arguments)
         try:
             result = self._client.call_tool(self._remote_name, transformed, timeout=self.call_timeout)
-            return self._normalize_result(result)
+            normalized = self._normalize_result(result)
+            return mark_mcp_result_untrusted(self._server_label, self._remote_name, normalized)
         except McpError as e:
-            raise ToolFailure(e.code, e.message, retryable=e.retryable)
+            # e.message may echo the remote server's own text (e.g. a tool-level
+            # isError response) — sanitize it the same way any other untrusted MCP
+            # content is sanitized before it can reach the LLM's tool-result
+            # message. This is a no-op for ordinary ASCII error text.
+            raise ToolFailure(e.code, sanitize_untrusted_text(e.message), retryable=e.retryable)
         finally:
             if auth_id:
                 try:

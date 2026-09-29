@@ -256,8 +256,14 @@ def test_internet_tools_disabled_excludes_from_schemas(monkeypatch):
     monkeypatch.setenv("REPOSITORY_INSPECTION_ENABLED", "false")
     reg = default_registry()
     names = [d.name for d in reg.enabled_definitions()]
-    assert names == ["math.calculate", "system.echo"]
+    # Phase H.1: finance.dcf_model is pure local arithmetic (no network, no
+    # filesystem), so it is deliberately still offered with internet disabled —
+    # a user can value a company from numbers they supply themselves. Every
+    # NETWORK-reaching tool must still be absent, which is what this test is for.
+    assert names == ["finance.dcf_model", "math.calculate", "system.echo"]
     assert not any(n.startswith(("browser.", "github.", "repo.")) for n in names)
+    assert not any(n.startswith("finance.") and n != "finance.dcf_model" for n in names), \
+        "no market-data tool may be offered when internet tools are disabled"
 
 
 def test_internet_read_disabled_blocks_execution(monkeypatch):

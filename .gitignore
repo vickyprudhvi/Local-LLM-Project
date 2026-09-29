@@ -35,3 +35,16 @@ config/*.local.json
 mcp_workspaces/user_files/
 # npm dependency trees anywhere in the tree
 **/node_modules/
+# Local test scratch dirs / logs
+f1_cli_test_2/
+f1_external_test/
+fixture_verify.log
+# Phase H.1 market-data cache and quota ledger. Machine-specific, re-fetchable,
+# and never to be committed (they hold provider responses, not secrets, but there
+# is no reason for them to be in the repository).
+app_data/finance_cache/
+
+# Live extraction-benchmark model responses. A local measurement cache,
+# not source: it is keyed on model identity and would go stale on any model
+# change, and it holds raw model output.
+app_data/extraction_benchmark_cache.json

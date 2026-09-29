@@ -1,0 +1,842 @@
+[
+  {
+    "case_id": "financing-multiple-facilities-one-paragraph",
+    "rows": [
+      {
+        "accession": "FIN-MULTI",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 1000000000.0,
+          "amount_role": null,
+          "supplementary": [],
+          "currency": null
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 1.0,
+            "unit": "CURRENCY",
+            "amount_role": "AMOUNT_DRAWN",
+            "currency": "USD",
+            "scale": "BILLION",
+            "funded": true,
+            "committed": false,
+            "counterparty": null,
+            "effective_date": "2026-09-15",
+            "evidence_span_ids": [
+              "00a3577a-s002",
+              "00a3577a-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 500.0,
+                "unit": "CURRENCY",
+                "currency": "USD",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "00a3577a-s003"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.95,
+            "source_document_id": null,
+            "accession": "FIN-MULTI",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 1000000000.0,
+            "currency": "USD",
+            "amount_role": "AMOUNT_DRAWN",
+            "funded": true,
+            "committed": false,
+            "counterparty": null,
+            "effective_date": "2026-09-15",
+            "source_evidence": "On September 15, 2026, the Company entered into a new credit agreement with a syndicate of lenders. At closing, the Company drew $1.0 billion under Term Loan A and $500 million under Term Loan B to refinance existing indebtedness.",
+            "confidence": 0.95,
+            "accession": "FIN-MULTI",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 500000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "At closing, the Company drew $1.0 billion under Term Loan A and $500 million under Term Loan B to refinance existing indebtedness.",
+                "currency": "USD",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "BILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 23.700111499987543
+      }
+    ],
+    "run": 1
+  },
+  {
+    "case_id": "financing-multiple-facilities-one-paragraph",
+    "rows": [
+      {
+        "accession": "FIN-MULTI",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 1000000000.0,
+          "amount_role": null,
+          "supplementary": [],
+          "currency": null
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 1.0,
+            "unit": "CURRENCY",
+            "amount_role": "AMOUNT_DRAWN",
+            "currency": "USD",
+            "scale": "BILLION",
+            "funded": true,
+            "committed": false,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-09-15",
+            "evidence_span_ids": [
+              "00a3577a-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 500.0,
+                "unit": "CURRENCY",
+                "currency": "USD",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "00a3577a-s003"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.99,
+            "source_document_id": null,
+            "accession": "FIN-MULTI",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 1000000000.0,
+            "currency": "USD",
+            "amount_role": "AMOUNT_DRAWN",
+            "funded": true,
+            "committed": false,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-09-15",
+            "source_evidence": "At closing, the Company drew $1.0 billion under Term Loan A and $500 million under Term Loan B to refinance existing indebtedness.",
+            "confidence": 0.99,
+            "accession": "FIN-MULTI",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 500000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "At closing, the Company drew $1.0 billion under Term Loan A and $500 million under Term Loan B to refinance existing indebtedness.",
+                "currency": "USD",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "BILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 25.73980820016004
+      }
+    ],
+    "run": 2
+  },
+  {
+    "case_id": "financing-multiple-facilities-one-paragraph",
+    "rows": [
+      {
+        "accession": "FIN-MULTI",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 1000000000.0,
+          "amount_role": null,
+          "supplementary": [],
+          "currency": null
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "REFINANCING",
+            "amount": 1.0,
+            "unit": "CURRENCY",
+            "amount_role": "AMOUNT_DRAWN",
+            "currency": "USD",
+            "scale": "BILLION",
+            "funded": true,
+            "committed": false,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-09-15",
+            "evidence_span_ids": [
+              "00a3577a-s002",
+              "00a3577a-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 500.0,
+                "unit": "CURRENCY",
+                "currency": "USD",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "00a3577a-s003"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.95,
+            "source_document_id": null,
+            "accession": "FIN-MULTI",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "REFINANCING",
+            "amount": 1000000000.0,
+            "currency": "USD",
+            "amount_role": "AMOUNT_DRAWN",
+            "funded": true,
+            "committed": false,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-09-15",
+            "source_evidence": "On September 15, 2026, the Company entered into a new credit agreement with a syndicate of lenders. At closing, the Company drew $1.0 billion under Term Loan A and $500 million under Term Loan B to refinance existing indebtedness.",
+            "confidence": 0.95,
+            "accession": "FIN-MULTI",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": false
+            },
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 500000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "At closing, the Company drew $1.0 billion under Term Loan A and $500 million under Term Loan B to refinance existing indebtedness.",
+                "currency": "USD",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "BILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 32.44990999996662
+      }
+    ],
+    "run": 3
+  },
+  {
+    "case_id": "financing-multiple-facilities-one-paragraph",
+    "rows": [
+      {
+        "accession": "FIN-MULTI",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 1000000000.0,
+          "amount_role": null,
+          "supplementary": [],
+          "currency": null
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 1.0,
+            "unit": "CURRENCY",
+            "amount_role": "AMOUNT_DRAWN",
+            "currency": "UNKNOWN",
+            "scale": "BILLION",
+            "funded": true,
+            "committed": false,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-09-15",
+            "evidence_span_ids": [
+              "00a3577a-s002",
+              "00a3577a-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 500.0,
+                "unit": "CURRENCY",
+                "currency": "UNKNOWN",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "00a3577a-s003"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.9,
+            "source_document_id": null,
+            "accession": "FIN-MULTI",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [],
+        "rejected": [
+          {
+            "candidate": {
+              "event_type": "ISSUER_DEBT_ISSUANCE",
+              "amount": 1.0,
+              "unit": "CURRENCY",
+              "amount_role": "AMOUNT_DRAWN",
+              "currency": "UNKNOWN",
+              "scale": "BILLION",
+              "funded": true,
+              "committed": false,
+              "counterparty": "syndicate of lenders",
+              "effective_date": "2026-09-15",
+              "evidence_span_ids": [
+                "00a3577a-s002",
+                "00a3577a-s003"
+              ],
+              "supplementary_amounts": [
+                {
+                  "role": "AMOUNT_DRAWN",
+                  "value": 500.0,
+                  "unit": "CURRENCY",
+                  "currency": "UNKNOWN",
+                  "scale": "MILLION",
+                  "evidence_span_ids": [
+                    "00a3577a-s003"
+                  ]
+                }
+              ],
+              "source_evidence": "",
+              "confidence": 0.9,
+              "source_document_id": null,
+              "accession": "FIN-MULTI",
+              "form": "8-K",
+              "filed": null,
+              "items": "2.03"
+            },
+            "code": "UNKNOWN_CURRENCY",
+            "reason": "'UNKNOWN' is not a recognisable ISO currency code for a stated amount"
+          }
+        ],
+        "elapsed_s": 21.04921089997515
+      }
+    ],
+    "run": 4
+  },
+  {
+    "run": 5,
+    "status": "MODEL_INFRA_FAILURE",
+    "reason": "could not reach http://localhost:11434: timed out"
+  },
+  {
+    "case_id": "financing-multiple-facilities-one-paragraph",
+    "rows": [
+      {
+        "accession": "FIN-MULTI",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 1000000000.0,
+          "amount_role": null,
+          "supplementary": [],
+          "currency": null
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "REFINANCING",
+            "amount": 1000.0,
+            "unit": "CURRENCY",
+            "amount_role": "AMOUNT_DRAWN",
+            "currency": "USD",
+            "scale": "BILLION",
+            "funded": true,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-09-15",
+            "evidence_span_ids": [
+              "00a3577a-s002",
+              "00a3577a-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 500.0,
+                "unit": "CURRENCY",
+                "currency": "USD",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "00a3577a-s003"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.9,
+            "source_document_id": null,
+            "accession": "FIN-MULTI",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [],
+        "rejected": [
+          {
+            "candidate": {
+              "event_type": "REFINANCING",
+              "amount": 1000.0,
+              "unit": "CURRENCY",
+              "amount_role": "AMOUNT_DRAWN",
+              "currency": "USD",
+              "scale": "BILLION",
+              "funded": true,
+              "committed": true,
+              "counterparty": null,
+              "effective_date": "2026-09-15",
+              "evidence_span_ids": [
+                "00a3577a-s002",
+                "00a3577a-s003"
+              ],
+              "supplementary_amounts": [
+                {
+                  "role": "AMOUNT_DRAWN",
+                  "value": 500.0,
+                  "unit": "CURRENCY",
+                  "currency": "USD",
+                  "scale": "MILLION",
+                  "evidence_span_ids": [
+                    "00a3577a-s003"
+                  ]
+                }
+              ],
+              "source_evidence": "",
+              "confidence": 0.9,
+              "source_document_id": null,
+              "accession": "FIN-MULTI",
+              "form": "8-K",
+              "filed": null,
+              "items": "2.03"
+            },
+            "code": "AMOUNT_NOT_GROUNDED",
+            "reason": "1000.0 does not appear in the cited spans -- a computed or derived number is not a value the source itself states"
+          }
+        ],
+        "elapsed_s": 23.998925300082192
+      }
+    ],
+    "run": 6
+  },
+  {
+    "case_id": "financing-multiple-facilities-one-paragraph",
+    "rows": [
+      {
+        "accession": "FIN-MULTI",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 1000000000.0,
+          "amount_role": null,
+          "supplementary": [],
+          "currency": null
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 1.0,
+            "unit": "CURRENCY",
+            "amount_role": "AMOUNT_DRAWN",
+            "currency": "USD",
+            "scale": "BILLION",
+            "funded": true,
+            "committed": false,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-09-15",
+            "evidence_span_ids": [
+              "00a3577a-s002",
+              "00a3577a-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 500.0,
+                "unit": "CURRENCY",
+                "currency": "USD",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "00a3577a-s003"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.95,
+            "source_document_id": null,
+            "accession": "FIN-MULTI",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 1000000000.0,
+            "currency": "USD",
+            "amount_role": "AMOUNT_DRAWN",
+            "funded": true,
+            "committed": false,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-09-15",
+            "source_evidence": "On September 15, 2026, the Company entered into a new credit agreement with a syndicate of lenders. At closing, the Company drew $1.0 billion under Term Loan A and $500 million under Term Loan B to refinance existing indebtedness.",
+            "confidence": 0.95,
+            "accession": "FIN-MULTI",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 500000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "At closing, the Company drew $1.0 billion under Term Loan A and $500 million under Term Loan B to refinance existing indebtedness.",
+                "currency": "USD",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "BILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 19.732057299930602
+      }
+    ],
+    "run": 7
+  },
+  {
+    "case_id": "financing-multiple-facilities-one-paragraph",
+    "rows": [
+      {
+        "accession": "FIN-MULTI",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 1000000000.0,
+          "amount_role": null,
+          "supplementary": [],
+          "currency": null
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 1.0,
+            "unit": "CURRENCY",
+            "amount_role": "AMOUNT_DRAWN",
+            "currency": "USD",
+            "scale": "BILLION",
+            "funded": true,
+            "committed": false,
+            "counterparty": null,
+            "effective_date": "2026-09-15",
+            "evidence_span_ids": [
+              "00a3577a-s002",
+              "00a3577a-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 0.5,
+                "unit": "CURRENCY",
+                "currency": "USD",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "00a3577a-s003"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.95,
+            "source_document_id": null,
+            "accession": "FIN-MULTI",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 1000000000.0,
+            "currency": "USD",
+            "amount_role": "AMOUNT_DRAWN",
+            "funded": true,
+            "committed": false,
+            "counterparty": null,
+            "effective_date": "2026-09-15",
+            "source_evidence": "On September 15, 2026, the Company entered into a new credit agreement with a syndicate of lenders. At closing, the Company drew $1.0 billion under Term Loan A and $500 million under Term Loan B to refinance existing indebtedness.",
+            "confidence": 0.95,
+            "accession": "FIN-MULTI",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [],
+            "scale": "BILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 19.096077900147066
+      }
+    ],
+    "run": 8
+  },
+  {
+    "case_id": "financing-multiple-facilities-one-paragraph",
+    "rows": [
+      {
+        "accession": "FIN-MULTI",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 1000000000.0,
+          "amount_role": null,
+          "supplementary": [],
+          "currency": null
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 1.0,
+            "unit": "CURRENCY",
+            "amount_role": "PRINCIPAL_AMOUNT",
+            "currency": "USD",
+            "scale": "BILLION",
+            "funded": true,
+            "committed": false,
+            "counterparty": null,
+            "effective_date": "2026-09-15",
+            "evidence_span_ids": [
+              "00a3577a-s002",
+              "00a3577a-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 500.0,
+                "unit": "CURRENCY",
+                "currency": "USD",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "00a3577a-s003"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.95,
+            "source_document_id": null,
+            "accession": "FIN-MULTI",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 1000000000.0,
+            "currency": "USD",
+            "amount_role": "PRINCIPAL_AMOUNT",
+            "funded": true,
+            "committed": false,
+            "counterparty": null,
+            "effective_date": "2026-09-15",
+            "source_evidence": "On September 15, 2026, the Company entered into a new credit agreement with a syndicate of lenders. At closing, the Company drew $1.0 billion under Term Loan A and $500 million under Term Loan B to refinance existing indebtedness.",
+            "confidence": 0.95,
+            "accession": "FIN-MULTI",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 500000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "At closing, the Company drew $1.0 billion under Term Loan A and $500 million under Term Loan B to refinance existing indebtedness.",
+                "currency": "USD",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "BILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 29.695459499955177
+      }
+    ],
+    "run": 9
+  },
+  {
+    "case_id": "financing-multiple-facilities-one-paragraph",
+    "rows": [
+      {
+        "accession": "FIN-MULTI",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 1000000000.0,
+          "amount_role": null,
+          "supplementary": [],
+          "currency": null
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "REFINANCING",
+            "amount": 1.0,
+            "unit": "CURRENCY",
+            "amount_role": "AMOUNT_DRAWN",
+            "currency": "USD",
+            "scale": "BILLION",
+            "funded": true,
+            "committed": false,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-09-15",
+            "evidence_span_ids": [
+              "00a3577a-s002",
+              "00a3577a-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 0.5,
+                "unit": "CURRENCY",
+                "currency": "USD",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "00a3577a-s003"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.8,
+            "source_document_id": null,
+            "accession": "FIN-MULTI",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "REFINANCING",
+            "amount": 1000000000.0,
+            "currency": "USD",
+            "amount_role": "AMOUNT_DRAWN",
+            "funded": true,
+            "committed": false,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-09-15",
+            "source_evidence": "On September 15, 2026, the Company entered into a new credit agreement with a syndicate of lenders. At closing, the Company drew $1.0 billion under Term Loan A and $500 million under Term Loan B to refinance existing indebtedness.",
+            "confidence": 0.8,
+            "accession": "FIN-MULTI",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": false
+            },
+            "supplementary_amounts": [],
+            "scale": "BILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 35.261515100020915
+      }
+    ],
+    "run": 10
+  }
+]

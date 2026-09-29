@@ -1,0 +1,36 @@
+{
+  "model": "gpt-oss:20b-cloud",
+  "document_pipeline_version": "v1.0",
+  "schema_version": "2026-09-15",
+  "actual_reader_recall": [1.0, 0.8235294117647058, 1.0],
+  "actual_accepted_recall": [1.0, 0.8235294117647058, 1.0],
+  "actual_accepted_precision": [1.0, 1.0, 1.0],
+  "event_reader_recall": [1.0, 1.0, 1.0],
+  "event_accepted_recall": [0.4, 0.48, 0.44],
+  "event_accepted_precision": [0.9090909090909091, 0.9230769230769231, 0.9166666666666666],
+  "event_type_accuracy": [0.48, 0.48, 0.52],
+  "amount_accuracy": [0.9583333333333334, 0.9583333333333334, 0.9583333333333334],
+  "amount_role_accuracy": [0.9411764705882353, 0.9411764705882353, 0.9411764705882353],
+  "currency_accuracy": [0.8888888888888888, 0.8888888888888888, 0.8888888888888888],
+  "scale_accuracy": [0.9583333333333334, 0.9583333333333334, 0.9583333333333334],
+  "funded_status_accuracy": [0.88, 0.92, 0.96],
+  "committed_status_accuracy": [0.8, 0.84, 0.76],
+  "item_code_consistency": [0.5357142857142857, 0.5555555555555556, 0.5555555555555556],
+  "evidence_grounding_accuracy": [1.0, 0.9259259259259259, 0.962962962962963],
+  "failure_class_counts": {
+    "EVENT_CLASSIFICATION": 38,
+    "VALIDATOR_FALSE_REJECTION": 1,
+    "ITEM_CODE_MISMATCH": 1,
+    "MODEL_MISREAD": 3,
+    "EVIDENCE_GROUNDING": 1,
+    "AMOUNT_ROLE": 1
+  },
+  "hard_safety_hits": {},
+  "stability_buckets": {"3/3": 24, "2/3": 4, "1/3": 1, "0/3": 13},
+  "negative_control_pass": 3,
+  "negative_control_total": 3,
+  "call_seconds_total": 1340.9814480991336,
+  "notable_per_item": {
+    "financing-facility-maturity-extension/FIN-MATEXT": ["WRONG_PROPOSAL", "WRONG_PROPOSAL", "PROPOSED_AND_REJECTED"]
+  }
+}

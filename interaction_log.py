@@ -92,6 +92,43 @@ def log_mcp_event(action, error_code=None, **fields):
     return record
 
 
+def log_research_validation(symbol, passed, findings, stage_statuses=None):
+    """Append one JSON line describing a research-pipeline run's VALIDATION.
+
+    Phase H.5, Phase 5a. The evidence base for deciding, in Phase 5b, which
+    of the 39 overstatement patterns have ever fired on real text. That
+    decision cannot be made from gating behaviour: a pattern that never fires
+    and a pattern that fires constantly both look identical from outside
+    ("no failures"), which is how a vocabulary list grew to 47 entries with
+    nobody able to say which entries earn their place.
+
+    Records rule ids, field PATHS, and a truncated matched span. Never a
+    field's value, never the model's prose, never the evidence index -- the
+    span is the only model-authored text here and it is a short phrase by
+    construction (see `_METRIC_SPAN_MAX` in finance/research_pipeline.py).
+    """
+    os.makedirs(os.path.dirname(LOG_PATH) or ".", exist_ok=True)
+    record = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "event": "research_validation",
+        "symbol": symbol,
+        # "whether the run otherwise passed" -- a finding on a run that
+        # completed anyway is much weaker evidence for keeping a pattern than
+        # one that killed the analysis.
+        "passed": bool(passed),
+        "finding_count": len(findings or []),
+        "findings": [
+            {k: entry.get(k) for k in
+             ("rule_id", "label", "severity", "field_path", "matched_span", "outcome")}
+            for entry in (findings or [])
+        ],
+        "stage_statuses": dict(stage_statuses or {}),
+    }
+    with open(LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+    return record
+
+
 def log_tool_event(tool_name, call_id, step, status, duration_ms=None, error_code=None, extra=None):
     """Append one JSON line describing a single tool-execution event.
 

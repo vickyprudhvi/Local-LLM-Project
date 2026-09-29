@@ -77,17 +77,20 @@ def test_discovered_tools_are_llm_callable_and_offered(mcp):
 
 def test_echo_text(mcp):
     r = _run(mcp(), "mcp.test.echo_text", {"text": "hello"})
-    assert r.success is True and r.data == {"text": "hello"}
+    # Phase H.24: every MCP result is additively marked untrusted; the original
+    # field is preserved unchanged alongside the marker keys.
+    assert r.success is True and r.data["text"] == "hello" and r.data["untrusted_content"] is True
 
 
 def test_add_numbers(mcp):
     r = _run(mcp(), "mcp.test.add_numbers", {"a": 2, "b": 3})
-    assert r.success is True and r.data == {"sum": 5}
+    assert r.success is True and r.data["sum"] == 5 and r.data["untrusted_content"] is True
 
 
 def test_read_test_file(mcp):
     r = _run(mcp(), "mcp.test.read_test_file", {"path": "hello.txt"})
-    assert r.success is True and r.data == {"content": "Hello from MCP!"}
+    assert (r.success is True and r.data["content"] == "Hello from MCP!"
+            and r.data["untrusted_content"] is True)
 
 
 # ---- write-class: confirmation ----

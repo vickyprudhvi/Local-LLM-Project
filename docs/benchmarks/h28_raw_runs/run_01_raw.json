@@ -1,0 +1,610 @@
+{
+  "run_index": 1,
+  "actual_items": [
+    {
+      "case_id": "actual-table-fallback-full-statements",
+      "item_key": "revenue@2026-07-31",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": 1450000000.0,
+      "rejection_code": null
+    },
+    {
+      "case_id": "actual-table-fallback-full-statements",
+      "item_key": "operating_income@2026-07-31",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": 302000000.0,
+      "rejection_code": null
+    },
+    {
+      "case_id": "actual-table-fallback-full-statements",
+      "item_key": "net_income@2026-07-31",
+      "outcome": "DUPLICATE_PROPOSAL",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": 236000000.0,
+      "rejection_code": null
+    },
+    {
+      "case_id": "actual-table-fallback-full-statements",
+      "item_key": "cash_and_cash_equivalents@2026-07-31",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": 812000000.0,
+      "rejection_code": null
+    },
+    {
+      "case_id": "actual-table-fallback-full-statements",
+      "item_key": "short_term_investments@2026-07-31",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": 190000000.0,
+      "rejection_code": null
+    },
+    {
+      "case_id": "actual-table-fallback-full-statements",
+      "item_key": "current_assets@2026-07-31",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": 2050000000.0,
+      "rejection_code": null
+    },
+    {
+      "case_id": "actual-table-fallback-full-statements",
+      "item_key": "assets@2026-07-31",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": 6140000000.0,
+      "rejection_code": null
+    },
+    {
+      "case_id": "actual-table-fallback-full-statements",
+      "item_key": "current_liabilities@2026-07-31",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": 1120000000.0,
+      "rejection_code": null
+    },
+    {
+      "case_id": "actual-table-fallback-full-statements",
+      "item_key": "liabilities@2026-07-31",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": 3260000000.0,
+      "rejection_code": null
+    },
+    {
+      "case_id": "actual-table-fallback-full-statements",
+      "item_key": "stockholders_equity@2026-07-31",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": 2880000000.0,
+      "rejection_code": null
+    },
+    {
+      "case_id": "actual-table-fallback-full-statements",
+      "item_key": "short_term_debt@2026-07-31",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": 150000000.0,
+      "rejection_code": null
+    },
+    {
+      "case_id": "actual-table-fallback-full-statements",
+      "item_key": "long_term_debt@2026-07-31",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": 1400000000.0,
+      "rejection_code": null
+    },
+    {
+      "case_id": "actual-table-fallback-full-statements",
+      "item_key": "operating_cash_flow@2026-07-31",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": 358000000.0,
+      "rejection_code": null
+    },
+    {
+      "case_id": "actual-table-fallback-full-statements",
+      "item_key": "capital_expenditure@2026-07-31",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": 74000000.0,
+      "rejection_code": null
+    },
+    {
+      "case_id": "actual-table-guidance-adjacent-contamination",
+      "item_key": "revenue@2026-07-31",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": 1450000000.0,
+      "rejection_code": null
+    },
+    {
+      "case_id": "actual-table-guidance-adjacent-contamination",
+      "item_key": "operating_income@2026-07-31",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": 302000000.0,
+      "rejection_code": null
+    },
+    {
+      "case_id": "actual-table-guidance-adjacent-contamination",
+      "item_key": "net_income@2026-07-31",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": 236000000.0,
+      "rejection_code": null
+    }
+  ],
+  "event_items": [
+    {
+      "case_id": "financing-committed-only",
+      "item_key": "FIN-CREDIT",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": false,
+        "amount": 2000000000.0,
+        "amount_role": "FACILITY_COMMITMENT",
+        "supplementary_amounts": []
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-funded-term-loan",
+      "item_key": "FIN-TERMLOAN",
+      "outcome": "PROPOSED_AND_REJECTED",
+      "detail": "['SCALE_NOT_GROUNDED']",
+      "failure_class": "VALIDATOR_FALSE_REJECTION",
+      "accepted_value": null,
+      "rejection_code": "SCALE_NOT_GROUNDED"
+    },
+    {
+      "case_id": "financing-convertible-refinement",
+      "item_key": "FIN-CONV",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": true,
+        "amount": 800000000.0,
+        "amount_role": "PRINCIPAL_AMOUNT",
+        "supplementary_amounts": [
+          {
+            "role": "AMOUNT_DRAWN",
+            "value": 784000000.0,
+            "unit": "CURRENCY",
+            "currency": "USD",
+            "scale": "MILLION",
+            "source_evidence": "On August 1, 2026, the Company issued and sold $800 million aggregate principal amount of convertible senior notes due 2031 in a private placement, receiving net proceeds of approximately $784 million."
+          }
+        ]
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-equity-issuance",
+      "item_key": "FIN-EQUITY",
+      "outcome": "WRONG_PROPOSAL",
+      "detail": "funded=False amount=450000000.0 role=TRANSACTION_VALUE supplementary=[], expected funded=True amounts=[(None, 450000000.0)]",
+      "failure_class": "FUNDED_STATUS",
+      "accepted_value": {
+        "event_type": "ISSUER_EQUITY_ISSUANCE",
+        "funded": false,
+        "amount": 450000000.0,
+        "amount_role": "TRANSACTION_VALUE"
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-bridge-facility-undrawn",
+      "item_key": "FIN-BRIDGE",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": false,
+        "amount": 750000000.0,
+        "amount_role": "FACILITY_COMMITMENT",
+        "supplementary_amounts": []
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-debt-refinancing",
+      "item_key": "FIN-REFI",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "REFINANCING",
+        "funded": true,
+        "amount": 600000000.0,
+        "amount_role": "PRINCIPAL_AMOUNT",
+        "supplementary_amounts": []
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-acquisition-per-share-and-total",
+      "item_key": "FIN-ACQ",
+      "outcome": "PROPOSED_AND_REJECTED",
+      "detail": "['FUNDED_STATUS_NOT_GROUNDED']",
+      "failure_class": "VALIDATOR_FALSE_REJECTION",
+      "accepted_value": null,
+      "rejection_code": "FUNDED_STATUS_NOT_GROUNDED"
+    },
+    {
+      "case_id": "financing-notes-principal-amount",
+      "item_key": "FIN-NOTES",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": true,
+        "amount": 750000000.0,
+        "amount_role": "PRINCIPAL_AMOUNT",
+        "supplementary_amounts": []
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-facility-partial-drawdown",
+      "item_key": "FIN-PARTIAL",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": true,
+        "amount": 5000000000.0,
+        "amount_role": "FACILITY_COMMITMENT",
+        "supplementary_amounts": [
+          {
+            "role": "AMOUNT_DRAWN",
+            "value": 2000000000.0,
+            "unit": "CURRENCY",
+            "currency": "USD",
+            "scale": "BILLION",
+            "source_evidence": "at closing, the Company drew $2.0 billion under the facility for general corporate purposes."
+          }
+        ]
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-debt-repayment",
+      "item_key": "FIN-REPAY",
+      "outcome": "PROPOSED_AND_REJECTED",
+      "detail": "['FUNDED_STATUS_NOT_GROUNDED']",
+      "failure_class": "EVENT_CLASSIFICATION",
+      "accepted_value": null,
+      "rejection_code": "FUNDED_STATUS_NOT_GROUNDED"
+    },
+    {
+      "case_id": "financing-bridge-facility-drawn",
+      "item_key": "FIN-BRIDGE-DRAWN",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": true,
+        "amount": 750000000.0,
+        "amount_role": "AMOUNT_DRAWN",
+        "supplementary_amounts": []
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-facility-maturity-extension",
+      "item_key": "FIN-MATEXT",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": false,
+        "amount": 1500000000.0,
+        "amount_role": "FACILITY_COMMITMENT",
+        "supplementary_amounts": []
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-multiple-facilities-one-paragraph",
+      "item_key": "FIN-MULTI",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "REFINANCING",
+        "funded": true,
+        "amount": null,
+        "amount_role": "UNKNOWN",
+        "supplementary_amounts": [
+          {
+            "role": "AMOUNT_DRAWN",
+            "value": 1000000000.0,
+            "unit": "CURRENCY",
+            "currency": "USD",
+            "scale": "BILLION",
+            "source_evidence": "At closing, the Company drew $1.0 billion under Term Loan A and $500 million under Term Loan B to refinance existing indebtedness."
+          },
+          {
+            "role": "AMOUNT_DRAWN",
+            "value": 500000000.0,
+            "unit": "CURRENCY",
+            "currency": "USD",
+            "scale": "MILLION",
+            "source_evidence": "At closing, the Company drew $1.0 billion under Term Loan A and $500 million under Term Loan B to refinance existing indebtedness."
+          }
+        ]
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-foreign-issuer-eur-notes",
+      "item_key": "FIN-EURNOTES",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": true,
+        "amount": 500000000.0,
+        "amount_role": "PRINCIPAL_AMOUNT",
+        "supplementary_amounts": []
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-facility-commitment-increase",
+      "item_key": "FIN-UPSIZE",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": false,
+        "amount": 2750000000.0,
+        "amount_role": "FACILITY_COMMITMENT",
+        "supplementary_amounts": []
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-notes-with-net-proceeds",
+      "item_key": "FIN-NETPROCEEDS",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": true,
+        "amount": 500000000.0,
+        "amount_role": "PRINCIPAL_AMOUNT",
+        "supplementary_amounts": []
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-acquisition-funded-via-facility",
+      "item_key": "FIN-ACQFUNDED",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": true,
+        "amount": 2000000000.0,
+        "amount_role": "AMOUNT_DRAWN",
+        "supplementary_amounts": []
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-foreign-issuer-gbp-facility",
+      "item_key": "FIN-GBPFAC",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": false,
+        "amount": 750000000.0,
+        "amount_role": "FACILITY_COMMITMENT",
+        "supplementary_amounts": []
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-foreign-issuer-jpy-borrowing",
+      "item_key": "FIN-JPYBORROW",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": true,
+        "amount": 5000000000.0,
+        "amount_role": "PRINCIPAL_AMOUNT",
+        "supplementary_amounts": []
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-usd-notes-baseline",
+      "item_key": "FIN-USDBASE",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": true,
+        "amount": 500000000.0,
+        "amount_role": "PRINCIPAL_AMOUNT",
+        "supplementary_amounts": []
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-usd-facility-baseline",
+      "item_key": "FIN-USDFACBASE",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": false,
+        "amount": 1200000000.0,
+        "amount_role": "FACILITY_COMMITMENT",
+        "supplementary_amounts": []
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-bare-currency-no-scale-word",
+      "item_key": "FIN-BAREEUR",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": true,
+        "amount": 500.0,
+        "amount_role": "PRINCIPAL_AMOUNT",
+        "supplementary_amounts": []
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-mixed-currency-facility",
+      "item_key": "FIN-MIXEDCCY",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": false,
+        "amount": 2000000000.0,
+        "amount_role": "FACILITY_COMMITMENT",
+        "supplementary_amounts": [
+          {
+            "role": "FACILITY_COMMITMENT",
+            "value": 500000000.0,
+            "unit": "CURRENCY",
+            "currency": "EUR",
+            "scale": "MILLION",
+            "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro."
+          }
+        ]
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-commitment-drawdown-different-currencies",
+      "item_key": "FIN-DIFFCCY",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": true,
+        "amount": 400000000.0,
+        "amount_role": "AMOUNT_DRAWN",
+        "supplementary_amounts": [
+          {
+            "role": "FACILITY_COMMITMENT",
+            "value": 750000000.0,
+            "unit": "CURRENCY",
+            "currency": "GBP",
+            "scale": "MILLION",
+            "source_evidence": "On October 24, 2026, the Company entered into a new \u00a3750 million revolving credit facility with a syndicate of lenders;"
+          }
+        ]
+      },
+      "rejection_code": null
+    },
+    {
+      "case_id": "financing-scale-adjacent-spans",
+      "item_key": "FIN-ADJSPAN",
+      "outcome": "PROPOSED_AND_ACCEPTED",
+      "detail": "",
+      "failure_class": null,
+      "accepted_value": {
+        "event_type": "ISSUER_DEBT_ISSUANCE",
+        "funded": false,
+        "amount": 750000000.0,
+        "amount_role": "FACILITY_COMMITMENT",
+        "supplementary_amounts": []
+      },
+      "rejection_code": null
+    }
+  ],
+  "negative_control_items": [
+    {
+      "case_id": "actual-table-guidance-adjacent-contamination",
+      "item_key": "revenue@2026-10-31",
+      "outcome": "NOT_PROPOSED",
+      "detail": "correctly never proposed -- negative control verified",
+      "failure_class": null,
+      "accepted_value": null,
+      "rejection_code": null
+    }
+  ],
+  "fallback_activation": {
+    "actual-table-fallback-full-statements": true,
+    "actual-table-fallback-not-needed": false,
+    "actual-table-guidance-adjacent-contamination": true
+  },
+  "hard_safety_hits": {
+    "FUNDED_STATUS_MISREAD": 1
+  },
+  "call_seconds": 603.9092278003227,
+  "dimension_hits": {
+    "event_type": 24,
+    "amount": 23,
+    "scale": 23,
+    "funded_status": 22,
+    "committed_status": 18,
+    "amount_role": 17,
+    "currency": 8
+  },
+  "dimension_totals": {
+    "event_type": 25,
+    "amount": 24,
+    "scale": 24,
+    "funded_status": 25,
+    "committed_status": 25,
+    "amount_role": 17,
+    "currency": 9
+  },
+  "event_candidates_proposed": 25,
+  "item_code_mismatch_rejections": 0,
+  "evidence_not_in_source_rejections": 0
+}

@@ -100,7 +100,8 @@ def test_call_timeout_is_normalized_and_assistant_stays_usable(bootstrap):
     # recovers: a fresh echo returns cleanly, never the stale slow payload.
     time.sleep(2.5)
     r2 = b.executor.execute(ToolCall("c2", "mcp.test.echo_text", {"text": "still here"}))
-    assert r2.success is True and r2.data == {"text": "still here"}
+    assert (r2.success is True and r2.data["text"] == "still here"
+            and r2.data["untrusted_content"] is True)
 
 
 # ---- server exit ----
