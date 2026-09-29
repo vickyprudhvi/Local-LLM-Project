@@ -1,0 +1,93 @@
+{
+  "attempted": 2,
+  "ok": 2,
+  "errors": [],
+  "findings_by_class": {
+    "DOCUMENT_FETCH": 1
+  },
+  "latency_current_mean_s": 0.5407449001213536,
+  "latency_edgartools_mean_s": 24.168744749971665,
+  "per_ticker": [
+    {
+      "ticker": "JPM",
+      "ok": true,
+      "error": null,
+      "current_latest_10k": {
+        "form": "10-K",
+        "accession": "0001628280-26-008131",
+        "filed": "2026-02-13",
+        "report_date": "2025-12-31",
+        "items": "",
+        "document": "jpm-20251231.htm"
+      },
+      "edgartools_latest_10k": {
+        "cik": "19617",
+        "company_name": "JPMORGAN CHASE & CO",
+        "accession": "0001628280-26-008131",
+        "form": "10-K",
+        "filed": "2026-02-13",
+        "period_of_report": "2025-12-31",
+        "items": "1,1A,1B,1C,2,3,4,5,6,7,7A,8,9,9A,9B,9C,10,11,12,13,14,15",
+        "primary_document": "jpm-20251231.htm"
+      },
+      "current_latest_8k": {
+        "form": "8-K",
+        "accession": "0001193125-26-314128",
+        "filed": "2026-07-23",
+        "report_date": "2026-07-23",
+        "items": "8.01,9.01",
+        "document": "d103985d8k.htm"
+      },
+      "edgartools_latest_8k": {
+        "cik": "19617",
+        "company_name": "JPMORGAN CHASE & CO",
+        "accession": "0001193125-26-314128",
+        "form": "8-K",
+        "filed": "2026-07-23",
+        "period_of_report": "2026-07-23",
+        "items": "8.01,9.01",
+        "primary_document": "d103985d8k.htm"
+      },
+      "deep_dive_accession": "0001628280-26-008131",
+      "deep_dive_form": "10-K",
+      "current_items": "",
+      "edgartools_items": "1,1A,1B,1C,2,3,4,5,6,7,7A,8,9,9A,9B,9C,10,11,12,13,14,15",
+      "current_exhibit_count": null,
+      "edgartools_exhibit_count": 269,
+      "current_normalized_chars": null,
+      "edgartools_section_chars": 1170637,
+      "current_section_found": null,
+      "edgartools_section_found": null,
+      "latency_current_s": 0.5071909001562744,
+      "latency_edgartools_s": 48.13929709978402,
+      "findings": [
+        {
+          "class": "DOCUMENT_FETCH",
+          "detail": "current filing_document failed: The response exceeds the maximum allowed size."
+        }
+      ]
+    },
+    {
+      "ticker": "SAP",
+      "ok": true,
+      "error": null,
+      "current_latest_10k": null,
+      "edgartools_latest_10k": null,
+      "current_latest_8k": null,
+      "edgartools_latest_8k": null,
+      "deep_dive_accession": null,
+      "deep_dive_form": null,
+      "current_items": null,
+      "edgartools_items": null,
+      "current_exhibit_count": null,
+      "edgartools_exhibit_count": null,
+      "current_normalized_chars": null,
+      "edgartools_section_chars": null,
+      "current_section_found": null,
+      "edgartools_section_found": null,
+      "latency_current_s": 0.5742989000864327,
+      "latency_edgartools_s": 0.19819240015931427,
+      "findings": []
+    }
+  ]
+}

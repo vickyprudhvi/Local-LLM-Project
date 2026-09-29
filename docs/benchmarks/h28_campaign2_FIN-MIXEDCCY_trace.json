@@ -1,0 +1,898 @@
+[
+  {
+    "case_id": "financing-mixed-currency-facility",
+    "rows": [
+      {
+        "accession": "FIN-MIXEDCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": false,
+          "committed": true,
+          "amount": 2000000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "FACILITY_COMMITMENT",
+              500000000.0
+            ]
+          ],
+          "currency": "USD"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2.0,
+            "unit": "CURRENCY",
+            "amount_role": "FACILITY_COMMITMENT",
+            "currency": "USD",
+            "scale": "BILLION",
+            "funded": false,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-10-22",
+            "evidence_span_ids": [
+              "70698d6f-s002",
+              "70698d6f-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 500.0,
+                "unit": "CURRENCY",
+                "currency": "EUR",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "70698d6f-s002"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 1.0,
+            "source_document_id": null,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2000000000.0,
+            "currency": "USD",
+            "amount_role": "FACILITY_COMMITMENT",
+            "funded": false,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-10-22",
+            "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro. No amounts have been drawn under the facility as of the date of this filing.",
+            "confidence": 1.0,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 500000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro.",
+                "currency": "EUR",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "BILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 12.607180299935862
+      }
+    ],
+    "run": 1
+  },
+  {
+    "case_id": "financing-mixed-currency-facility",
+    "rows": [
+      {
+        "accession": "FIN-MIXEDCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": false,
+          "committed": true,
+          "amount": 2000000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "FACILITY_COMMITMENT",
+              500000000.0
+            ]
+          ],
+          "currency": "USD"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2.0,
+            "unit": "CURRENCY",
+            "amount_role": "FACILITY_COMMITMENT",
+            "currency": "USD",
+            "scale": "BILLION",
+            "funded": false,
+            "committed": true,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-10-22",
+            "evidence_span_ids": [
+              "70698d6f-s002",
+              "70698d6f-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 500.0,
+                "unit": "CURRENCY",
+                "currency": "EUR",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "70698d6f-s002"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 1.0,
+            "source_document_id": null,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2000000000.0,
+            "currency": "USD",
+            "amount_role": "FACILITY_COMMITMENT",
+            "funded": false,
+            "committed": true,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-10-22",
+            "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro. No amounts have been drawn under the facility as of the date of this filing.",
+            "confidence": 1.0,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 500000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro.",
+                "currency": "EUR",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "BILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 15.22681299992837
+      }
+    ],
+    "run": 2
+  },
+  {
+    "case_id": "financing-mixed-currency-facility",
+    "rows": [
+      {
+        "accession": "FIN-MIXEDCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": false,
+          "committed": true,
+          "amount": 2000000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "FACILITY_COMMITMENT",
+              500000000.0
+            ]
+          ],
+          "currency": "USD"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2.0,
+            "unit": "CURRENCY",
+            "amount_role": "FACILITY_COMMITMENT",
+            "currency": "USD",
+            "scale": "BILLION",
+            "funded": false,
+            "committed": true,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-10-22",
+            "evidence_span_ids": [
+              "70698d6f-s002",
+              "70698d6f-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 500.0,
+                "unit": "CURRENCY",
+                "currency": "EUR",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "70698d6f-s002"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 1.0,
+            "source_document_id": null,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2000000000.0,
+            "currency": "USD",
+            "amount_role": "FACILITY_COMMITMENT",
+            "funded": false,
+            "committed": true,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-10-22",
+            "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro. No amounts have been drawn under the facility as of the date of this filing.",
+            "confidence": 1.0,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 500000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro.",
+                "currency": "EUR",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "BILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 15.41039240011014
+      }
+    ],
+    "run": 3
+  },
+  {
+    "case_id": "financing-mixed-currency-facility",
+    "rows": [
+      {
+        "accession": "FIN-MIXEDCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": false,
+          "committed": true,
+          "amount": 2000000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "FACILITY_COMMITMENT",
+              500000000.0
+            ]
+          ],
+          "currency": "USD"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2.0,
+            "unit": "CURRENCY",
+            "amount_role": "FACILITY_COMMITMENT",
+            "currency": "USD",
+            "scale": "MILLION",
+            "funded": false,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-10-22",
+            "evidence_span_ids": [
+              "70698d6f-s002",
+              "70698d6f-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 500.0,
+                "unit": "CURRENCY",
+                "currency": "EUR",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "70698d6f-s002"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.95,
+            "source_document_id": null,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2000000.0,
+            "currency": "USD",
+            "amount_role": "FACILITY_COMMITMENT",
+            "funded": false,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-10-22",
+            "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro. No amounts have been drawn under the facility as of the date of this filing.",
+            "confidence": 0.95,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 500000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro.",
+                "currency": "EUR",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "MILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 10.782613499788567
+      }
+    ],
+    "run": 4
+  },
+  {
+    "run": 5,
+    "status": "MODEL_INFRA_FAILURE",
+    "reason": "could not reach http://localhost:11434: timed out"
+  },
+  {
+    "case_id": "financing-mixed-currency-facility",
+    "rows": [
+      {
+        "accession": "FIN-MIXEDCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": false,
+          "committed": true,
+          "amount": 2000000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "FACILITY_COMMITMENT",
+              500000000.0
+            ]
+          ],
+          "currency": "USD"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2.0,
+            "unit": "CURRENCY",
+            "amount_role": "FACILITY_COMMITMENT",
+            "currency": "USD",
+            "scale": "BILLION",
+            "funded": false,
+            "committed": true,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-10-22",
+            "evidence_span_ids": [
+              "70698d6f-s002",
+              "70698d6f-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "MAXIMUM_CAPACITY",
+                "value": 500.0,
+                "unit": "CURRENCY",
+                "currency": "EUR",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "70698d6f-s002"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.9,
+            "source_document_id": null,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2000000000.0,
+            "currency": "USD",
+            "amount_role": "FACILITY_COMMITMENT",
+            "funded": false,
+            "committed": true,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-10-22",
+            "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro. No amounts have been drawn under the facility as of the date of this filing.",
+            "confidence": 0.9,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "MAXIMUM_CAPACITY",
+                "value": 500000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro.",
+                "currency": "EUR",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "BILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 14.220452300040051
+      }
+    ],
+    "run": 6
+  },
+  {
+    "case_id": "financing-mixed-currency-facility",
+    "rows": [
+      {
+        "accession": "FIN-MIXEDCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": false,
+          "committed": true,
+          "amount": 2000000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "FACILITY_COMMITMENT",
+              500000000.0
+            ]
+          ],
+          "currency": "USD"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2.0,
+            "unit": "CURRENCY",
+            "amount_role": "FACILITY_COMMITMENT",
+            "currency": "USD",
+            "scale": "MILLION",
+            "funded": false,
+            "committed": true,
+            "counterparty": "null",
+            "effective_date": "2026-10-22",
+            "evidence_span_ids": [
+              "70698d6f-s002",
+              "70698d6f-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "MAXIMUM_CAPACITY",
+                "value": 500.0,
+                "unit": "CURRENCY",
+                "currency": "EUR",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "70698d6f-s002"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.99,
+            "source_document_id": null,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2000000.0,
+            "currency": "USD",
+            "amount_role": "FACILITY_COMMITMENT",
+            "funded": false,
+            "committed": true,
+            "counterparty": "null",
+            "effective_date": "2026-10-22",
+            "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro. No amounts have been drawn under the facility as of the date of this filing.",
+            "confidence": 0.99,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "MAXIMUM_CAPACITY",
+                "value": 500000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro.",
+                "currency": "EUR",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "MILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 15.065971399890259
+      }
+    ],
+    "run": 7
+  },
+  {
+    "case_id": "financing-mixed-currency-facility",
+    "rows": [
+      {
+        "accession": "FIN-MIXEDCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": false,
+          "committed": true,
+          "amount": 2000000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "FACILITY_COMMITMENT",
+              500000000.0
+            ]
+          ],
+          "currency": "USD"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2.0,
+            "unit": "CURRENCY",
+            "amount_role": "FACILITY_COMMITMENT",
+            "currency": "USD",
+            "scale": "BILLION",
+            "funded": false,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-10-22",
+            "evidence_span_ids": [
+              "70698d6f-s002",
+              "70698d6f-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 500.0,
+                "unit": "CURRENCY",
+                "currency": "EUR",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "70698d6f-s002"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.99,
+            "source_document_id": null,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2000000000.0,
+            "currency": "USD",
+            "amount_role": "FACILITY_COMMITMENT",
+            "funded": false,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-10-22",
+            "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro. No amounts have been drawn under the facility as of the date of this filing.",
+            "confidence": 0.99,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 500000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro.",
+                "currency": "EUR",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "BILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 19.36421209992841
+      }
+    ],
+    "run": 8
+  },
+  {
+    "case_id": "financing-mixed-currency-facility",
+    "rows": [
+      {
+        "accession": "FIN-MIXEDCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": false,
+          "committed": true,
+          "amount": 2000000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "FACILITY_COMMITMENT",
+              500000000.0
+            ]
+          ],
+          "currency": "USD"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2.0,
+            "unit": "CURRENCY",
+            "amount_role": "FACILITY_COMMITMENT",
+            "currency": "USD",
+            "scale": "MILLION",
+            "funded": false,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-10-22",
+            "evidence_span_ids": [
+              "70698d6f-s002",
+              "70698d6f-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 500.0,
+                "unit": "CURRENCY",
+                "currency": "EUR",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "70698d6f-s002"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.95,
+            "source_document_id": null,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2000000.0,
+            "currency": "USD",
+            "amount_role": "FACILITY_COMMITMENT",
+            "funded": false,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-10-22",
+            "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro. No amounts have been drawn under the facility as of the date of this filing.",
+            "confidence": 0.95,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 500000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro.",
+                "currency": "EUR",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "MILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 11.601675699930638
+      }
+    ],
+    "run": 9
+  },
+  {
+    "case_id": "financing-mixed-currency-facility",
+    "rows": [
+      {
+        "accession": "FIN-MIXEDCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": false,
+          "committed": true,
+          "amount": 2000000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "FACILITY_COMMITMENT",
+              500000000.0
+            ]
+          ],
+          "currency": "USD"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2.0,
+            "unit": "CURRENCY",
+            "amount_role": "FACILITY_COMMITMENT",
+            "currency": "USD",
+            "scale": "BILLION",
+            "funded": false,
+            "committed": true,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-10-22",
+            "evidence_span_ids": [
+              "70698d6f-s002",
+              "70698d6f-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "MAXIMUM_CAPACITY",
+                "value": 500.0,
+                "unit": "CURRENCY",
+                "currency": "EUR",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "70698d6f-s002"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.95,
+            "source_document_id": null,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 2000000000.0,
+            "currency": "USD",
+            "amount_role": "FACILITY_COMMITMENT",
+            "funded": false,
+            "committed": true,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-10-22",
+            "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro. No amounts have been drawn under the facility as of the date of this filing.",
+            "confidence": 0.95,
+            "accession": "FIN-MIXEDCCY",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "MAXIMUM_CAPACITY",
+                "value": 500000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to \u20ac500 million is available for borrowings denominated in Euro.",
+                "currency": "EUR",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "BILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 14.253894400084391
+      }
+    ],
+    "run": 10
+  }
+]

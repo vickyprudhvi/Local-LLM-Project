@@ -1,0 +1,128 @@
+{
+  "_purpose": "Durable, append-only record of which model produced which finance-extraction golden-benchmark numbers. Created in Phase H.26 after H.25 discovered that H.22's original qwen3.5:397b-cloud results existed only as conversation text, not a saved artifact, and could not be independently re-verified once the model was retired. Every entry below is model-specific; entries are never overwritten, only appended.",
+  "entries": [
+    {
+      "phase": "H.22",
+      "recorded_in_phase": "H.26 (retroactively, from the H.22 completion summary -- no raw JSON artifact from the original run was preserved)",
+      "model": "qwen3.5:397b-cloud",
+      "model_status_as_of_2026-09-25": "RETIRED by the provider (confirmed via a direct Ollama API call: \"qwen3.5:397b was retired at 2026-09-25 00:00:00 -0700 PDT\")",
+      "extractor_version": "events-v4.0 (finance.documents.event_extractor.LocalModelEventExtractor.version)",
+      "document_pipeline_version": "v1.0",
+      "schema_version": "2026-09-15",
+      "benchmark": "36-case golden document-package benchmark, x3 runs, scripts/run_live_document_pipeline_benchmark.py",
+      "caveat": "Numbers below are as reported in the H.22 completion summary text, not a re-parsed raw JSON file. Treat as historical record, not a byte-exact artifact.",
+      "reported_results": {
+        "hard_safety_hits": {},
+        "scale_accuracy": [1.0, 1.0, 1.0],
+        "amount_accuracy": [1.0, 1.0, 1.0],
+        "amount_role_accuracy": [1.0, 1.0, 1.0],
+        "accepted_precision_approx": "~95% (exact per-run values not preserved)",
+        "notes": "All 10 monetary-scale-focused cases (9 new + rewritten FIN-MULTI) showed 3/3 stable acceptance. Original EUR-notes live-shadow defect (unit=UNKNOWN silently scaled x1) confirmed fixed at the deterministic-validator level."
+      }
+    },
+    {
+      "phase": "H.26",
+      "recorded_in_phase": "H.26 (raw JSON preserved this time -- see docs/benchmarks/h26_gpt_oss_20b_cloud_golden.json)",
+      "model": "gpt-oss:20b-cloud",
+      "model_config": {
+        "provider": "Ollama, cloud-hosted (same OLLAMA_URL as the retired model; no separate endpoint)",
+        "context_length": 131072,
+        "quantization": "MXFP4",
+        "parameter_size": "20914757184",
+        "capabilities": ["completion", "tools", "thinking"],
+        "invocation": "set via LOCAL_MODEL env var override at process launch, .env NOT modified"
+      },
+      "extractor_version": "events-v4.0 (unchanged from H.22 -- same production extractor code, model swapped only)",
+      "document_pipeline_version": "v1.0",
+      "schema_version": "2026-09-15",
+      "benchmark": "36-case golden document-package benchmark, x3 runs, scripts/run_live_document_pipeline_benchmark.py",
+      "reported_results": {
+        "hard_safety_hits": {},
+        "actual_accepted_precision": [1.0, 1.0, 1.0],
+        "event_accepted_precision": [0.9090909090909091, 0.9230769230769231, 0.9166666666666666],
+        "event_type_accuracy": [0.48, 0.48, 0.52],
+        "amount_accuracy": [0.9583333333333334, 0.9583333333333334, 0.9583333333333334],
+        "amount_role_accuracy": [0.9411764705882353, 0.9411764705882353, 0.9411764705882353],
+        "currency_accuracy": [0.8888888888888888, 0.8888888888888888, 0.8888888888888888],
+        "scale_accuracy": [0.9583333333333334, 0.9583333333333334, 0.9583333333333334],
+        "event_accepted_recall": [0.4, 0.48, 0.44],
+        "call_seconds_total": 1340.98,
+        "notes": "Zero hard-safety hits across all 3 runs, same as the retired model. Substantially weaker event_type_accuracy (~48-52% vs a presumably much higher figure for qwen3.5:397b-cloud, not independently re-measurable now) and lower event_accepted_recall (40-48%) -- the validator fails closed on the weaker model's misclassifications rather than accepting them, so safety held but usefulness (fewer events actually published) is lower. FIN-MATEXT (debt-vs-OTHER_MATERIAL_FINANCING ambiguity) reproduced as WRONG_PROPOSAL in all 3 runs, never as a hard-safety hit -- same pre-documented, non-defect ambiguity, not a new regression."
+      }
+    },
+    {
+      "phase": "H.27",
+      "recorded_in_phase": "H.27 (isolated A/B prompt experiment; production event_extractor.py never modified on disk -- see docs/benchmarks/h27_variant_A_production_prompt.json and h27_variant_B_revised_prompt.json)",
+      "model": "gpt-oss:20b-cloud",
+      "root_cause_found": "In 11 of 26 live event cases, the model proposed OTHER_MATERIAL_FINANCING for a credit facility / term loan / bridge facility filed under 8-K item 2.03, where the filing's own item code deterministically requires ISSUER_DEBT_ISSUANCE (finance/structural_breaks.py classify_security_event + finance/documents/event_validator.py _COMPATIBLE_REFINEMENTS, both read-only, neither modified). Confirmed via two scratchpad diagnostic scripts capturing the model's RAW proposed event_type before validation. The production reader prompt (finance/documents/event_extractor.py _SYSTEM) gives the model only bare enum names for event_type, no semantic descriptions -- the model appears to conflate 'not yet drawn' (a real distinction the prompt already covers well via funded/committed) with 'not itself a debt instrument' (an incorrect generalization the prompt never corrected).",
+      "prompt_change_tested": "One new numbered rule (rule 16) appended to the existing _SYSTEM text in an isolated, in-process monkeypatch (never written to finance/documents/event_extractor.py): clarifies that a credit facility/term loan/bridge facility being ESTABLISHED is still ISSUER_DEBT_ISSUANCE type-wise (funded/committed carries the draw-status distinction, not event_type), that REFINANCING requires a span stating the new debt replaces existing debt, and that OTHER_MATERIAL_FINANCING is reserved for a material financing arrangement that is not itself a debt/equity/acquisition instrument. Introduces no new event type.",
+      "variant_A_production_prompt_x3": {
+        "event_type_accuracy": [0.52, 0.52, 0.52],
+        "event_accepted_recall": [0.4, 0.4, 0.36],
+        "event_accepted_precision": [0.7692307692307693, 0.8333333333333334, 0.8181818181818182],
+        "item_code_consistency": [0.6153846153846154, 0.6, 0.6153846153846154],
+        "hard_safety_hits": {"FUNDED_STATUS_MISREAD": 1}
+      },
+      "variant_B_revised_prompt_x3": {
+        "event_type_accuracy": [0.96, 0.96, 0.96],
+        "event_accepted_recall": [0.72, 0.64, 0.68],
+        "event_accepted_precision": [0.9473684210526315, 0.9411764705882353, 0.9444444444444444],
+        "item_code_consistency": [0.96, 0.96, 1.0],
+        "hard_safety_hits": {"WRONG_AMOUNT_ROLE_ACCEPTED": 1, "FUNDED_STATUS_MISREAD": 1, "WRONG_MAGNITUDE_ACCEPTED": 1}
+      },
+      "hard_safety_attribution": "The 3 variant-B hard-safety hits trace (via per-item stability cross-reference) to financing-multiple-facilities-one-paragraph, financing-mixed-currency-facility, and financing-commitment-drawdown-different-currencies -- the three fixtures already documented as complex multi-amount/dual-currency edge cases (H.21/H.22), none touching the rule-16 classification-taxonomy area. A follow-up 3-fresh-pass attribution re-run of variant B alone produced ZERO hard-safety hits, suggesting these are pre-existing model-level stochastic variability rather than a rule-16-caused regression -- but the sample size (3-6 runs per condition) is too small to state this as a defensible conclusion rather than a plausible one.",
+      "decision": "INCONCLUSIVE on the safety comparison specifically (per phase spec section 9C) -- the recall/classification improvement itself is large, real, and consistently reproduced (not in question), but section 7's literal 'any new hard-safety failure disqualifies the revised prompt' rule was not clearly satisfied in the single mandated x3 controlled comparison, and the additional attribution data was insufficiently sized to rule this in or out with confidence. Per section 9's own instruction for this outcome, no further prompt-engineering iteration was attempted, and the 25-stock live shadow was not run (section 10's gate: only run it if the revised reader cleanly passes golden-benchmark safety requirements)."
+    },
+    {
+      "phase": "H.28",
+      "recorded_in_phase": "H.28 (Variant B safety-stability x10 measurement; prompt byte-identical to H.27, verified via sha256 before any run; production files unmodified -- see docs/benchmarks/h28_campaign1_x10_summary.json and h28_campaign2_stress_fixture_traces.json)",
+      "model": "gpt-oss:20b-cloud",
+      "goal": "Resolve H.27's INCONCLUSIVE safety verdict with a properly-powered x10 sample (Campaign 1: full 36-case golden benchmark x10) plus a dedicated independent x10 trace of the 3 stress fixtures that produced H.27's hits (Campaign 2: FIN-MULTI, FIN-MIXEDCCY, FIN-DIFFCCY, using the SAME frozen production reader/validator functions called directly, capturing the full raw model JSON and resolved production object for every accepted/rejected candidate).",
+      "campaign1_x10_results": {
+        "completed_runs": 10, "attempted_runs": 10,
+        "event_type_accuracy": {"mean": 0.96, "stddev": 0.0, "values": [0.96,0.96,0.96,0.96,0.96,0.96,0.96,0.96,0.96,0.96]},
+        "event_accepted_recall": {"mean": 0.728, "median": 0.74, "min": 0.64, "max": 0.84, "stddev": 0.0776},
+        "event_accepted_precision": {"mean": 0.9419, "median": 0.9468, "min": 0.8889, "max": 1.0, "stddev": 0.0381},
+        "hard_safety_hits_total": {"FUNDED_STATUS_MISREAD": 2, "WRONG_MAGNITUDE_ACCEPTED": 1, "WRONG_AMOUNT_ROLE_ACCEPTED": 4},
+        "clean_runs": 3, "runs_with_hits": 7
+      },
+      "campaign2_stress_fixture_results": {
+        "completed_runs": 9, "attempted_runs": 10,
+        "model_infra_failures": 1,
+        "note": "Run 5's preflight model-availability check failed with a transient network timeout reaching the local Ollama endpoint (not a retirement/410) -- recorded as MODEL_INFRA_FAILURE per spec section 11 and skipped for all 3 fixtures in that run, never silently substituted.",
+        "FIN_MULTI": "No hard-safety-coded outcome in any completed run (5/9 ISSUER_DEBT_ISSUANCE or REFINANCING accepted, 2/9 safely rejected -- AMOUNT_NOT_GROUNDED/UNKNOWN_CURRENCY). Consistent with H.20-22's pre-documented AMOUNT_DRAWN/PRINCIPAL_AMOUNT/FACILITY_COMMITMENT ambiguity for a fully-drawn term loan -- recall variability, not a safety issue.",
+        "FIN_MIXEDCCY": "Two INDEPENDENT, recurring failure modes on the SAME fixture: (1) primary $2.0B amount mis-scaled as $2.0M (1000x error) in 3/9 completed runs -- a genuine, code-traced VALIDATOR_FALSE_ACCEPTANCE (see hard_safety_trace below), and (2) the EUR500M supplementary sub-limit labeled MAXIMUM_CAPACITY instead of the fixture's expected FACILITY_COMMITMENT in 3/9 completed runs -- assessed as GROUND_TRUTH_AMBIGUITY (MAXIMUM_CAPACITY is a legitimate, pre-existing schema role, and the filing's own 'of which up to EUR500 million is available' language textually supports it at least as well as FACILITY_COMMITMENT). EUR currency itself was correctly grounded in all 9/9 runs.",
+        "FIN_DIFFCCY": "No hard-safety-coded outcome in any completed run (8/9 accepted with the GBP commitment and USD draw correctly ORDER-INDEPENDENTLY reported per H.20-22's established design, 1/9 safely rejected -- FUNDED_STATUS_NOT_GROUNDED)."
+      },
+      "separately_confirmed_genuine_defect_FIN_EQUITY": "Not one of the 3 originally-named stress fixtures, but Campaign 1's own aggregate run surfaced a NEW recurring hard-safety hit here: an unambiguous $450M completed equity sale ('completed an underwritten public offering... issuing and selling the shares for aggregate net proceeds of approximately $450 million') was reported funded=False in 2/10 runs (FUNDED_STATUS_MISREAD) -- the filing text has no ambiguity at all, so this is a genuine reader comprehension error, not ground-truth ambiguity. This did NOT occur in ANY of H.27 Variant A's 3 runs (3/3 clean), making it plausibly attributable to the rule-16 prompt change itself (its wording and worked example are entirely about debt-facility funded/committed framing, which may have primed the model toward a funded=False default even in an unrelated equity context) -- SYSTEMATIC PROMPT-INDUCED BEHAVIOR is the most likely explanation, though the comparative sample (n=3 vs n=10) is small.",
+      "hard_safety_trace_FIN_MIXEDCCY_magnitude_error": {
+        "source_span_text": "On October 22, 2026, the Company entered into a new $2.0 billion multicurrency revolving credit facility with a syndicate of lenders, of which up to €500 million is available for borrowings denominated in Euro. No amounts have been drawn under the facility as of the date of this filing.",
+        "model_raw_json": {"amount": 2.0, "scale": "MILLION", "currency": "USD", "unit": "CURRENCY"},
+        "resolved_production_object": {"amount": 2000000.0, "currency": "USD", "scale": "MILLION"},
+        "root_cause_confirmed_by_code_read": "finance/documents/event_validator.py `_ground_amount` (line ~290): `scale_pattern.search(resolved_text)` checks whether the claimed scale word appears ANYWHERE in the full cited-span text, with no check that the scale word is associated with the SPECIFIC number being scaled. The cited span contains BOTH '$2.0 billion' (the primary amount) and 'EUR500 million' (a DIFFERENT, supplementary amount) in the same sentence -- so the model's incorrect MILLION claim for the $2.0 primary figure passes the grounding check because 'million' genuinely IS present in the span, just attached to a different number. Confirmed distinct from the pre-existing financing-scale-adjacent-spans (FIN-ADJSPAN) fixture, which tests only a SINGLE number whose scale word sits in a different sentence -- never two different numbers with two different scale words in one span. Read-only code inspection; the validator was NOT modified per this phase's explicit constraint.",
+        "classification": "VALIDATOR_FALSE_ACCEPTANCE -- a real, generalizable, currently-unpatched deterministic-validator weakness. Production impact today is nil (FINANCE_DOCUMENT_PIPELINE_MODE defaults to v1; the LLM event reader is not live in production), but this is relevant to any future v2/compare-mode activation regardless of which model is selected."
+      },
+      "usefulness_vs_variant_A": "event_type_accuracy 0.52->0.96 (stddev 0.0 across all 10 runs -- fully stable), event_accepted_recall 0.36-0.40 range -> 0.64-0.84 range (mean 0.728 vs implied ~0.39), event_accepted_precision 0.77-0.83 range -> 0.889-1.0 range (mean 0.942). The classification/usefulness improvement from H.27 is CONFIRMED and holds up over 10 runs -- this is not in question.",
+      "decision": "VARIANT_B_SAFETY_UNSTABLE (spec section 9B) -- two independently-confirmed, non-ambiguous, recurring defect classes: (1) FIN-MIXEDCCY's 1000x magnitude error, a code-traced genuine VALIDATOR_FALSE_ACCEPTANCE, recurring 4 times across 19 independent live samples; (2) FIN-EQUITY's funded-status misread on unambiguous text, recurring 2/10 times and plausibly prompt-induced. Both are independent of, and do not rely on, the FIN-MIXEDCCY MAXIMUM_CAPACITY question (assessed separately as GROUND_TRUTH_AMBIGUITY, not counted toward this verdict). Per section 10's explicit instruction, no prompt iteration (no 'Variant C') was attempted in this phase, and the 25-stock live shadow was NOT run."
+    },
+    {
+      "phase": "H.30",
+      "recorded_in_phase": "H.30 -- deterministic, model-independent fix for both H.28-confirmed genuine defects. No model calls made or needed; fixes verified by replaying the exact saved H.28 unsafe outputs through the corrected validator.",
+      "goal": "Close the VALIDATOR_FALSE_ACCEPTANCE (monetary-mention borrowing) and funded-status false-negative defects H.28 found, WITHOUT touching Variant B, event classification, SEC retrieval, or any production default.",
+      "monetary_mention_fix": {
+        "root_cause": "event_validator.py's currency/scale grounding checked `pattern.search(resolved_text)` -- whether currency/scale LANGUAGE existed ANYWHERE in the candidate's cited evidence, never whether it was associated with the SPECIFIC numeric mention being validated. Two monetary mentions in one span (\"$2.0 billion ... EUR500 million\") let a claim of value=2.0/currency=USD/scale=MILLION pass, because MILLION genuinely exists in that text -- attached to EUR500, not 2.0.",
+        "fix": "finance/documents/monetary.py gained MonetaryMentionWitness/monetary_mention_windows/mention_language_grounds_value: resolved_text is partitioned by EVERY numeric token into non-overlapping windows (each number owns the text between its immediate neighbors); a currency/scale pattern must match INSIDE the window of an occurrence of the CLAIMED value, not merely anywhere in the text. event_validator.py's two `pattern.search(resolved_text)` call sites (currency, scale) were replaced with `mention_language_grounds_value(...)`. No second monetary parser -- reuses finance.extraction.validator's own number regex.",
+        "cross_span_preserved": "resolved_text already unions every CITED span in document order (H.18 design) before this function runs, so a value in one cited span and its scale word in an adjacent cited span (the pre-existing scale-adjacent-spans golden fixture) still work: when that value is the ONLY numeric mention in the combined text, its window is the whole text. Windows only narrow when a SECOND numeric mention exists to disambiguate against -- exactly the case that needed fixing.",
+        "h28_replay_result": "The EXACT saved H.28 raw model JSON for FIN-MIXEDCCY (value=2.0, currency=USD, scale=MILLION, citing the real span ids 70698d6f-s002/s003) now returns SCALE_NOT_GROUNDED and is rejected -- zero manual editing of the saved candidate; replayed byte-for-byte against the real fixture text and real span-builder output. A correctly-scaled positive control (2.0/USD/BILLION primary + 500/EUR/MILLION supplementary) still resolves to 2,000,000,000 USD + 500,000,000 EUR exactly as before."
+      },
+      "funded_status_fix": {
+        "semantic_definition_found": "B -- funded means completion/proceeds-received state for EVERY capital-transaction type this schema covers (debt drawdown AND equity issuance), not debt-only. Evidence: _FUNDED_LANGUAGE already contained equity-specific phrases ('issued and sold', 'received net proceeds', 'closed the offering') predating this phase; event_impact() gives ISSUER_EQUITY_ISSUANCE affects_cash=True; the pre-existing (H.20-era) completed-equity-sale golden fixture's own ground truth already expected funded=True with the note 'issued and sold shares -- funded'. No semantic change made -- only documented centrally and made symmetric.",
+        "fix": "A new EventRejectionCode.FUNDED_STATUS_CONTRADICTED and a symmetric check in event_validator.py's validate(): funded=False is now refused when the candidate's OWN cited evidence contains the SAME _FUNDED_LANGUAGE the existing funded=True check already uses -- no new vocabulary, no equity-specific carve-out.",
+        "h28_replay_result": "The exact saved H.28 unsafe shape (funded=False, amount=450.0/MILLION/USD, role=TRANSACTION_VALUE, citing the real completed-equity-sale fixture's real spans) now returns FUNDED_STATUS_CONTRADICTED. A funded=True positive control on the identical text still resolves cleanly to 450,000,000 USD."
+      },
+      "generalized_tests_added": "14 new tests in tests/test_finance_document_monetary_scale.py (test_mention_A..J, test_funded_K..M2), covering exactly spec section 8's A-M list: correct/incorrect scale-billion/million claims on a two-mention span, wrong-currency-borrowing, two-USD-different-scale independence, same-value-twice-different-currency, primary+supplementary independence, legacy-unit backward compatibility, bare-UNIT correctness, and both funded-status directions including the completed-equity positive control.",
+      "regression_results": "Full pytest: 4141 passed, 16 skipped, 0 failed (H.29's 4127 + 14 net new). Finance benchmarks (Actualization/Reported Actuals/Canonical/reporting-currency/extraction): 550 passed. Monetary/event-validator/span/document-pipeline/canary/adapter: 220 passed. MCP regression: 679 passed, 12 skipped. Original EUR-notes case reconfirmed: 500,000,000 EUR.",
+      "production_impact": "None. FINANCE_DOCUMENT_PIPELINE_MODE stays v1 (LLM event reader not live in production); FINANCE_SEC_PROVIDER stays current; LOCAL_MODEL untouched. router.py/tools/executor.py confirmed unchanged (empty diff). This fix hardens the deterministic acceptance boundary that WOULD govern any future v2/compare-mode activation, independent of which model is eventually selected."
+    }
+  ]
+}

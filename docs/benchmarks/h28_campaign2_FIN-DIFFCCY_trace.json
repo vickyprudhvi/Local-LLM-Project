@@ -1,0 +1,899 @@
+[
+  {
+    "case_id": "financing-commitment-drawdown-different-currencies",
+    "rows": [
+      {
+        "accession": "FIN-DIFFCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 750000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "AMOUNT_DRAWN",
+              400000000.0
+            ]
+          ],
+          "currency": "GBP"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 750.0,
+            "unit": "CURRENCY",
+            "amount_role": "FACILITY_COMMITMENT",
+            "currency": "GBP",
+            "scale": "MILLION",
+            "funded": true,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-10-24",
+            "evidence_span_ids": [
+              "9bc90f27-s002",
+              "9bc90f27-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 400.0,
+                "unit": "CURRENCY",
+                "currency": "USD",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "9bc90f27-s003"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 1.0,
+            "source_document_id": null,
+            "accession": "FIN-DIFFCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 750000000.0,
+            "currency": "GBP",
+            "amount_role": "FACILITY_COMMITMENT",
+            "funded": true,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-10-24",
+            "source_evidence": "On October 24, 2026, the Company entered into a new \u00a3750 million revolving credit facility with a syndicate of lenders; at closing, the Company drew $400 million-equivalent under the facility in US Dollars for general corporate purposes.",
+            "confidence": 1.0,
+            "accession": "FIN-DIFFCCY",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 400000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "at closing, the Company drew $400 million-equivalent under the facility in US Dollars for general corporate purposes.",
+                "currency": "USD",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "MILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 14.531047800090164
+      }
+    ],
+    "run": 1
+  },
+  {
+    "case_id": "financing-commitment-drawdown-different-currencies",
+    "rows": [
+      {
+        "accession": "FIN-DIFFCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 750000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "AMOUNT_DRAWN",
+              400000000.0
+            ]
+          ],
+          "currency": "GBP"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 750.0,
+            "unit": "CURRENCY",
+            "amount_role": "FACILITY_COMMITMENT",
+            "currency": "GBP",
+            "scale": "MILLION",
+            "funded": true,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-10-24",
+            "evidence_span_ids": [
+              "9bc90f27-s002",
+              "9bc90f27-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 400.0,
+                "unit": "CURRENCY",
+                "currency": "USD",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "9bc90f27-s003"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.9,
+            "source_document_id": null,
+            "accession": "FIN-DIFFCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 750000000.0,
+            "currency": "GBP",
+            "amount_role": "FACILITY_COMMITMENT",
+            "funded": true,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-10-24",
+            "source_evidence": "On October 24, 2026, the Company entered into a new \u00a3750 million revolving credit facility with a syndicate of lenders; at closing, the Company drew $400 million-equivalent under the facility in US Dollars for general corporate purposes.",
+            "confidence": 0.9,
+            "accession": "FIN-DIFFCCY",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 400000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "at closing, the Company drew $400 million-equivalent under the facility in US Dollars for general corporate purposes.",
+                "currency": "USD",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "MILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 27.072973200120032
+      }
+    ],
+    "run": 2
+  },
+  {
+    "case_id": "financing-commitment-drawdown-different-currencies",
+    "rows": [
+      {
+        "accession": "FIN-DIFFCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 750000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "AMOUNT_DRAWN",
+              400000000.0
+            ]
+          ],
+          "currency": "GBP"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 400.0,
+            "unit": "CURRENCY",
+            "amount_role": "AMOUNT_DRAWN",
+            "currency": "USD",
+            "scale": "MILLION",
+            "funded": true,
+            "committed": false,
+            "counterparty": null,
+            "effective_date": "2026-10-24",
+            "evidence_span_ids": [
+              "9bc90f27-s003",
+              "9bc90f27-s002"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 750.0,
+                "unit": "CURRENCY",
+                "currency": "GBP",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "9bc90f27-s002"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 1.0,
+            "source_document_id": null,
+            "accession": "FIN-DIFFCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 400000000.0,
+            "currency": "USD",
+            "amount_role": "AMOUNT_DRAWN",
+            "funded": true,
+            "committed": false,
+            "counterparty": null,
+            "effective_date": "2026-10-24",
+            "source_evidence": "On October 24, 2026, the Company entered into a new \u00a3750 million revolving credit facility with a syndicate of lenders; at closing, the Company drew $400 million-equivalent under the facility in US Dollars for general corporate purposes.",
+            "confidence": 1.0,
+            "accession": "FIN-DIFFCCY",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 750000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "On October 24, 2026, the Company entered into a new \u00a3750 million revolving credit facility with a syndicate of lenders;",
+                "currency": "GBP",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "MILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 19.093350100098178
+      }
+    ],
+    "run": 3
+  },
+  {
+    "case_id": "financing-commitment-drawdown-different-currencies",
+    "rows": [
+      {
+        "accession": "FIN-DIFFCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 750000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "AMOUNT_DRAWN",
+              400000000.0
+            ]
+          ],
+          "currency": "GBP"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 400.0,
+            "unit": "CURRENCY",
+            "amount_role": "AMOUNT_DRAWN",
+            "currency": "USD",
+            "scale": "MILLION",
+            "funded": true,
+            "committed": false,
+            "counterparty": null,
+            "effective_date": "2026-10-24",
+            "evidence_span_ids": [
+              "9bc90f27-s003",
+              "9bc90f27-s002"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 750.0,
+                "unit": "CURRENCY",
+                "currency": "GBP",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "9bc90f27-s002"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.9,
+            "source_document_id": null,
+            "accession": "FIN-DIFFCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 400000000.0,
+            "currency": "USD",
+            "amount_role": "AMOUNT_DRAWN",
+            "funded": true,
+            "committed": false,
+            "counterparty": null,
+            "effective_date": "2026-10-24",
+            "source_evidence": "On October 24, 2026, the Company entered into a new \u00a3750 million revolving credit facility with a syndicate of lenders; at closing, the Company drew $400 million-equivalent under the facility in US Dollars for general corporate purposes.",
+            "confidence": 0.9,
+            "accession": "FIN-DIFFCCY",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 750000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "On October 24, 2026, the Company entered into a new \u00a3750 million revolving credit facility with a syndicate of lenders;",
+                "currency": "GBP",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "MILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 14.251334599917755
+      }
+    ],
+    "run": 4
+  },
+  {
+    "run": 5,
+    "status": "MODEL_INFRA_FAILURE",
+    "reason": "could not reach http://localhost:11434: timed out"
+  },
+  {
+    "case_id": "financing-commitment-drawdown-different-currencies",
+    "rows": [
+      {
+        "accession": "FIN-DIFFCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 750000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "AMOUNT_DRAWN",
+              400000000.0
+            ]
+          ],
+          "currency": "GBP"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 750.0,
+            "unit": "CURRENCY",
+            "amount_role": "FACILITY_COMMITMENT",
+            "currency": "GBP",
+            "scale": "MILLION",
+            "funded": true,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-10-24",
+            "evidence_span_ids": [
+              "9bc90f27-s002"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 400.0,
+                "unit": "CURRENCY",
+                "currency": "USD",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "9bc90f27-s003"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.95,
+            "source_document_id": null,
+            "accession": "FIN-DIFFCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [],
+        "rejected": [
+          {
+            "candidate": {
+              "event_type": "ISSUER_DEBT_ISSUANCE",
+              "amount": 750.0,
+              "unit": "CURRENCY",
+              "amount_role": "FACILITY_COMMITMENT",
+              "currency": "GBP",
+              "scale": "MILLION",
+              "funded": true,
+              "committed": true,
+              "counterparty": null,
+              "effective_date": "2026-10-24",
+              "evidence_span_ids": [
+                "9bc90f27-s002"
+              ],
+              "supplementary_amounts": [
+                {
+                  "role": "AMOUNT_DRAWN",
+                  "value": 400.0,
+                  "unit": "CURRENCY",
+                  "currency": "USD",
+                  "scale": "MILLION",
+                  "evidence_span_ids": [
+                    "9bc90f27-s003"
+                  ]
+                }
+              ],
+              "source_evidence": "",
+              "confidence": 0.95,
+              "source_document_id": null,
+              "accession": "FIN-DIFFCCY",
+              "form": "8-K",
+              "filed": null,
+              "items": "2.03"
+            },
+            "code": "FUNDED_STATUS_NOT_GROUNDED",
+            "reason": "the candidate asserts the event is funded but the cited spans contain no drawdown/proceeds-received language -- they may describe a facility being established rather than money moving"
+          }
+        ],
+        "elapsed_s": 15.706648200051859
+      }
+    ],
+    "run": 6
+  },
+  {
+    "case_id": "financing-commitment-drawdown-different-currencies",
+    "rows": [
+      {
+        "accession": "FIN-DIFFCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 750000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "AMOUNT_DRAWN",
+              400000000.0
+            ]
+          ],
+          "currency": "GBP"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 400.0,
+            "unit": "CURRENCY",
+            "amount_role": "AMOUNT_DRAWN",
+            "currency": "USD",
+            "scale": "MILLION",
+            "funded": true,
+            "committed": false,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-10-24",
+            "evidence_span_ids": [
+              "9bc90f27-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 750.0,
+                "unit": "CURRENCY",
+                "currency": "GBP",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "9bc90f27-s002"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.99,
+            "source_document_id": null,
+            "accession": "FIN-DIFFCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 400000000.0,
+            "currency": "USD",
+            "amount_role": "AMOUNT_DRAWN",
+            "funded": true,
+            "committed": false,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-10-24",
+            "source_evidence": "at closing, the Company drew $400 million-equivalent under the facility in US Dollars for general corporate purposes.",
+            "confidence": 0.99,
+            "accession": "FIN-DIFFCCY",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 750000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "On October 24, 2026, the Company entered into a new \u00a3750 million revolving credit facility with a syndicate of lenders;",
+                "currency": "GBP",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "MILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 20.04848810005933
+      }
+    ],
+    "run": 7
+  },
+  {
+    "case_id": "financing-commitment-drawdown-different-currencies",
+    "rows": [
+      {
+        "accession": "FIN-DIFFCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 750000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "AMOUNT_DRAWN",
+              400000000.0
+            ]
+          ],
+          "currency": "GBP"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 400.0,
+            "unit": "CURRENCY",
+            "amount_role": "AMOUNT_DRAWN",
+            "currency": "USD",
+            "scale": "MILLION",
+            "funded": true,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-10-24",
+            "evidence_span_ids": [
+              "9bc90f27-s003",
+              "9bc90f27-s002"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 750.0,
+                "unit": "CURRENCY",
+                "currency": "GBP",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "9bc90f27-s002"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.95,
+            "source_document_id": null,
+            "accession": "FIN-DIFFCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 400000000.0,
+            "currency": "USD",
+            "amount_role": "AMOUNT_DRAWN",
+            "funded": true,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-10-24",
+            "source_evidence": "On October 24, 2026, the Company entered into a new \u00a3750 million revolving credit facility with a syndicate of lenders; at closing, the Company drew $400 million-equivalent under the facility in US Dollars for general corporate purposes.",
+            "confidence": 0.95,
+            "accession": "FIN-DIFFCCY",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 750000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "On October 24, 2026, the Company entered into a new \u00a3750 million revolving credit facility with a syndicate of lenders;",
+                "currency": "GBP",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "MILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 20.37525469996035
+      }
+    ],
+    "run": 8
+  },
+  {
+    "case_id": "financing-commitment-drawdown-different-currencies",
+    "rows": [
+      {
+        "accession": "FIN-DIFFCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 750000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "AMOUNT_DRAWN",
+              400000000.0
+            ]
+          ],
+          "currency": "GBP"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 400.0,
+            "unit": "CURRENCY",
+            "amount_role": "AMOUNT_DRAWN",
+            "currency": "USD",
+            "scale": "MILLION",
+            "funded": true,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-10-24",
+            "evidence_span_ids": [
+              "9bc90f27-s002",
+              "9bc90f27-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 750.0,
+                "unit": "CURRENCY",
+                "currency": "GBP",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "9bc90f27-s002"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.95,
+            "source_document_id": null,
+            "accession": "FIN-DIFFCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 400000000.0,
+            "currency": "USD",
+            "amount_role": "AMOUNT_DRAWN",
+            "funded": true,
+            "committed": true,
+            "counterparty": null,
+            "effective_date": "2026-10-24",
+            "source_evidence": "On October 24, 2026, the Company entered into a new \u00a3750 million revolving credit facility with a syndicate of lenders; at closing, the Company drew $400 million-equivalent under the facility in US Dollars for general corporate purposes.",
+            "confidence": 0.95,
+            "accession": "FIN-DIFFCCY",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "FACILITY_COMMITMENT",
+                "value": 750000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "On October 24, 2026, the Company entered into a new \u00a3750 million revolving credit facility with a syndicate of lenders;",
+                "currency": "GBP",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "MILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 28.073296200018376
+      }
+    ],
+    "run": 9
+  },
+  {
+    "case_id": "financing-commitment-drawdown-different-currencies",
+    "rows": [
+      {
+        "accession": "FIN-DIFFCCY",
+        "expected": {
+          "event_type": "ISSUER_DEBT_ISSUANCE",
+          "funded": true,
+          "committed": true,
+          "amount": 750000000.0,
+          "amount_role": "FACILITY_COMMITMENT",
+          "supplementary": [
+            [
+              "AMOUNT_DRAWN",
+              400000000.0
+            ]
+          ],
+          "currency": "GBP"
+        },
+        "raw_candidates_proposed": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 750.0,
+            "unit": "CURRENCY",
+            "amount_role": "FACILITY_COMMITMENT",
+            "currency": "GBP",
+            "scale": "MILLION",
+            "funded": true,
+            "committed": false,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-10-24",
+            "evidence_span_ids": [
+              "9bc90f27-s002",
+              "9bc90f27-s003"
+            ],
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 400.0,
+                "unit": "CURRENCY",
+                "currency": "USD",
+                "scale": "MILLION",
+                "evidence_span_ids": [
+                  "9bc90f27-s003"
+                ]
+              }
+            ],
+            "source_evidence": "",
+            "confidence": 0.95,
+            "source_document_id": null,
+            "accession": "FIN-DIFFCCY",
+            "form": "8-K",
+            "filed": null,
+            "items": "2.03"
+          }
+        ],
+        "accepted": [
+          {
+            "event_type": "ISSUER_DEBT_ISSUANCE",
+            "amount": 750000000.0,
+            "currency": "GBP",
+            "amount_role": "FACILITY_COMMITMENT",
+            "funded": true,
+            "committed": false,
+            "counterparty": "syndicate of lenders",
+            "effective_date": "2026-10-24",
+            "source_evidence": "On October 24, 2026, the Company entered into a new \u00a3750 million revolving credit facility with a syndicate of lenders; at closing, the Company drew $400 million-equivalent under the facility in US Dollars for general corporate purposes.",
+            "confidence": 0.95,
+            "accession": "FIN-DIFFCCY",
+            "form": "8-K",
+            "filed": null,
+            "impact": {
+              "affects_share_count": false,
+              "affects_debt": true,
+              "affects_cash": true,
+              "potential_dilution": false,
+              "affects_equity_bridge": true,
+              "affects_enterprise_value_bridge": true,
+              "requires_reassessment": true
+            },
+            "supplementary_amounts": [
+              {
+                "role": "AMOUNT_DRAWN",
+                "value": 400000000.0,
+                "unit": "CURRENCY",
+                "source_evidence": "at closing, the Company drew $400 million-equivalent under the facility in US Dollars for general corporate purposes.",
+                "currency": "USD",
+                "scale": "MILLION"
+              }
+            ],
+            "scale": "MILLION"
+          }
+        ],
+        "rejected": [],
+        "elapsed_s": 27.833537200000137
+      }
+    ],
+    "run": 10
+  }
+]
