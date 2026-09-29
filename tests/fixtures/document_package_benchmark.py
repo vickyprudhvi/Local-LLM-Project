@@ -71,6 +71,11 @@ class ExpectedEvent:
     # alongside the primary one (spec section 8's "$5B commitment, $2B
     # drawn" / "$95/share, $69B total" shapes). Each is (role, amount).
     expected_supplementary: Tuple[Tuple[str, float], ...] = ()
+    # Phase H.21. None means "not checked" -- most pre-H.21 cases are USD
+    # and the currency dimension was never separately measured. A real
+    # ISO code means the live benchmark's per-item scoring also verifies
+    # the reader's OWN currency claim (independent of acceptance).
+    expected_currency: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -250,6 +255,7 @@ _add(DocumentPackageCase(
 # event fixture below is prefixed with the item's own SEC boilerplate
 # title, exactly as a real filing states it.
 _ITEM_TITLES = {
+    "1.01": "Entry into a Material Definitive Agreement.",
     "2.01": "Completion of Acquisition or Disposition of Assets.",
     "2.03": "Creation of a Direct Financial Obligation or an Obligation under "
            "an Off-Balance Sheet Arrangement of a Registrant.",
@@ -720,6 +726,499 @@ _add(DocumentPackageCase(
                       expected_amount_role=EventAmountRole.REPAYMENT_AMOUNT,
                       note="a repayment, not a new draw -- funded describes money "
                            "RECEIVED by the company, which did not happen here"),
+    ),
+))
+
+
+# ---------------------------------------------------------------------------
+# Phase H.21 additions -- generalized shapes not yet in the benchmark
+# ---------------------------------------------------------------------------
+
+# 22. Bridge facility DRAWDOWN (case E) -- the undrawn-bridge shape (case 7
+# above) proved committed-not-funded; this is its funded counterpart, a
+# bridge facility that IS fully drawn.
+_BRIDGE_DRAWN_TEXT = _item_prefixed("2.03",
+    "On September 1, 2026, the Company drew the full $750 million available "
+    "under its previously established senior unsecured bridge loan facility "
+    "with Example Bank, N.A. to fund a portion of the cash consideration for "
+    "the Company's pending acquisition of Example Target Corp., pending "
+    "permanent financing."
+)
+_add(DocumentPackageCase(
+    case_id="financing-bridge-facility-drawn",
+    classes=("financing_event", "amount_role", "bridge_facility"),
+    submissions=_submissions([
+        {"accession": "FIN-BRIDGE-DRAWN", "form": "8-K", "filed": "2026-09-01",
+         "items": "2.03", "description": "Drawdown under Bridge Loan Facility",
+         "document": "bridgedrawn8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-BRIDGE-DRAWN", "financing_events"),),
+    event_documents={"FIN-BRIDGE-DRAWN": _BRIDGE_DRAWN_TEXT},
+    expected_events=(
+        ExpectedEvent("FIN-BRIDGE-DRAWN", "ISSUER_DEBT_ISSUANCE", funded=True,
+                      committed=True, amount=750_000_000.0, should_be_accepted=True,
+                      expected_amount_role=EventAmountRole.AMOUNT_DRAWN,
+                      note="a bridge facility fully drawn -- unlike case 7's "
+                           "undrawn bridge, this one MUST be recognized as funded"),
+    ),
+))
+
+# 23. Facility amendment / maturity extension (case J) -- no new money, no
+# new commitment: an existing facility's maturity date moves, nothing else.
+# The safety property is the mirror image of the undrawn-facility cases:
+# nothing here should be read as a NEW financing amount, drawn or committed.
+_MATURITY_EXTENSION_TEXT = _item_prefixed("1.01",
+    "On September 10, 2026, the Company entered into a Second Amendment to "
+    "its existing $1.5 billion revolving credit facility, extending the "
+    "maturity date from March 2028 to March 2031. The amendment did not "
+    "increase the aggregate commitment under the facility, and no "
+    "additional amounts were drawn in connection with the amendment."
+)
+_add(DocumentPackageCase(
+    case_id="financing-facility-maturity-extension",
+    classes=("financing_event", "amount_role", "facility_amendment"),
+    submissions=_submissions([
+        {"accession": "FIN-MATEXT", "form": "8-K", "filed": "2026-09-10",
+         "items": "1.01", "description": "Amendment to Revolving Credit Facility",
+         "document": "matext8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-MATEXT", "financing_events"),),
+    event_documents={"FIN-MATEXT": _MATURITY_EXTENSION_TEXT},
+    expected_events=(
+        # `amount=None`: this event asserts NO new financing figure -- a
+        # maturity-only amendment is not itself a fresh draw or commitment.
+        # Item 1.01 is deterministically UNRESTRICTED (spec section 6), so
+        # ISSUER_DEBT_ISSUANCE here is the most natural reading, not the
+        # only defensible one -- OTHER_MATERIAL_FINANCING is a reasonable
+        # alternative this phase measures rather than forces.
+        ExpectedEvent("FIN-MATEXT", "ISSUER_DEBT_ISSUANCE", funded=False,
+                      committed=False, amount=None, should_be_accepted=True,
+                      note="maturity-only amendment -- no new amount, no new "
+                           "draw; must not be misread as new debt issuance"),
+    ),
+))
+
+# 24. Multiple facilities in one paragraph (case K) -- two independently
+# drawn amounts in the SAME sentence must survive as two distinct figures,
+# never summed or collapsed into one (the live analog of the H.19 unit
+# test's synthetic two-facility-draw scenario).
+_MULTI_FACILITY_TEXT = _item_prefixed("2.03",
+    "On September 15, 2026, the Company entered into a new credit "
+    "agreement with a syndicate of lenders. At closing, the Company drew "
+    "$1.0 billion under Term Loan A and $500 million under Term Loan B to "
+    "refinance existing indebtedness."
+)
+_add(DocumentPackageCase(
+    case_id="financing-multiple-facilities-one-paragraph",
+    classes=("financing_event", "amount_role", "multi_facility"),
+    submissions=_submissions([
+        {"accession": "FIN-MULTI", "form": "8-K", "filed": "2026-09-15",
+         "items": "2.03", "description": "Entry into New Credit Agreement",
+         "document": "multi8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-MULTI", "financing_events"),),
+    event_documents={"FIN-MULTI": _MULTI_FACILITY_TEXT},
+    expected_events=(
+        # No `expected_amount_role`/`expected_supplementary` role pinned
+        # here: for a FULLY drawn term loan, "amount drawn" and "principal
+        # amount" are the SAME true fact about the SAME number (unlike
+        # FIN-PARTIAL, where the commitment and the draw are genuinely
+        # DIFFERENT amounts) -- AMOUNT_DRAWN and PRINCIPAL_AMOUNT are both
+        # correct, non-dangerous readings, so pinning one as "the" answer
+        # would penalize a safe, legitimate alternative (live H.22 finding:
+        # a role-language rewrite meant to close this ambiguity just moved
+        # it from FACILITY_COMMITMENT to PRINCIPAL_AMOUNT, confirming the
+        # ambiguity is inherent to the shape, not a defect to fix away).
+        # The test's actual point -- $1.0B and $500M survive as two
+        # distinct figures, never summed into $1.5B -- is still enforced
+        # by `amount_ok` requiring the PRIMARY value ($1.0B) be found.
+        ExpectedEvent("FIN-MULTI", "ISSUER_DEBT_ISSUANCE", funded=True,
+                      committed=True, amount=1_000_000_000.0, should_be_accepted=True,
+                      note="two distinct tranches, $1.0B and $500M, both drawn "
+                           "-- must never be summed into a single $1.5B figure"),
+    ),
+))
+
+# 25. Foreign issuer financing disclosure (case L) -- a non-USD principal
+# amount, to measure currency accuracy specifically (spec section 5).
+_FOREIGN_ISSUER_NOTES_TEXT = _item_prefixed("2.03",
+    "On September 20, 2026, the Company, a Netherlands-incorporated public "
+    "limited company, issued and sold €500 million aggregate principal "
+    "amount of 4.250% Senior Notes due 2033 in a Regulation S offering "
+    "outside the United States."
+)
+_add(DocumentPackageCase(
+    case_id="financing-foreign-issuer-eur-notes",
+    classes=("financing_event", "amount_role", "foreign_issuer"),
+    submissions=_submissions([
+        {"accession": "FIN-EURNOTES", "form": "8-K", "filed": "2026-09-20",
+         "items": "2.03", "description": "Issuance of Euro-Denominated Notes",
+         "document": "eurnotes8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-EURNOTES", "financing_events"),),
+    # `_detect_reporting_status` derives foreign_private_issuer status from
+    # 20-F/40-F filings actually present in `submissions` (none here -- this
+    # fixture's issuer files domestically); the "foreign" dimension under
+    # test is the disclosure's own CURRENCY, not the SEC reporting-status
+    # bucket, so the default domestic_registrant is the correct ground truth.
+    event_documents={"FIN-EURNOTES": _FOREIGN_ISSUER_NOTES_TEXT},
+    expected_events=(
+        ExpectedEvent("FIN-EURNOTES", "ISSUER_DEBT_ISSUANCE", funded=True,
+                      committed=False, amount=500_000_000.0, should_be_accepted=True,
+                      expected_amount_role=EventAmountRole.PRINCIPAL_AMOUNT,
+                      expected_currency="EUR",
+                      note="a EUR-denominated notes issuance -- currency must "
+                           "be read as EUR, never defaulted to USD"),
+    ),
+))
+
+# 26. Facility commitment INCREASE (case M) -- an upsize amendment. The
+# headline figure is the NEW total commitment, not the delta, and not the
+# superseded old commitment; nothing was drawn.
+_COMMITMENT_INCREASE_TEXT = _item_prefixed("2.03",
+    "On September 25, 2026, the Company entered into an amendment to its "
+    "existing revolving credit facility increasing the aggregate "
+    "commitments thereunder from $2.0 billion to $2.75 billion. No amounts "
+    "were drawn under the facility in connection with the amendment."
+)
+_add(DocumentPackageCase(
+    case_id="financing-facility-commitment-increase",
+    classes=("financing_event", "amount_role", "facility_amendment"),
+    submissions=_submissions([
+        {"accession": "FIN-UPSIZE", "form": "8-K", "filed": "2026-09-25",
+         "items": "2.03", "description": "Amendment Increasing Revolving Commitments",
+         "document": "upsize8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-UPSIZE", "financing_events"),),
+    event_documents={"FIN-UPSIZE": _COMMITMENT_INCREASE_TEXT},
+    expected_events=(
+        ExpectedEvent("FIN-UPSIZE", "ISSUER_DEBT_ISSUANCE", funded=False,
+                      committed=True, amount=2_750_000_000.0, should_be_accepted=True,
+                      expected_amount_role=EventAmountRole.FACILITY_COMMITMENT,
+                      note="the NEW total commitment after the upsize -- not "
+                           "the $2.0B superseded figure, not the $750M delta, "
+                           "and never funded (no drawdown language)"),
+    ),
+))
+
+# 27. Debt issuance with explicit net proceeds (case N) -- a straight,
+# non-convertible notes issuance stating both its own principal AND net
+# proceeds. Distinct from case 8's convertible-notes shape: here
+# AMOUNT_DRAWN (via `_FUNDED_LANGUAGE`'s "net proceeds" language) IS in
+# ISSUER_DEBT_ISSUANCE's allowed role set, so this also live-regression-
+# tests the H.20 supplementary-drop fix on a case where the supplementary
+# role SHOULD ground cleanly.
+_NOTES_WITH_NET_PROCEEDS_TEXT = _item_prefixed("2.03",
+    "On September 28, 2026, the Company issued and sold $500 million "
+    "aggregate principal amount of 5.750% Senior Notes due 2034 in an "
+    "underwritten public offering, receiving net proceeds of approximately "
+    "$493 million after underwriting discounts and offering expenses."
+)
+_add(DocumentPackageCase(
+    case_id="financing-notes-with-net-proceeds",
+    classes=("financing_event", "amount_role", "notes_issuance"),
+    submissions=_submissions([
+        {"accession": "FIN-NETPROCEEDS", "form": "8-K", "filed": "2026-09-28",
+         "items": "2.03", "description": "Issuance of Senior Notes",
+         "document": "netproceeds8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-NETPROCEEDS", "financing_events"),),
+    event_documents={"FIN-NETPROCEEDS": _NOTES_WITH_NET_PROCEEDS_TEXT},
+    expected_events=(
+        ExpectedEvent("FIN-NETPROCEEDS", "ISSUER_DEBT_ISSUANCE", funded=True,
+                      committed=False, amount=500_000_000.0, should_be_accepted=True,
+                      expected_amount_role=EventAmountRole.PRINCIPAL_AMOUNT,
+                      expected_supplementary=((EventAmountRole.AMOUNT_DRAWN,
+                                              493_000_000.0),),
+                      note="the $493M net-proceeds figure is a recall target, "
+                           "not a hard-safety one -- missing it is a miss; "
+                           "the $500M principal amount is the amount that "
+                           "must never be lost or misrole'd"),
+    ),
+))
+
+# 28. Acquisition financing combining facility + funded borrowing (case O)
+# -- the real T/EchoStar shadow shape, reproduced generically. An
+# acquisition is mentioned BY NAME as the funding's purpose, but the only
+# amounts with financing evidence are the draw and its facility's
+# commitment; this is section 4's "a background acquisition mention inside
+# a financing item must not become a separate ACQUISITION event unless
+# evidence supports it" -- the deterministic item-code backstop (item 2.03
+# does not admit ACQUISITION, see `_COMPATIBLE_REFINEMENTS`) already
+# protects this, and this case exercises it against real prose rather than
+# an injected claim.
+_ACQUISITION_FUNDED_VIA_FACILITY_TEXT = _item_prefixed("2.03",
+    "On October 1, 2026, in connection with the Company's previously "
+    "announced acquisition of Example Target Holdings, Inc., the Company "
+    "drew $2.0 billion under its existing $3.0 billion delayed-draw term "
+    "loan credit agreement with Example Bank, N.A., as agent, to finance a "
+    "portion of the cash consideration for the acquisition, with the "
+    "balance funded from cash on hand."
+)
+_add(DocumentPackageCase(
+    case_id="financing-acquisition-funded-via-facility",
+    classes=("financing_event", "amount_role", "acquisition_financing"),
+    submissions=_submissions([
+        {"accession": "FIN-ACQFUNDED", "form": "8-K", "filed": "2026-10-01",
+         "items": "2.03", "description": "Drawdown to Fund Pending Acquisition",
+         "document": "acqfunded8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-ACQFUNDED", "financing_events"),),
+    event_documents={"FIN-ACQFUNDED": _ACQUISITION_FUNDED_VIA_FACILITY_TEXT},
+    expected_events=(
+        ExpectedEvent("FIN-ACQFUNDED", "ISSUER_DEBT_ISSUANCE", funded=True,
+                      committed=True, amount=2_000_000_000.0, should_be_accepted=True,
+                      expected_amount_role=EventAmountRole.AMOUNT_DRAWN,
+                      expected_supplementary=((EventAmountRole.FACILITY_COMMITMENT,
+                                              3_000_000_000.0),),
+                      note="the acquisition is named as the PURPOSE of the "
+                           "draw, not itself evidenced -- exactly one debt "
+                           "event is expected; a spurious separate "
+                           "ACQUISITION event must not be accepted (the "
+                           "item-code backstop already guards this)"),
+    ),
+))
+
+
+# ---------------------------------------------------------------------------
+# Phase H.22 additions -- currency-independent monetary scale
+# ---------------------------------------------------------------------------
+
+# 29. GBP-denominated facility (case: "GBP750 million facility").
+_GBP_FACILITY_TEXT = _item_prefixed("2.03",
+    "On October 12, 2026, the Company entered into a new senior unsecured "
+    "revolving credit facility with a syndicate of lenders led by Example "
+    "Bank plc, providing for commitments of £750 million. No amounts "
+    "have been drawn under the facility as of the date of this filing."
+)
+_add(DocumentPackageCase(
+    case_id="financing-foreign-issuer-gbp-facility",
+    classes=("financing_event", "amount_role", "monetary_scale"),
+    submissions=_submissions([
+        {"accession": "FIN-GBPFAC", "form": "8-K", "filed": "2026-10-12",
+         "items": "2.03", "description": "Entry into GBP Revolving Credit Facility",
+         "document": "gbpfac8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-GBPFAC", "financing_events"),),
+    event_documents={"FIN-GBPFAC": _GBP_FACILITY_TEXT},
+    expected_events=(
+        ExpectedEvent("FIN-GBPFAC", "ISSUER_DEBT_ISSUANCE", funded=False,
+                      committed=True, amount=750_000_000.0, should_be_accepted=True,
+                      expected_amount_role=EventAmountRole.FACILITY_COMMITMENT,
+                      expected_currency="GBP",
+                      note="a GBP-denominated facility -- currency must be "
+                           "read as GBP and scale as MILLION, independently"),
+    ),
+))
+
+# 30. JPY-denominated borrowing (case: "JPY5 billion borrowing").
+_JPY_BORROWING_TEXT = _item_prefixed("2.03",
+    "On October 14, 2026, the Company, through its wholly-owned Japanese "
+    "subsidiary, issued and sold ¥5 billion aggregate principal amount "
+    "of unsecured loan notes to a syndicate of Japanese lenders, receiving "
+    "net proceeds in the same amount."
+)
+_add(DocumentPackageCase(
+    case_id="financing-foreign-issuer-jpy-borrowing",
+    classes=("financing_event", "amount_role", "monetary_scale"),
+    submissions=_submissions([
+        {"accession": "FIN-JPYBORROW", "form": "8-K", "filed": "2026-10-14",
+         "items": "2.03", "description": "Issuance of Yen-Denominated Loan Notes",
+         "document": "jpyborrow8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-JPYBORROW", "financing_events"),),
+    event_documents={"FIN-JPYBORROW": _JPY_BORROWING_TEXT},
+    expected_events=(
+        ExpectedEvent("FIN-JPYBORROW", "ISSUER_DEBT_ISSUANCE", funded=True,
+                      committed=False, amount=5_000_000_000.0, should_be_accepted=True,
+                      expected_amount_role=EventAmountRole.PRINCIPAL_AMOUNT,
+                      expected_currency="JPY",
+                      note="a JPY-denominated borrowing -- BILLION scale must "
+                           "survive even though the currency is neither USD "
+                           "nor a currency this reader sees often"),
+    ),
+))
+
+# 31. Clean USD baseline under the NEW currency-neutral contract (unit=
+# CURRENCY + independent scale, not the legacy USD_MILLION token) -- proves
+# the decoupling did not regress the common case.
+_USD_NOTES_BASELINE_TEXT = _item_prefixed("2.03",
+    "On October 16, 2026, the Company issued and sold $500 million "
+    "aggregate principal amount of 5.125% Senior Notes due 2032 in an "
+    "underwritten public offering."
+)
+_add(DocumentPackageCase(
+    case_id="financing-usd-notes-baseline",
+    classes=("financing_event", "amount_role", "monetary_scale"),
+    submissions=_submissions([
+        {"accession": "FIN-USDBASE", "form": "8-K", "filed": "2026-10-16",
+         "items": "2.03", "description": "Issuance of Senior Notes",
+         "document": "usdbase8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-USDBASE", "financing_events"),),
+    event_documents={"FIN-USDBASE": _USD_NOTES_BASELINE_TEXT},
+    expected_events=(
+        ExpectedEvent("FIN-USDBASE", "ISSUER_DEBT_ISSUANCE", funded=True,
+                      committed=False, amount=500_000_000.0, should_be_accepted=True,
+                      expected_amount_role=EventAmountRole.PRINCIPAL_AMOUNT,
+                      expected_currency="USD",
+                      note="the common USD case under the new currency/scale "
+                           "contract -- must not regress"),
+    ),
+))
+
+# 32. A second clean USD baseline at BILLION scale, deliberately a facility
+# (not notes) to pair with case 31.
+_USD_FACILITY_BASELINE_TEXT = _item_prefixed("2.03",
+    "On October 18, 2026, the Company entered into a new $1.2 billion "
+    "revolving credit facility with a syndicate of lenders. No amounts "
+    "have been drawn under the facility as of the date of this filing."
+)
+_add(DocumentPackageCase(
+    case_id="financing-usd-facility-baseline",
+    classes=("financing_event", "amount_role", "monetary_scale"),
+    submissions=_submissions([
+        {"accession": "FIN-USDFACBASE", "form": "8-K", "filed": "2026-10-18",
+         "items": "2.03", "description": "Entry into Revolving Credit Facility",
+         "document": "usdfacbase8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-USDFACBASE", "financing_events"),),
+    event_documents={"FIN-USDFACBASE": _USD_FACILITY_BASELINE_TEXT},
+    expected_events=(
+        ExpectedEvent("FIN-USDFACBASE", "ISSUER_DEBT_ISSUANCE", funded=False,
+                      committed=True, amount=1_200_000_000.0, should_be_accepted=True,
+                      expected_amount_role=EventAmountRole.FACILITY_COMMITMENT,
+                      expected_currency="USD",
+                      note="a second USD baseline at BILLION scale"),
+    ),
+))
+
+# 33. A bare currency amount with NO scale word at all -- the correct
+# reading is scale=UNIT (a literal, small EUR500, not 500 million). Proves
+# UNIT is a real, gettable-right answer, not merely "the thing that's never
+# tested". Framed as a small demand note (realistically un-scaled in real
+# filings, unlike a notes/facility headline figure).
+_BARE_EUR_TEXT = _item_prefixed("2.03",
+    "On October 20, 2026, the Company issued and sold a promissory note in "
+    "the aggregate principal amount of €500 in a private placement to "
+    "Example Financing B.V."
+)
+_add(DocumentPackageCase(
+    case_id="financing-bare-currency-no-scale-word",
+    classes=("financing_event", "amount_role", "monetary_scale"),
+    submissions=_submissions([
+        {"accession": "FIN-BAREEUR", "form": "8-K", "filed": "2026-10-20",
+         "items": "2.03", "description": "Issuance of Promissory Note",
+         "document": "bareeur8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-BAREEUR", "financing_events"),),
+    event_documents={"FIN-BAREEUR": _BARE_EUR_TEXT},
+    expected_events=(
+        ExpectedEvent("FIN-BAREEUR", "ISSUER_DEBT_ISSUANCE", funded=True,
+                      committed=False, amount=500.0, should_be_accepted=True,
+                      expected_amount_role=EventAmountRole.PRINCIPAL_AMOUNT,
+                      expected_currency="EUR",
+                      note="NO scale word anywhere -- the correct reading is "
+                           "literal EUR500, never inflated to 500 thousand/"
+                           "million/billion by assuming a 'normal' facility "
+                           "size"),
+    ),
+))
+
+# 34. Mixed USD/EUR amounts in ONE document -- a multicurrency facility
+# whose Euro sub-limit must keep its OWN currency, never inherit USD from
+# the primary commitment.
+_MIXED_CURRENCY_TEXT = _item_prefixed("2.03",
+    "On October 22, 2026, the Company entered into a new $2.0 billion "
+    "multicurrency revolving credit facility with a syndicate of lenders, "
+    "of which up to €500 million is available for borrowings "
+    "denominated in Euro. No amounts have been drawn under the facility as "
+    "of the date of this filing."
+)
+_add(DocumentPackageCase(
+    case_id="financing-mixed-currency-facility",
+    classes=("financing_event", "amount_role", "monetary_scale"),
+    submissions=_submissions([
+        {"accession": "FIN-MIXEDCCY", "form": "8-K", "filed": "2026-10-22",
+         "items": "2.03", "description": "Entry into Multicurrency Credit Facility",
+         "document": "mixedccy8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-MIXEDCCY", "financing_events"),),
+    event_documents={"FIN-MIXEDCCY": _MIXED_CURRENCY_TEXT},
+    expected_events=(
+        ExpectedEvent("FIN-MIXEDCCY", "ISSUER_DEBT_ISSUANCE", funded=False,
+                      committed=True, amount=2_000_000_000.0, should_be_accepted=True,
+                      expected_amount_role=EventAmountRole.FACILITY_COMMITMENT,
+                      expected_currency="USD",
+                      expected_supplementary=((EventAmountRole.FACILITY_COMMITMENT,
+                                              500_000_000.0),),
+                      note="the EUR500M Euro sub-limit is a DIFFERENT "
+                           "currency from the USD2.0B total commitment -- "
+                           "each amount must keep its own currency"),
+    ),
+))
+
+# 35. Facility commitment and drawdown stated in DIFFERENT currencies --
+# a real multicurrency-facility shape (draw made in one currency out of a
+# commitment denominated in another).
+_COMMITMENT_DRAWDOWN_DIFFERENT_CCY_TEXT = _item_prefixed("2.03",
+    "On October 24, 2026, the Company entered into a new £750 million "
+    "revolving credit facility with a syndicate of lenders; at closing, the "
+    "Company drew $400 million-equivalent under the facility in US Dollars "
+    "for general corporate purposes."
+)
+_add(DocumentPackageCase(
+    case_id="financing-commitment-drawdown-different-currencies",
+    classes=("financing_event", "amount_role", "monetary_scale"),
+    submissions=_submissions([
+        {"accession": "FIN-DIFFCCY", "form": "8-K", "filed": "2026-10-24",
+         "items": "2.03", "description": "Entry into Multicurrency Facility with Drawdown",
+         "document": "diffccy8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-DIFFCCY", "financing_events"),),
+    event_documents={"FIN-DIFFCCY": _COMMITMENT_DRAWDOWN_DIFFERENT_CCY_TEXT},
+    expected_events=(
+        ExpectedEvent("FIN-DIFFCCY", "ISSUER_DEBT_ISSUANCE", funded=True,
+                      committed=True, amount=750_000_000.0, should_be_accepted=True,
+                      expected_amount_role=EventAmountRole.FACILITY_COMMITMENT,
+                      expected_currency="GBP",
+                      expected_supplementary=((EventAmountRole.AMOUNT_DRAWN,
+                                              400_000_000.0),),
+                      note="the GBP750M commitment and the USD400M draw are "
+                           "in DIFFERENT currencies -- neither may borrow "
+                           "the other's currency label"),
+    ),
+))
+
+# 36. Amount and its scale word in ADJACENT evidence spans (not the same
+# sentence) -- grounding must work across the model's cited span SET, not
+# require the number and its magnitude word to share one span.
+_SCALE_ADJACENT_SPANS_TEXT = _item_prefixed("2.03",
+    "On October 26, 2026, the Company entered into a new senior secured "
+    "term loan facility with Example Bank plc as administrative agent. The "
+    "facility's aggregate commitment is £750; that commitment figure "
+    "is expressed in millions of pounds sterling. No amounts have been "
+    "drawn under the facility as of the date of this filing."
+)
+_add(DocumentPackageCase(
+    case_id="financing-scale-adjacent-spans",
+    classes=("financing_event", "amount_role", "monetary_scale"),
+    submissions=_submissions([
+        {"accession": "FIN-ADJSPAN", "form": "8-K", "filed": "2026-10-26",
+         "items": "2.03", "description": "Entry into Term Loan Facility",
+         "document": "adjspan8k.htm"},
+    ]),
+    expected=(ExpectedClassification("FIN-ADJSPAN", "financing_events"),),
+    event_documents={"FIN-ADJSPAN": _SCALE_ADJACENT_SPANS_TEXT},
+    expected_events=(
+        ExpectedEvent("FIN-ADJSPAN", "ISSUER_DEBT_ISSUANCE", funded=False,
+                      committed=True, amount=750_000_000.0, should_be_accepted=True,
+                      expected_amount_role=EventAmountRole.FACILITY_COMMITMENT,
+                      expected_currency="GBP",
+                      note="the scale word 'millions' is in the sentence "
+                           "AFTER the number -- grounding must search the "
+                           "full multi-span cited evidence, not just the "
+                           "span containing the bare figure"),
     ),
 ))
 

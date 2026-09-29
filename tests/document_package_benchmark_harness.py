@@ -126,7 +126,13 @@ def score_case(case: DocumentPackageCase) -> CaseScore:
         candidate = EventCandidate(
             event_type=expected_event.event_type,
             amount=written_amount, unit=written_unit,
-            currency="USD" if expected_event.amount is not None else None,
+            # Phase H.22: the stub's currency must match the fixture's OWN
+            # stated currency (a EUR-denominated case must not be validated
+            # against a hardcoded USD claim); `expected_currency` defaults
+            # to None on every pre-H.22 fixture, so "USD" remains the
+            # fallback for all of them.
+            currency=((expected_event.expected_currency or "USD")
+                     if expected_event.amount is not None else None),
             funded=bool(expected_event.funded), committed=bool(expected_event.committed),
             # The stub cites EVERY span of the document -- it stands in for
             # a model that correctly identified every piece of supporting
