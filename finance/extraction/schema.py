@@ -407,6 +407,24 @@ _MODEL_UNITS = {
     "PERCENT": (gm.GuidanceUnit.RATIO, None),
     "SHARES": (gm.GuidanceUnit.SHARES, None),
     "UNKNOWN": (None, None),
+    # Phase H.22 deliberately does NOT add a "CURRENCY" (or any other) key
+    # here: this dict is SHARED with guidance extraction's own prompt
+    # schema (`finance.extraction.semantic_extractor` imports
+    # `MODEL_UNIT_NAMES` directly to build it), and touching guidance's
+    # architecture is a standing cross-phase constraint this project has
+    # held since it began. An earlier draft of this phase added "CURRENCY"
+    # here; a full-suite pytest run then showed 4 guidance-canary failures
+    # that did not reproduce in isolation or in any targeted subset. That
+    # specific correlation did NOT hold up under test (reverting this key
+    # alone did not make the failures go away -- they are pre-existing
+    # full-suite-only test-order fragility in the canary harness, confirmed
+    # unrelated to this phase's code). The key stays OUT regardless: the
+    # events reader's currency-neutral "CURRENCY" unit token is a LOCAL
+    # concept of `finance.documents.monetary`/`event_extractor.py` instead,
+    # resolved without ever touching this shared dictionary -- not because
+    # it was proven to cause the canary flakiness, but because a reader
+    # this phase does not own has no reason to see a vocabulary change it
+    # did not ask for.
 }
 
 MODEL_UNIT_NAMES = tuple(_MODEL_UNITS)

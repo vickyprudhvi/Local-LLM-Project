@@ -51,6 +51,15 @@ from finance.documents.event_schema import (
     ResolvedAmount,
     ResolvedFinancingEvent,
 )
+from finance.documents.monetary import (
+    CURRENCY_LANGUAGE,
+    MonetaryScale,
+    SCALE_LANGUAGE,
+    is_currency_amount,
+    mention_language_grounds_value,
+    resolve_scale,
+    scale_multiplier,
+)
 from finance.documents.spans import SourceSpan, resolve_span_ids
 from finance.extraction.validator import _numbers_in
 from finance.extraction.schema import domain_unit
@@ -66,6 +75,26 @@ _ISO_CURRENCY = re.compile(r"^[A-Z]{3}$")
 # `finance.structural_breaks._DEBT_LANGUAGE` (which recognises the SUBJECT of
 # a filing, debt vs equity) -- this recognises the ACT of funding, which that
 # module's own docstring says it never attempts.
+#
+# PHASE H.30 -- THE DOCUMENTED SEMANTIC OF `EventCandidate.funded`
+#
+# `funded` means "did money actually move for THIS capital event" --
+# completion/proceeds-received state for EVERY capital-transaction type
+# this schema covers (debt drawdown AND equity issuance alike), never a
+# debt-only concept. This was already the intent baked into the language
+# below before this phase touched it: "issued and sold", "received net
+# proceeds", and "closed the offering/sale" are equity-securities-offering
+# phrases, not debt phrases, sitting in the SAME pattern as "drew"/
+# "borrowed" precisely because both a completed debt draw and a completed
+# equity sale are the SAME underlying claim -- money moved -- for two
+# different instrument types. Confirmed against a pre-existing (H.20-era)
+# golden fixture for a completed equity sale, whose own ground truth
+# expects `funded=True` with the note "issued and sold shares -- funded",
+# and against `event_impact()`
+# (`finance.structural_breaks`), where `ISSUER_EQUITY_ISSUANCE` carries
+# `affects_cash=True` exactly like a funded debt draw does. This phase adds
+# no new vocabulary and no equity-specific special case -- only the
+# SYMMETRIC check below, using this SAME pattern in the other direction.
 _FUNDED_LANGUAGE = re.compile(
     r"(?i)\b(?:drew|borrowed|drawdown|draw-down|"
     r"(?:issued\s+and\s+sold|sold\s+and\s+issued)|"
@@ -217,52 +246,95 @@ class EventCandidateValidator:
         self.min_confidence = (min_confidence if min_confidence is not None
                                else config.finance_event_extraction_min_confidence())
 
-    # -- one amount: value grounding + role grounding + unit/role agreement --
+    # -- one amount: value + currency + scale + role grounding --
 
     def _ground_amount(self, value: Optional[float], unit: Optional[str], role: str,
+                       currency: Optional[str], scale: Optional[str],
                        span_ids: Sequence[str], allowed_roles: Optional[Set[str]],
-                       event_type: str) -> Tuple[Optional[str], Optional[str], str]:
-        """(resolved evidence text, rejection code or None, reason).
+                       event_type: str
+                       ) -> Tuple[Optional[str], Optional[str], str, Optional[str]]:
+        """(resolved evidence text, rejection code or None, reason, resolved scale).
 
         Applies to BOTH the candidate's primary amount and every entry in
         `supplementary_amounts` -- one rule, not two, so a supplementary
         amount cannot smuggle in a claim the primary amount would have been
         refused for.
+
+        Phase H.22: a grounded VALUE is not yet a valid MAGNITUDE. Currency
+        and scale are each independently grounded here, the same discipline
+        role grounding already uses -- see `finance.documents.monetary`'s
+        docstring for the live defect (a EUR "500 million" accepted as
+        500.0) this closes.
         """
         if value is None:
-            return "", None, ""            # nothing asserted, nothing to check
+            return "", None, "", None      # nothing asserted, nothing to check
 
         resolved_text, unknown_ids = resolve_span_ids(span_ids, self.spans)
         if resolved_text is None:
             return None, EventRejectionCode.EVIDENCE_NOT_IN_SOURCE, (
                 f"span id(s) {list(unknown_ids)} do not exist in the spans this run "
-                "showed the model")
+                "showed the model"), None
 
         present = _numbers_in(resolved_text)
         if not present or not _matches_any(value, present):
             return None, EventRejectionCode.AMOUNT_NOT_GROUNDED, (
                 f"{value} does not appear in the cited spans -- a computed or derived "
-                "number is not a value the source itself states")
+                "number is not a value the source itself states"), None
+
+        # Currency: format, then language grounding -- a well-formed ISO
+        # code is not evidence the SOURCE actually states that currency.
+        currency_upper = (currency or "").upper()
+        if not _ISO_CURRENCY.match(currency_upper):
+            return None, EventRejectionCode.UNKNOWN_CURRENCY, (
+                f"{currency!r} is not a recognisable ISO currency code "
+                "for a stated amount"), None
+        currency_pattern = CURRENCY_LANGUAGE.get(currency_upper)
+        if not mention_language_grounds_value(resolved_text, value, currency_pattern):
+            return None, EventRejectionCode.CURRENCY_NOT_GROUNDED, (
+                f"the cited spans contain no {currency_upper} currency language "
+                "(symbol, ISO code, or name) bound to THIS specific amount -- a "
+                "currency word attached to a DIFFERENT number in the same "
+                "evidence is not evidence for this one"), None
+
+        # Scale: independent of currency and of role. Only currency-domain
+        # amounts (a scaled total, however denominated) carry a scale
+        # concept at all -- see `is_currency_amount`'s docstring.
+        resolved_scale = None
+        if is_currency_amount(unit, currency):
+            resolved_scale = resolve_scale(unit, scale)
+            if resolved_scale is None:
+                return None, EventRejectionCode.SCALE_NOT_GROUNDED, (
+                    "no scale (thousand/million/billion, or an explicit bare "
+                    "amount) is stated for this currency amount -- an unstated "
+                    "scale is never silently assumed to be UNIT"), None
+            if resolved_scale != MonetaryScale.UNIT:
+                scale_pattern = SCALE_LANGUAGE.get(resolved_scale)
+                if not mention_language_grounds_value(resolved_text, value, scale_pattern):
+                    return None, EventRejectionCode.SCALE_NOT_GROUNDED, (
+                        f"the cited spans contain no {resolved_scale} language bound "
+                        "to THIS specific amount -- a scale word attached to a "
+                        "DIFFERENT number in the same evidence does not prove this "
+                        "one's magnitude"), None
 
         if role != EventAmountRole.UNKNOWN:
             if not _unit_agrees_with_role(unit, role):
                 return None, EventRejectionCode.AMOUNT_ROLE_NOT_GROUNDED, (
                     f"unit {unit!r} does not agree with role {role!r} (spec section 3: "
-                    "role and unit must agree)")
+                    "role and unit must agree)"), None
             pattern = _ROLE_LANGUAGE.get(role)
             if pattern is not None and not pattern.search(resolved_text):
                 return None, EventRejectionCode.AMOUNT_ROLE_NOT_GROUNDED, (
                     f"the cited spans contain no {role} language -- a number existing "
-                    "in the source does not prove what economic role it plays")
+                    "in the source does not prove what economic role it plays"), None
             if allowed_roles is not None and role not in allowed_roles:
                 return None, EventRejectionCode.AMOUNT_ROLE_NOT_GROUNDED, (
-                    f"{role} is not a plausible amount role for event type {event_type!r}")
-        return resolved_text, None, ""
+                    f"{role} is not a plausible amount role for event type {event_type!r}"), None
+        return resolved_text, None, "", resolved_scale
 
-    def _scale_value(self, value: Optional[float], unit: Optional[str]) -> Optional[float]:
+    def _scale_value(self, value: Optional[float], resolved_scale: Optional[str]) -> Optional[float]:
         if value is None:
             return None
-        return value * self._scale(unit)
+        return value * scale_multiplier(resolved_scale)
 
     def validate(self, candidate: EventCandidate
                 ) -> Tuple[Optional[ResolvedFinancingEvent], Optional[str], str]:
@@ -292,18 +364,14 @@ class EventCandidateValidator:
 
         allowed_roles = _roles_allowed_for(candidate.event_type)
 
-        # Primary amount: value grounding (unchanged) + role grounding (new).
-        primary_text, code, reason = self._ground_amount(
+        # Primary amount: value + currency + scale + role grounding, all
+        # independent (spec H.22 section 4).
+        primary_text, code, reason, primary_scale = self._ground_amount(
             candidate.amount, candidate.unit, candidate.amount_role,
+            candidate.currency, candidate.scale,
             candidate.evidence_span_ids, allowed_roles, candidate.event_type)
         if code is not None:
             return None, code, reason
-        if candidate.amount is not None:
-            currency = (candidate.currency or "").upper()
-            if not _ISO_CURRENCY.match(currency):
-                return None, EventRejectionCode.UNKNOWN_CURRENCY, (
-                    f"{candidate.currency!r} is not a recognisable ISO currency code "
-                    "for a stated amount")
 
         # Supplementary amounts: same grounding rule as the primary amount,
         # but a failure here DROPS that one amount rather than refusing the
@@ -323,16 +391,27 @@ class EventCandidateValidator:
         # (a candidate with no trustworthy headline amount is not published).
         resolved_supplementary: List[ResolvedAmount] = []
         for supplement in candidate.supplementary_amounts:
-            supp_text, code, reason = self._ground_amount(
+            # A supplementary amount with no currency of its OWN inherits
+            # the primary amount's currency -- backward compatible with
+            # every pre-H.22 candidate/fixture (currency was candidate-
+            # level only, never per-amount) while still letting a model
+            # that DOES state a different currency for this specific
+            # figure override it (spec section 5's "commitment and
+            # drawdown with different currencies").
+            supp_currency = supplement.currency or candidate.currency
+            supp_text, code, reason, supp_scale = self._ground_amount(
                 supplement.value, supplement.unit, supplement.role,
+                supp_currency, supplement.scale,
                 supplement.evidence_span_ids, allowed_roles, candidate.event_type)
             if code is not None:
                 continue    # drop this one unverified claim; primary stands
             if supplement.value is not None:
                 resolved_supplementary.append(ResolvedAmount(
                     role=supplement.role,
-                    value=self._scale_value(supplement.value, supplement.unit),
-                    unit=supplement.unit, source_evidence=supp_text))
+                    value=self._scale_value(supplement.value, supp_scale),
+                    unit=supplement.unit,
+                    currency=(supp_currency.upper() if supp_currency else None),
+                    scale=supp_scale, source_evidence=supp_text))
 
         # THE check. `funded=True` requires its own drawdown-language
         # evidence, IN THE CITED SPANS; the item code and the amount being
@@ -345,13 +424,29 @@ class EventCandidateValidator:
                 "drawdown/proceeds-received language -- they may describe a facility being "
                 "established rather than money moving")
 
+        # Phase H.30 -- the SYMMETRIC direction (spec section 6). A
+        # candidate may not publish funded=False when its OWN cited
+        # evidence unambiguously says the opposite -- a drawdown occurred,
+        # or (per `_FUNDED_LANGUAGE`'s documented scope, see above) a
+        # capital transaction of any type completed with proceeds
+        # received. H.28's live finding: a completed $450M equity sale
+        # ("issued and sold the shares... net proceeds of approximately
+        # $450 million") was accepted with funded=False. Same language
+        # table, same resolved-evidence scope as the funded=True check
+        # just above -- no new vocabulary, no equity-specific carve-out.
+        if not candidate.funded and _FUNDED_LANGUAGE.search(resolved_text):
+            return None, EventRejectionCode.FUNDED_STATUS_CONTRADICTED, (
+                "the candidate asserts funded=False but its own cited spans contain "
+                "drawdown/proceeds-received/completed-offering language -- a candidate "
+                "may not publish a status its own evidence directly contradicts")
+
         if candidate.confidence < self.min_confidence:
             return None, EventRejectionCode.LOW_CONFIDENCE, (
                 f"confidence {candidate.confidence:.2f} is below the floor "
                 f"{self.min_confidence:.2f}")
 
         currency = (candidate.currency or "").upper() or None
-        amount = self._scale_value(candidate.amount, candidate.unit)
+        amount = self._scale_value(candidate.amount, primary_scale)
         resolved = ResolvedFinancingEvent(
             event_type=candidate.event_type, amount=amount, currency=currency,
             amount_role=candidate.amount_role,
@@ -362,15 +457,11 @@ class EventCandidateValidator:
             # document's own spans, never from anything the model wrote.
             source_evidence=resolved_text,
             supplementary_amounts=tuple(resolved_supplementary),
+            scale=primary_scale,
             confidence=candidate.confidence, accession=candidate.accession,
             form=candidate.form, filed=candidate.filed,
             impact=event_impact(candidate.event_type))
         return resolved, None, ""
-
-    @staticmethod
-    def _scale(unit: Optional[str]) -> float:
-        _domain, scale = domain_unit(unit)
-        return {None: 1.0, "million": 1_000_000.0, "billion": 1_000_000_000.0}.get(scale, 1.0)
 
     def validate_all(self, candidates: Sequence[EventCandidate]):
         accepted, rejected = [], []

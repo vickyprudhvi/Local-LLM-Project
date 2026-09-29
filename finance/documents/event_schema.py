@@ -116,10 +116,21 @@ class EventAmount:
     role: str = EventAmountRole.UNKNOWN
     value: Optional[float] = None
     unit: Optional[str] = None
+    # Phase H.22: currency and scale are INDEPENDENT axes of a monetary
+    # amount, never baked into `unit` (see `finance.documents.monetary`'s
+    # docstring for the live defect that conflating them produced). Each
+    # supplementary amount carries its OWN currency and scale -- a
+    # facility's commitment and its drawn portion may legitimately be
+    # stated in different currencies or at different scales in the same
+    # filing (spec section 5's "commitment and drawdown with different
+    # currencies").
+    currency: Optional[str] = None
+    scale: Optional[str] = None
     evidence_span_ids: Tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         return {"role": self.role, "value": self.value, "unit": self.unit,
+                "currency": self.currency, "scale": self.scale,
                 "evidence_span_ids": list(self.evidence_span_ids)}
 
 
@@ -133,9 +144,14 @@ class ResolvedAmount:
     value: Optional[float]
     unit: Optional[str]
     source_evidence: str
+    # Phase H.22: the amount's OWN currency and resolved scale, independent
+    # of whatever the candidate's primary amount carries.
+    currency: Optional[str] = None
+    scale: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {"role": self.role, "value": self.value, "unit": self.unit,
+                "currency": self.currency, "scale": self.scale,
                 "source_evidence": self.source_evidence}
 
 
@@ -155,14 +171,40 @@ class EventRejectionCode:
     # this one means the number is there but its claimed MEANING is not.
     AMOUNT_ROLE_NOT_GROUNDED = "AMOUNT_ROLE_NOT_GROUNDED"
     UNKNOWN_CURRENCY = "UNKNOWN_CURRENCY"
+    # Phase H.22: the value is grounded and even a specific currency and
+    # role may be too, but the MAGNITUDE is not -- see
+    # `finance.documents.monetary`'s docstring for the live defect (a
+    # EUR-denominated "500 million" published as 500.0, a million-x
+    # understatement) this closes. Never conflated with AMOUNT_NOT_GROUNDED
+    # (that means the printed NUMBER "500" is not in the source) or
+    # UNKNOWN_CURRENCY (that means the currency code itself is malformed):
+    # this means the number and currency are fine but the SCALE that turns
+    # "500" into an actual magnitude is not independently supported by the
+    # cited evidence, or was never stated at all.
+    SCALE_NOT_GROUNDED = "SCALE_NOT_GROUNDED"
+    # The currency CODE is well-formed (passes UNKNOWN_CURRENCY's check) but
+    # the cited evidence contains none of that currency's own recognised
+    # language (symbol, ISO code, or name) -- a claimed EUR amount whose
+    # source text never says euro/EUR/(euro-sign) is not grounded, even if
+    # "EUR" alone is a valid-looking code.
+    CURRENCY_NOT_GROUNDED = "CURRENCY_NOT_GROUNDED"
     LOW_CONFIDENCE = "LOW_CONFIDENCE"
     MALFORMED = "MALFORMED"
+    # Phase H.30: the OTHER direction of FUNDED_STATUS_NOT_GROUNDED. That
+    # code refuses an UNSUPPORTED funded=True claim; this one refuses a
+    # funded=False claim that the candidate's OWN cited evidence directly
+    # contradicts -- see `event_validator.py`'s `_FUNDED_LANGUAGE` docstring
+    # for the documented scope of `EventCandidate.funded` (debt drawdown AND
+    # completed-transaction/proceeds-received language for every capital
+    # event type, never debt-only).
+    FUNDED_STATUS_CONTRADICTED = "FUNDED_STATUS_CONTRADICTED"
 
     ALL = (NO_EVIDENCE, EVIDENCE_NOT_IN_SOURCE, VALUE_NOT_IN_EVIDENCE,
            UNSUPPORTED_EVENT_TYPE, ITEM_CODE_MISMATCH,
            FUNDED_STATUS_NOT_GROUNDED, AMOUNT_NOT_GROUNDED,
-           AMOUNT_ROLE_NOT_GROUNDED, UNKNOWN_CURRENCY, LOW_CONFIDENCE,
-           MALFORMED)
+           AMOUNT_ROLE_NOT_GROUNDED, UNKNOWN_CURRENCY, SCALE_NOT_GROUNDED,
+           CURRENCY_NOT_GROUNDED, LOW_CONFIDENCE, MALFORMED,
+           FUNDED_STATUS_CONTRADICTED)
 
     # The one a benchmark must count as critical (spec section 27): a
     # facility asserted funded with nothing in its own text supporting a
@@ -170,10 +212,14 @@ class EventRejectionCode:
     # through; this is the code that stops it before that. A per-share price
     # accepted as a transaction value is the same CLASS of failure --
     # grounded value, wrong economic meaning -- so AMOUNT_ROLE_NOT_GROUNDED
-    # belongs in this set too.
+    # belongs in this set too. SCALE_NOT_GROUNDED and CURRENCY_NOT_GROUNDED
+    # are the H.22 instance of the exact same class: a grounded VALUE is not
+    # a valid MAGNITUDE until its scale and currency are independently
+    # grounded too.
     UNSUPPORTED = (EVIDENCE_NOT_IN_SOURCE, VALUE_NOT_IN_EVIDENCE,
                    FUNDED_STATUS_NOT_GROUNDED, AMOUNT_NOT_GROUNDED,
-                   AMOUNT_ROLE_NOT_GROUNDED, ITEM_CODE_MISMATCH)
+                   AMOUNT_ROLE_NOT_GROUNDED, ITEM_CODE_MISMATCH,
+                   SCALE_NOT_GROUNDED, CURRENCY_NOT_GROUNDED)
 
 
 @dataclass(frozen=True)
@@ -189,12 +235,16 @@ class EventCandidate:
 
     event_type: str = PostBalanceSheetEventType.UNKNOWN
     amount: Optional[float] = None
-    unit: Optional[str] = None                 # USD / USD_MILLION / USD_BILLION
+    unit: Optional[str] = None                 # USD / USD_MILLION / USD_BILLION / CURRENCY / ...
     # The economic role of `amount` specifically. UNKNOWN (default) is a
     # legitimate, passing value -- an amount with no asserted role is
     # accepted unclassified, never presumed to be any particular one.
     amount_role: str = EventAmountRole.UNKNOWN
     currency: Optional[str] = None
+    # Phase H.22: the amount's magnitude word (`MonetaryScale`), INDEPENDENT
+    # of `currency` -- never baked into `unit` the way legacy
+    # USD_MILLION/USD_BILLION values are. See `finance.documents.monetary`.
+    scale: Optional[str] = None
     funded: bool = False
     committed: bool = False
     counterparty: Optional[str] = None
@@ -264,11 +314,18 @@ class ResolvedFinancingEvent:
     filed: Optional[str]
     impact: dict
     supplementary_amounts: Tuple[ResolvedAmount, ...] = ()
+    # Phase H.22: the resolved SCALE that produced `amount`'s magnitude --
+    # provenance for "why is this number this big", independent of
+    # `currency`. `amount` itself is already the fully-normalized value
+    # (value * scale multiplier); this field is diagnostic, not a second
+    # source of truth a consumer needs to re-apply.
+    scale: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
             "event_type": self.event_type, "amount": self.amount,
             "currency": self.currency, "amount_role": self.amount_role,
+            "scale": self.scale,
             "funded": self.funded,
             "committed": self.committed, "counterparty": self.counterparty,
             "effective_date": self.effective_date,

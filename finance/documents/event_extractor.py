@@ -38,14 +38,25 @@ from typing import Callable, Dict, List, Optional, Protocol, Sequence, Tuple
 
 import tools.config as config
 from finance.documents.event_schema import EventAmount, EventAmountRole, EventCandidate
+from finance.documents.monetary import MonetaryScale
 from finance.documents.spans import SourceSpan, build_source_spans, render_spans
 from finance.documents.text_normalization import (
     NormalizationFailure,
     normalize_sec_document,
     select_relevant_item_blocks,
 )
-from finance.extraction.schema import MODEL_UNIT_NAMES
 from finance.structural_breaks import PostBalanceSheetEventType
+
+# Phase H.22: a currency-neutral unit vocabulary for the reader contract.
+# CURRENCY replaces USD/USD_MILLION/USD_BILLION as what the model is OFFERED
+# for a monetary amount -- currency and scale are separate fields, never
+# baked into the unit name (see `finance.documents.monetary`'s docstring for
+# the live defect that coupling produced: a EUR amount with no non-USD
+# scale-bearing unit to choose fell back to UNKNOWN, silently losing its
+# scale). `EventCandidateValidator` still ACCEPTS the legacy USD_MILLION/
+# USD_BILLION/USD tokens for backward compatibility; they are simply no
+# longer what this prompt asks the model to produce.
+_MODEL_UNIT_NAMES = ("CURRENCY", "PER_SHARE", "RATIO", "PERCENT", "SHARES", "UNKNOWN")
 
 # The item codes a financing-event reader ever needs to see. Duplicated as a
 # bare tuple (rather than importing `finance.documents.package.
@@ -155,13 +166,37 @@ _SYSTEM = (
     "7. counterparty is the lender/underwriter/counterparty a cited span "
     "names, or null.\n"
     "8. effective_date is the date a cited span states, or null.\n\n"
+    "CURRENCY AND SCALE ARE TWO SEPARATE FACTS -- NEVER LET ONE BLOCK THE "
+    "OTHER:\n"
+    "12. currency (an ISO code like USD, EUR, GBP, JPY) and scale (the "
+    "magnitude word a span actually uses) are INDEPENDENT properties of a "
+    "monetary amount. Report each from what its OWN language in the cited "
+    "spans states, regardless of what the other one is. A non-USD currency "
+    "is NOT a reason to leave scale unstated, and an unfamiliar scale is "
+    "NOT a reason to leave currency unstated.\n"
+    "13. scale is exactly one of: UNIT (no magnitude word -- the span "
+    "states a bare number, e.g. \"$500\"), THOUSAND, MILLION, or BILLION "
+    "(the span literally says that word), or UNKNOWN if a span clearly "
+    "states a currency amount but its magnitude word is genuinely "
+    "unclear. NEVER default scale to UNIT just because you are not sure -- "
+    "an uncertain scale must be UNKNOWN, never guessed.\n"
+    "14. Worked example -- \"€500 million of senior notes\": "
+    "value=500, currency=EUR, scale=MILLION, unit=CURRENCY, "
+    "role=PRINCIPAL_AMOUNT. The unfamiliar currency (EUR, not USD) does "
+    "NOT change how you read the scale word \"million\" -- it is stated "
+    "in the same span regardless of currency.\n"
+    "15. scale only applies to a currency-domain amount (unit=CURRENCY). "
+    "Leave it UNIT for a PER_SHARE/RATIO/PERCENT/SHARES amount -- those "
+    "have no thousand/million/billion magnitude to state.\n\n"
     "Respond with ONLY a JSON object, no prose."
 )
 
 
 def _amount_schema_text() -> str:
     return ('{"value": <number or null>, '
-           f'"unit": "{"|".join(MODEL_UNIT_NAMES)}", '
+           f'"unit": "{"|".join(_MODEL_UNIT_NAMES)}", '
+           '"currency": "<ISO code or UNKNOWN>", '
+           f'"scale": "{"|".join(MonetaryScale.ALL)}", '
            f'"role": "{"|".join(EventAmountRole.ALL)}", '
            '"evidence_span_ids": ["<span id>", "..."]}')
 
@@ -171,9 +206,10 @@ def _schema_text() -> str:
         '{"events": [{'
         f'"event_type": "{"|".join(PostBalanceSheetEventType.ALL)}", '
         '"amount": <number or null>, '
-        f'"unit": "{"|".join(MODEL_UNIT_NAMES)}", '
+        f'"unit": "{"|".join(_MODEL_UNIT_NAMES)}", '
         f'"amount_role": "{"|".join(EventAmountRole.ALL)}", '
         '"currency": "<ISO code or UNKNOWN>", '
+        f'"scale": "{"|".join(MonetaryScale.ALL)}", '
         '"funded": <true|false>, '
         '"committed": <true|false>, '
         '"counterparty": "<name or null>", '
@@ -268,6 +304,8 @@ def _amount_from(raw) -> Optional[EventAmount]:
     return EventAmount(
         role=str(raw.get("role") or EventAmountRole.UNKNOWN).upper(),
         value=value, unit=(raw.get("unit") or None),
+        currency=(raw.get("currency") or None),
+        scale=(raw.get("scale") or None),
         evidence_span_ids=span_ids)
 
 
@@ -289,6 +327,7 @@ def _candidate_from(raw: dict, items: Optional[str], filed: Optional[str],
         unit=(raw.get("unit") or None),
         amount_role=str(raw.get("amount_role") or EventAmountRole.UNKNOWN).upper(),
         currency=(raw.get("currency") or None),
+        scale=(raw.get("scale") or None),
         funded=bool(raw.get("funded", False)),
         committed=bool(raw.get("committed", False)),
         counterparty=(raw.get("counterparty") or None),
@@ -307,7 +346,7 @@ class LocalModelEventExtractor:
     """Backed by the project's injected model client. Same pattern as
     `finance.extraction.semantic_extractor.LocalModelGuidanceExtractor`."""
 
-    version = "events-v3.0"
+    version = "events-v4.0"
 
     def __init__(self, ask_local_fn: Callable, cache: Optional[dict] = None):
         self._ask = ask_local_fn
