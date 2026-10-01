@@ -804,12 +804,28 @@ def gather_yahoo_and_sec(executor, symbol):
                 # claims, and the report was making the stronger one.
                 sec_extras["guidance_releases_examined"] = (
                     guidance_data.get("releases_examined") or 0)
+                # Phase H.32: a SEPARATE count, because "0 earnings releases
+                # AND 0 periodic filings" is a materially different claim
+                # from "3 earnings releases and the current 10-Q" -- source
+                # coverage, not just a bigger number for the same source.
+                sec_extras["guidance_periodic_filings_examined"] = (
+                    guidance_data.get("periodic_filings_examined") or 0)
                 if not guidance_data.get("guidance"):
+                    sources_examined = []
+                    if sec_extras["guidance_releases_examined"]:
+                        sources_examined.append(
+                            f"{sec_extras['guidance_releases_examined']} SEC-filed earnings "
+                            "release(s)")
+                    if sec_extras["guidance_periodic_filings_examined"]:
+                        sources_examined.append(
+                            f"{sec_extras['guidance_periodic_filings_examined']} current "
+                            "periodic filing(s) (10-Q/10-K MD&A)")
+                    sources_text = (" and ".join(sources_examined)
+                                   if sources_examined else "no readable guidance source")
                     warnings.append(
                         "No current management guidance could be EXTRACTED from this company's "
-                        f"SEC-filed earnings releases ({sec_extras['guidance_releases_examined']} "
-                        "examined); forward assumptions rest on reported history and "
-                        "trailing-twelve-month trend alone. This does not establish that the "
+                        f"{sources_text} examined; forward assumptions rest on reported history "
+                        "and trailing-twelve-month trend alone. This does not establish that the "
                         "company published none -- guidance stated as a single value rather "
                         "than a range, or for a metric outside the reviewed set, is not "
                         "captured.")
@@ -2670,6 +2686,10 @@ def run_full_stock_analysis(executor, symbol, include_news=None, forecast_years=
         # very distinction this field exists to make.
         facts["guidance_releases_examined"] = (
             (sec_extras or {}).get("guidance_releases_examined"))
+        # Phase H.32: same None-vs-0 discipline, for the periodic-filing
+        # (10-Q/10-K MD&A) source added alongside earnings releases.
+        facts["guidance_periodic_filings_examined"] = (
+            (sec_extras or {}).get("guidance_periodic_filings_examined"))
         warnings.extend(state.warnings)
         for finding in state.findings:
             warnings.append(f"{finding['code']}: {finding['message']}")
@@ -4899,6 +4919,7 @@ def build_compact_synthesis_payload(result: AnalysisResult) -> dict:
         "dcf_financial_basis": _compact_financial_basis(facts.get("dcf_financial_basis")),
         "management_guidance": _compact_guidance(facts.get("management_guidance")),
         "guidance_releases_examined": facts.get("guidance_releases_examined"),
+        "guidance_periodic_filings_examined": facts.get("guidance_periodic_filings_examined"),
         "valuation_freshness": (facts.get("current_financial_state") or {}).get(
             "valuation_freshness"),
         "data_completeness": (facts.get("current_financial_state") or {}).get(

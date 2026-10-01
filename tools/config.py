@@ -942,6 +942,21 @@ def finance_event_extraction_max_sections():
     return _int("FINANCE_EVENT_EXTRACTION_MAX_SECTIONS", 4)
 
 
+def guidance_periodic_mda_max_chars():
+    """Character budget for the current 10-Q/10-K's MD&A section (Phase
+    H.32), fed to the deterministic V1 regex extractor -- NOT a model call,
+    so this is far larger than `finance_event_extraction_max_section_chars`
+    (8,000, sized for a short, targeted 8-K item block passed to a local
+    model). A live TSLA 10-Q's real MD&A ran 37,253 characters, with its
+    quantitative capex outlook appearing only after the historical
+    Results-of-Operations discussion that opens the section; truncating at
+    8,000 characters (this guidance path's first implementation reused the
+    event-extraction constant) silently discarded it. A real MD&A section
+    size is architecture-wide, not a property of any one issuer.
+    """
+    return _int("GUIDANCE_PERIODIC_MDA_MAX_CHARS", 80_000)
+
+
 def finance_event_extraction_max_output_tokens():
     return _int("FINANCE_EVENT_EXTRACTION_MAX_OUTPUT_TOKENS", 20000)
 
@@ -1019,6 +1034,17 @@ def guidance_max_releases():
     one is needed so superseded guidance can be identified as superseded
     rather than simply absent."""
     return _int("GUIDANCE_MAX_RELEASES", 3)
+
+
+def guidance_periodic_filing_coverage_enabled():
+    """Phase H.32: also examine the CURRENT 10-Q/10-K's own MD&A item for
+    management guidance, not only the earnings-release exhibit. On by
+    default -- this closes a real source-coverage gap (quantitative
+    guidance that is published in the periodic filing and never repeated in
+    a press release), through the exact same extraction seam and current-
+    guidance resolver earnings releases already use. A reader that wants
+    the pre-H.32 scope back (earnings releases only) can disable it."""
+    return _bool("GUIDANCE_PERIODIC_FILING_COVERAGE_ENABLED", True)
 
 
 # ---- TSLA DCF validation patch: post-hoc result validation ----

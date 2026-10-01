@@ -557,13 +557,26 @@ def _build_valuation_basis(compact: dict) -> ValuationBasis:
         # "Unavailable" asserts the company published nothing. What is known
         # is that the extractor found nothing, which is a weaker claim and
         # the only one the evidence supports.
+        #
+        # Phase H.32: source-aware. "0 earnings releases examined" used to
+        # read as "no guidance anywhere" even when the current 10-Q/10-K's
+        # own MD&A item was never looked at -- a source-coverage gap, not a
+        # genuine absence of guidance.
         examined = compact.get("guidance_releases_examined")
-        if examined:
+        periodic_examined = compact.get("guidance_periodic_filings_examined")
+        if examined or periodic_examined:
+            sources = []
+            if examined:
+                sources.append(f"{examined} SEC earnings release{'s' if examined != 1 else ''}")
+            if periodic_examined:
+                sources.append(
+                    f"{periodic_examined} current periodic filing"
+                    f"{'s' if periodic_examined != 1 else ''} (10-Q/10-K MD&A)")
             guidance_lines.append(
-                f"Management guidance: none extracted ({examined} SEC earnings release"
-                f"{'s' if examined != 1 else ''} examined)")
-        elif examined == 0:
-            guidance_lines.append("Management guidance: no SEC earnings release found")
+                f"Management guidance: none extracted ({' and '.join(sources)} examined)")
+        elif examined == 0 and (periodic_examined == 0 or periodic_examined is None):
+            guidance_lines.append("Management guidance: no SEC earnings release or current "
+                                  "periodic filing found")
         else:
             guidance_lines.append("Management guidance: not retrieved")
 

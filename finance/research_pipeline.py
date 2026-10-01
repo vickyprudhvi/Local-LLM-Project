@@ -1674,7 +1674,27 @@ _VALUATION_LIMITATION_MARKERS = re.compile(
     r"(?:standard\s+)?fcff(?:\s+(?:dcf|model|valuation))?)\b[^.]{0,60}?"
     r"\b(?:produced\s+no|not\s+applicable|could\s+not\s+be\s+(?:produced|computed)|"
     r"unavailable|failed\s+validation|not\s+suitable)\b"
-    r"|\bvaluation\s+evidence\s+is\s+unavailable\b")
+    r"|\bvaluation\s+evidence\s+is\s+unavailable\b"
+    # Phase H.32, sections 11-13. A live DCF produced a negative terminal
+    # FCFF (correctly withholding valuation evidence -- see
+    # `_DCF_INVALID_VALIDATION_STATUSES`), and the Risk section then restated
+    # that MODEL OUTPUT as if it were a fact about the company: "negative
+    # terminal FCF implies unsustainable growth forecasts/future cash-flow
+    # deficits". A negative terminal value, an invalid forecast path, a
+    # default/unavailable WACC, and a wide scenario spread are all properties
+    # of the CONFIGURED VALUATION, never themselves evidence that the company
+    # faces a cash-flow problem -- independent reported-financials evidence
+    # can still support that as its own, separately-labelled company risk
+    # (section 14's test B), but this wording alone never does.
+    r"|\bnegative\s+terminal\s+(?:fcff|fcf|free\s+cash\s+flow)\b"
+    r"|\bterminal\s+(?:value|fcff|free\s+cash\s+flow)\b[^.]{0,80}?"
+    r"\b(?:is\s+negative|invalid|does\s+not\s+support|"
+    r"cannot\s+be\s+(?:produced|supported|computed)|"
+    r"could\s+not\s+be\s+(?:produced|supported))\b"
+    r"|\b(?:unsustainable\s+growth\s+forecasts?|forecast\s+path\s+(?:is\s+)?invalid|"
+    r"forecast\s+path\s+does\s+not\s+support)\b"
+    r"|\bdefault\s+wacc\b"
+    r"|\b(?:wide|high|material|significant)\s+valuation(?:[\s-]scenario)?\s+spread\b")
 
 _DATA_QUALITY_MARKERS = re.compile(
     r"(?i)\b(?:no|missing|absent|unavailable|not)\b[^.]{0,50}?"

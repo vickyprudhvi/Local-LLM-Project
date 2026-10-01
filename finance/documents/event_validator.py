@@ -460,7 +460,11 @@ class EventCandidateValidator:
             scale=primary_scale,
             confidence=candidate.confidence, accession=candidate.accession,
             form=candidate.form, filed=candidate.filed,
-            impact=event_impact(candidate.event_type))
+            # Phase H.32: `funded` is threaded through -- a grounded,
+            # evidence-checked claim (both directions enforced just above),
+            # not the event TYPE alone -- so a committed-but-undrawn facility
+            # never carries `affects_debt=True` here either.
+            impact=event_impact(candidate.event_type, candidate.funded))
         return resolved, None, ""
 
     def validate_all(self, candidates: Sequence[EventCandidate]):

@@ -830,9 +830,18 @@ _DUAL_BASIS_PATTERN = re.compile(
 # It is NOT flattened into a range. `bound_type` records that the company
 # stated a minimum, so nothing downstream can treat the number as a midpoint
 # forecast — which would be reading "at least $18B" as "we expect $18B".
+#
+# Phase H.32 live finding (TSLA): "we currently expect our capital
+# expenditures to be in excess of $25 billion in 2026" named none of the
+# phrases above, so it fell all the way through to `_qualified_bare_figure`
+# and was recorded as an APPROXIMATE point ($25.0B treated as a midpoint)
+# instead of the floor it actually states. "in excess of"/"more than" are
+# the same claim as "at least" -- a minimum, not a forecast of the exact
+# figure -- and neither is issuer- or ticker-specific phrasing.
 _FLOOR_PATTERN = re.compile(
     rf"(?i)\$?\s*({_NUM})\s*{_PCT}\s*(billion|million)?\s*\+"
-    rf"|(?:at\s+least|no\s+less\s+than|or\s+better|or\s+more)\s*\$?\s*({_NUM})\s*{_PCT}")
+    rf"|(?:at\s+least|no\s+less\s+than|or\s+better|or\s+more|in\s+excess\s+of|"
+    rf"more\s+than)\s*\$?\s*({_NUM})\s*{_PCT}")
 
 # How far after a metric name a one-sided floor may begin. Roughly "of", "in
 # the", "at least" — a connector, not a clause.
@@ -1149,6 +1158,13 @@ _ABSOLUTE_UNITS = (GuidanceUnit.CURRENCY, GuidanceUnit.CURRENCY_PER_SHARE,
 # names something that exists rather than something that was described.
 PERCENTAGE_DENOMINATOR_UNRESOLVED = "GUIDANCE_PERCENTAGE_DENOMINATOR_UNRESOLVED"
 SOURCE_NOT_PROSPECTIVE = "GUIDANCE_SOURCE_NOT_PROSPECTIVE"
+# Phase H.32: a figure explicitly attributed to a THIRD PARTY (an analyst,
+# "the Street", a ratings agency) rather than stated as management's own
+# expectation. An earnings-release exhibit essentially never quotes a third
+# party's own number inline, which is why this was never needed before this
+# phase fed a periodic filing's MD&A -- prose discussing the company's
+# business more broadly -- through the same reader.
+SOURCE_NOT_MANAGEMENT = "GUIDANCE_SOURCE_NOT_MANAGEMENT"
 
 
 def percentage_denominator_stated(context: str) -> bool:
@@ -1232,6 +1248,20 @@ _FORWARD_MARKERS = re.compile(
 _WITHDRAWAL_MARKERS = re.compile(
     r"(?i)\b(withdraw\w*|suspend\w*|no\s+longer\s+(?:providing|issuing)\s+"
     r"(?:full[\s-]year\s+)?guidance|rescind\w*)\b")
+
+# Phase H.32: a figure the text attributes to a THIRD PARTY rather than to
+# management's own expectation -- "analysts estimate", "consensus expects",
+# "Street estimates", a ratings agency's own forecast. Checked in the SAME
+# context window as `_FORWARD_MARKERS`: a window containing one of these
+# phrases is reporting what someone OUTSIDE the company expects, which is
+# never management guidance regardless of how forward-looking the language
+# around it otherwise reads.
+_THIRD_PARTY_SOURCE_MARKERS = re.compile(
+    r"(?i)\banalysts?\s+(?:estimat\w*|expect\w*|forecast\w*|project\w*)\b"
+    r"|\bconsensus\s+(?:estimat\w*|expect\w*)\b"
+    r"|\b(?:the\s+)?street\s+(?:estimat\w*|expect\w*)\b"
+    r"|\baccording\s+to\s+analysts\b"
+    r"|\brating\s+agenc\w+\s+(?:estimat\w*|expect\w*|project\w*)\b")
 
 
 def _to_number(text: str) -> Optional[float]:
@@ -2164,6 +2194,13 @@ def extract_guidance_from_text(text: str, symbol: str, accession: str, document:
                 "reported-results section. The release presents that block as results "
                 "already reported, so a figure in it is not a forward-looking statement "
                 "however the surrounding prose reads.")
+            continue
+
+        if _THIRD_PARTY_SOURCE_MARKERS.search(context):
+            warnings.append(
+                f"{SOURCE_NOT_MANAGEMENT}: ignored a {name} value attributed to a third "
+                "party (an analyst, consensus, or similar) rather than stated as "
+                "management's own expectation.")
             continue
 
         prospective_evidence = _prospective_evidence(

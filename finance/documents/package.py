@@ -255,14 +255,21 @@ def resolve_document_package(symbol: str, submissions: Optional[dict], *,
     quarterly_forms = [f for f in PERIODIC_FORMS if f not in annual_forms]
 
     package.periodic_annual = tuple(
+        # Phase H.32: `document_id` (the primary document filename) is now
+        # populated here -- it already existed on every other DocumentRef
+        # class, simply unused for periodic filings until this phase needed
+        # to fetch the filing itself for MD&A guidance coverage, not just
+        # its metadata.
         DocumentRef(accession=r["accession"], form=r["form"], filed=r["filed"],
                     period_of_report=r.get("report_date") or None,
+                    document_id=r.get("document") or None,
                     classifications=(DocumentClass.ACTUAL_PERIODIC_ANNUAL,),
                     selection_reason=f"{r['form']} is the annual periodic filing.")
         for r in _top_by_recency(rows, annual_forms, max_periodic))
     package.periodic_quarterly = tuple(
         DocumentRef(accession=r["accession"], form=r["form"], filed=r["filed"],
                     period_of_report=r.get("report_date") or None,
+                    document_id=r.get("document") or None,
                     classifications=(DocumentClass.ACTUAL_PERIODIC_QUARTERLY,),
                     selection_reason=f"{r['form']} is the quarterly periodic filing.")
         for r in _top_by_recency(rows, quarterly_forms, max_periodic))

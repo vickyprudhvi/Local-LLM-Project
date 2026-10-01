@@ -284,8 +284,13 @@ def test_security_events_are_typed_from_form_and_language(form, items, text, exp
 
 
 def test_debt_issuance_is_not_dilution():
-    """Section 26."""
-    impact = SB.event_impact(SB.PostBalanceSheetEventType.ISSUER_DEBT_ISSUANCE)
+    """Section 26. Phase H.32: `affects_debt` now also requires its own
+    evidence that funds moved (section 7) -- `funded=True` here is that
+    evidence, isolating this test to the dilution question the section is
+    about rather than the funded-vs-committed question a separate test
+    covers.
+    """
+    impact = SB.event_impact(SB.PostBalanceSheetEventType.ISSUER_DEBT_ISSUANCE, funded=True)
     assert impact["potential_dilution"] is False
     assert impact["affects_share_count"] is False
     assert impact["affects_debt"] is True

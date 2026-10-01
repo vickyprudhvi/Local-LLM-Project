@@ -642,6 +642,71 @@ class SecCurrentGuidanceTool(_SecTool):
                 raise ToolValidationError("'fiscal_year' must be a four-digit year.")
         return {"symbol": normalize_ticker(arguments.get("symbol")), "fiscal_year": fiscal_year}
 
+    def _periodic_filing_release(self, coordinator, symbol, cik, submissions_payload,
+                                 fiscal_year, notes, extraction_observations):
+        """Phase H.32: current management guidance is not only published in
+        the earnings-release exhibit -- it routinely appears in the CURRENT
+        10-Q/10-K's own MD&A item (Regulation S-K Item 303), the 'current
+        capital expenditures/tax rate/volume outlook' a reader might state
+        there without ever repeating it in a press release. Returns the
+        `GuidanceRelease` read from that filing's MD&A section, or None if
+        no periodic filing, no MD&A section, or no document could be found --
+        every reason is recorded in `notes`, never a silent empty result.
+
+        Reuses the EXISTING filing-discovery (`resolve_document_package`),
+        normalization (`normalize_sec_document`), and extraction seam
+        (`extraction_runtime.extract_release`) this tool already depends on
+        for earnings releases -- no second guidance system, no new SEC
+        parsing. The SAME `select_current_guidance` resolver downstream
+        treats this release exactly like any other: newer, compatible
+        guidance for the same metric/period/basis supersedes it, and vice
+        versa, with accession/filed/document provenance intact.
+        """
+        from finance.documents.package import resolve_document_package
+        from finance.documents.text_normalization import (
+            normalize_sec_document, select_mda_section)
+        from finance.extraction import runtime as extraction_runtime
+        from finance import guidance as guidance_module
+
+        package = resolve_document_package(symbol, submissions_payload, max_periodic=1)
+        candidates = [d for d in (package.periodic_quarterly + package.periodic_annual)
+                     if d.document_id]
+        if not candidates:
+            notes.append("No current 10-Q/10-K with a readable primary document was found "
+                        "for periodic-filing guidance coverage.")
+            return None
+        # The single most recent periodic filing of EITHER kind -- a 10-Q
+        # filed after the latest 10-K is the current one, and vice versa.
+        current_filing = max(candidates, key=lambda d: d.filed or "")
+
+        try:
+            raw = coordinator.fetch(
+                "filing_document", symbol,
+                {"cik": cik, "accession": current_filing.accession,
+                 "document": current_filing.document_id}).payload.get("document_text") or ""
+        except ToolFailure as failure:
+            notes.append(f"{current_filing.filed}: {failure.message}")
+            return None
+
+        normalized = normalize_sec_document(raw)
+        if not normalized.ok:
+            notes.append(f"{current_filing.filed}: the {current_filing.form} could not be "
+                        f"normalized to readable text ({normalized.failure_code}).")
+            return None
+        mda = select_mda_section(normalized.text,
+                                 max_chars=config.guidance_periodic_mda_max_chars())
+        if mda is None:
+            notes.append(f"{current_filing.filed}: no MD&A item (Item 2/Item 7) heading was "
+                        f"found in the {current_filing.form}.")
+            return None
+
+        release, observation = extraction_runtime.extract_release(
+            mda.text, symbol, current_filing.accession, current_filing.document_id,
+            current_filing.filed, fiscal_year=fiscal_year)
+        if observation.mode != "v1" or observation.failure_code:
+            extraction_observations.append(observation.to_dict())
+        return release
+
     def execute(self, arguments):
         from finance import guidance as guidance_module
         from finance.extraction import runtime as extraction_runtime
@@ -687,6 +752,19 @@ class SecCurrentGuidanceTool(_SecTool):
             if observation.mode != "v1" or observation.failure_code:
                 extraction_observations.append(observation.to_dict())
 
+        earnings_releases_examined = len(releases)
+        # Phase H.32: ALSO examine the current periodic filing's own MD&A
+        # item, through the exact same resolver downstream -- never a
+        # separate "periodic guidance" system (spec section 3/4).
+        periodic_filings_examined = 0
+        if config.guidance_periodic_filing_coverage_enabled():
+            periodic_release = self._periodic_filing_release(
+                coordinator, symbol, cik, submissions.payload, fiscal_year,
+                notes, extraction_observations)
+            if periodic_release is not None:
+                periodic_filings_examined = 1
+                releases.append(periodic_release)
+
         # Phase H.6: `fiscal_year` is no longer a FILTER. Passing the calendar
         # year and rejecting anything that named a different one is what
         # discarded every NVIDIA value -- NVDA's May-2026 release guides
@@ -703,7 +781,8 @@ class SecCurrentGuidanceTool(_SecTool):
             "cik": cik, "company_name": company_name, "fiscal_year": fiscal_year,
             "guidance": current.to_dict() if current else None,
             "superseded_guidance": [r.to_dict() for r in superseded],
-            "releases_examined": len(releases),
+            "releases_examined": earnings_releases_examined,
+            "periodic_filings_examined": periodic_filings_examined,
             "notes": notes,
             # §23. Present only when something other than the default ran, so
             # a normal payload is byte-for-byte what it was. A reader in
@@ -715,7 +794,8 @@ class SecCurrentGuidanceTool(_SecTool):
             "provenance": submissions.freshness_dict(now),
             "untrusted_content": True, "source_type": "market_data_provider",
             "_log_meta": {"provider": "sec", "dataset": "current_guidance",
-                          "releases_examined": len(releases),
+                          "releases_examined": earnings_releases_examined,
+                          "periodic_filings_examined": periodic_filings_examined,
                           "metrics_found": len(current.metrics) if current else 0},
         }
 
