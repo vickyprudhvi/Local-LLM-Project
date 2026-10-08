@@ -406,6 +406,19 @@ def build_evidence_index(compact_payload: dict) -> Dict[str, EvidenceItem]:
     cash_flow_label = packet.get("cash_flow_label") or "FCF"
 
     canonical = compact_payload.get("canonical_evidence") or {}
+    # Phase H.33 live finding (COST): `revenue_growth`'s own canonical
+    # metric already carries an explicit period-KIND qualifier --
+    # `finance/canonical.py` sets its `definition` to
+    # "<what was computed> (<current_growth_label>)", e.g. "...(latest
+    # quarter YoY)" -- but this function dropped it and built the evidence
+    # label from the bare date range alone ("Current revenue growth
+    # (2026-02-16..2026-05-10)"). A ~3-month span with no word next to it
+    # invites exactly the misreading this was built to prevent: a model
+    # calling a LATEST-QUARTER figure "TTM" because nothing in the evidence
+    # it was shown said otherwise. `current_growth_label` is read directly
+    # (not re-parsed out of `definition`) because it is the single field
+    # `finance/growth.py` already computed this from.
+    current_growth_label = canonical.get("current_growth_label")
     for name, metric in (canonical.get("current") or {}).items():
         if not isinstance(metric, dict) or metric.get("value") is None:
             continue
@@ -423,16 +436,21 @@ def build_evidence_index(compact_payload: dict) -> Dict[str, EvidenceItem]:
                 " NOTE: for this business model this figure may be reported but may NOT be "
                 "used to claim cash available to the owners, liquidity strength, or "
                 "valuation support -- see the business_model.prohibited.* items.")
+        period_kind_note = f", {current_growth_label}" if (
+            name == "revenue_growth" and current_growth_label) else ""
+        definition = metric.get("definition")
+        definition_sentence = f" This is {definition}." if definition else ""
         index[f"current.{name}"] = EvidenceItem(
             evidence_id=f"current.{name}",
-            label=f"Current {display_name} ({period})",
+            label=f"Current {display_name} ({period}{period_kind_note})",
             value=metric["value"],
             evidence_type="canonical_current",
             source_type="canonical_current",
             source_periods=[period] if period else None,
             derivation=(
                 f"The current value, covering {period} on a "
-                f"{(metric.get('period_type') or 'reported').lower()} basis. This is "
+                f"{(metric.get('period_type') or 'reported').lower()} basis."
+                f"{definition_sentence} This is "
                 "the figure the Snapshot shows; cite it, not the `fundamental.*` "
                 "entry of the same name, whenever a claim is about the company "
                 "today." + restriction_note),

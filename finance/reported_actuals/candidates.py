@@ -135,15 +135,19 @@ class ReportedActualsExtraction:
         }
 
 
+def _preferred_frequency(available) -> Optional[str]:
+    for frequency in PREFERRED_FLOW_FREQUENCIES:
+        if frequency in available:
+            return frequency
+    return None
+
+
 def _flow_frequency_for(period_end: str,
                         facts: Sequence[ActualFinancialFact]) -> Optional[str]:
     available = {f.frequency for f in facts
                  if f.period_end == period_end
                  and f.flow_or_instant == sem.FlowOrInstant.FLOW}
-    for frequency in PREFERRED_FLOW_FREQUENCIES:
-        if frequency in available:
-            return frequency
-    return None
+    return _preferred_frequency(available)
 
 
 def build_candidates(facts: Sequence[ActualFinancialFact], *,
@@ -182,19 +186,35 @@ def build_candidates(facts: Sequence[ActualFinancialFact], *,
     for period_end in sorted({f.period_end for f in canonical if f.period_end},
                              reverse=True):
         chosen = _flow_frequency_for(period_end, canonical)
+        # Preference is resolved PER FIELD, not once for the whole period.
+        # Costco's (and many retailers') earnings release states revenue and
+        # net income for both the 16-week quarter and the 52-week year, but
+        # states operating cash flow and capex ONLY for the 52-week year --
+        # there is no quarterly cash-flow column to prefer over. Rejecting
+        # the annual cash-flow figure because the DOCUMENT's dominant
+        # duration (chosen from the income statement) is the quarter would
+        # discard the only value that field ever had, for a conflict that
+        # never existed for that field.
+        field_frequencies: Dict[str, set] = {}
+        for fact in canonical:
+            if fact.period_end == period_end and fact.flow_or_instant == sem.FlowOrInstant.FLOW:
+                field_frequencies.setdefault(fact.field, set()).add(fact.frequency)
+
         selected: List[ActualFinancialFact] = []
         for fact in canonical:
             if fact.period_end != period_end:
                 continue
             if fact.flow_or_instant == sem.FlowOrInstant.INSTANT:
                 selected.append(fact)
-            elif fact.frequency == chosen:
+                continue
+            preferred = _preferred_frequency(field_frequencies.get(fact.field, set()))
+            if fact.frequency == preferred:
                 selected.append(fact)
             else:
                 rejections.append((
                     CandidateRejection.NON_PREFERRED_DURATION,
-                    f"{fact.field} {fact.frequency} at {period_end} is not the "
-                    f"period's own {chosen or 'flow'} figure"))
+                    f"{fact.field} {fact.frequency} at {period_end} is not that "
+                    f"field's own {preferred or 'flow'} figure"))
         if not selected:
             continue
 

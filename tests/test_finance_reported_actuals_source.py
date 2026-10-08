@@ -175,6 +175,58 @@ def test_three_fiscal_quarters_is_nine_months_not_three():
     assert band_frequency("Fiscal Quarter Ended") == sem.PeriodFrequency.QUARTER
 
 
+def test_weeks_ended_is_a_recognized_duration_band():
+    """Phase H.33 live finding (Costco): a 52/53-week fiscal year is a
+    standard retail/consumer convention, and "N Weeks Ended" named no
+    vocabulary this module recognized -- so the band was dropped entirely
+    and the column fell back to the "no band = balance sheet" default,
+    misclassifying every income-statement/cash-flow column as INSTANT.
+    """
+    assert band_frequency("16 Weeks Ended") == sem.PeriodFrequency.QUARTER
+    assert band_frequency("12 Weeks Ended") == sem.PeriodFrequency.QUARTER
+    assert band_frequency("13 Weeks Ended") == sem.PeriodFrequency.QUARTER
+    assert band_frequency("26 Weeks Ended") == sem.PeriodFrequency.YTD_6M
+    assert band_frequency("39 Weeks Ended") == sem.PeriodFrequency.YTD_9M
+    assert band_frequency("52 Weeks Ended") == sem.PeriodFrequency.ANNUAL
+    assert band_frequency("53 Weeks Ended") == sem.PeriodFrequency.ANNUAL
+    assert band_frequency("52 Weeks Ending") == sem.PeriodFrequency.ANNUAL
+
+
+def test_a_field_reported_only_annually_is_not_discarded_for_a_quarter_it_never_had():
+    """The per-field duration fix. The income statement states revenue for
+    BOTH the 16-week quarter and the 52-week year (sharing the quarter's end
+    date); the cash-flow statement states operating cash flow and capex
+    ONLY for the 52-week year. Rejecting the annual cash-flow figures
+    because the document's DOMINANT duration (from the income statement) is
+    the quarter would discard the only value those fields ever had.
+    """
+    result = extract_reported_actuals(R.WEEKS_BASED_RELEASE, form="8-K", filed="2026-09-24")
+
+    quarter_revenue = [f for f in result.canonical_facts
+                       if f.field == "revenue" and f.frequency == sem.PeriodFrequency.QUARTER
+                       and f.period_end == R.Q4_END_ISO]
+    annual_revenue = [f for f in result.canonical_facts
+                      if f.field == "revenue" and f.frequency == sem.PeriodFrequency.ANNUAL
+                      and f.period_end == R.Q4_END_ISO]
+    assert [f.value for f in quarter_revenue] == [R.WEEKS_QUARTER_REVENUE]
+    assert [f.value for f in annual_revenue] == [R.WEEKS_ANNUAL_REVENUE]
+
+    ocf = [f for f in result.canonical_facts
+          if f.field == "operating_cash_flow" and f.period_end == R.Q4_END_ISO]
+    assert [f.value for f in ocf] == [R.WEEKS_ANNUAL_OPERATING_CASH_FLOW]
+    assert ocf[0].frequency == sem.PeriodFrequency.ANNUAL
+
+    candidate = next(c for c in result.candidates if c.period_end == R.Q4_END_ISO)
+    # The candidate's own declared duration is still the quarter (the
+    # document's dominant/preferred duration) -- only the PER-FIELD
+    # rejection changed, not what the candidate as a whole is labelled.
+    assert candidate.period_type == sem.PeriodFrequency.QUARTER
+    assert candidate.values["revenue"] == R.WEEKS_QUARTER_REVENUE
+    assert candidate.values["operating_cash_flow"] == R.WEEKS_ANNUAL_OPERATING_CASH_FLOW
+    assert "operating_cash_flow" in candidate.present_metrics
+    assert candidate.statement_completeness == StatementCompleteness.COMPLETE
+
+
 def test_a_table_with_no_duration_band_is_point_in_time():
     tables = parse_filing_tables(R.balance_sheet())
     balance = next(t for t in tables if t.kind == StatementKind.BALANCE_SHEET)

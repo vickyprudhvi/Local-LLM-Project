@@ -440,6 +440,23 @@ _MODEL_INVALID_CLAIM = _re.compile(
     r"(?:invalid|broken|failed|unusable|not\s+valid)\b"
     r"|\b(?:invalid|broken)\s+(?:valuation\s+model|dcf\s+model)\b", _re.IGNORECASE)
 
+# Phase H.33 live finding (COST). The MIRROR of `_MODEL_INVALID_CLAIM`'s
+# check above: that one catches a genuinely-inapplicable business model
+# being called "invalid"; this one catches the OPPOSITE confusion -- a
+# SCENARIO-scoped forecast-path failure (one bad terminal-year cash flow,
+# e.g. in the bear case only) being generalized into a claim that the
+# METHOD itself does not suit the company or its business model. The two
+# are different facts: NOT_VALID_FOR_CURRENT_FORECAST_PATH means the model
+# ran, applies to this business, and one forecast path cannot support a
+# perpetuity under it -- VALID_BUT_NOT_APPLICABLE means the method never
+# applied at all. Conflating them tells a reader DCF/FCFF can never value
+# this company, which the evidence does not support.
+_VALUATION_UNSUITABLE_FOR_COMPANY_CLAIM = _re.compile(
+    r"\b(?:fcff|dcf|discounted[\s-]cash[\s-]flow|valuation\s+(?:model|method))\b"
+    r"[^.]{0,60}?\b(?:is\s+)?(?:unsuitable|not\s+suitable|inapplicable|"
+    r"not\s+applicable|does(?:n'?t|\s+not)\s+apply)\b[^.]{0,40}?"
+    r"\b(?:for\s+)?this\s+(?:company|business|issuer)\b", _re.IGNORECASE)
+
 # Section 40: the absence of a valuation is not a fundamental company risk.
 _NO_DCF_IS_COMPANY_RISK = _re.compile(
     r"\b(?:no|absent|missing|unavailable|lack\s+of)\s+"
@@ -499,6 +516,21 @@ def validate_claim(text: str, profile: Optional[str],
                     "The standard discounted-cash-flow model did not fail; it does not apply "
                     "to this business model. Describe it as not applicable rather than as "
                     "invalid, broken or failed."),
+            })
+
+    if valuation_status == ValuationMethodStatus.NOT_VALID_FOR_CURRENT_FORECAST_PATH:
+        if _VALUATION_UNSUITABLE_FOR_COMPANY_CLAIM.search(text):
+            findings.append({
+                "code": "VALUATION_SCOPE_OVERGENERALIZED",
+                "metric_id": "valuation_method",
+                "business_model": profile,
+                "message": (
+                    "The discounted-cash-flow method applies to this business; one scenario's "
+                    "terminal-year cash flow does not support a perpetuity value under the "
+                    "current forecast path. Describe this as a forecast-path/scenario "
+                    "limitation, not as the method being unsuitable or inapplicable for this "
+                    "company or its business model -- that is a different, stronger claim the "
+                    "evidence does not support."),
             })
 
     if _NO_DCF_IS_COMPANY_RISK.search(text):

@@ -120,6 +120,43 @@ def test_an_actually_invalid_model_may_be_called_invalid():
     assert "VALUATION_APPLICABILITY_MISSTATED" not in codes
 
 
+@pytest.mark.parametrize("text", [
+    "FCFF valuation is unsuitable for this company.",
+    "The DCF is not applicable to this company given current conditions.",
+    "A standard discounted-cash-flow valuation does not apply to this business model.",
+    "The valuation method is not suitable for this issuer right now.",
+])
+def test_a_scenario_scoped_forecast_failure_may_not_be_generalized_to_the_company(text):
+    """Phase H.33 live finding (COST). The MIRROR case of the test above: a
+    DCF that failed on ONE scenario's negative terminal-year cash flow is a
+    forecast-path limitation, not a statement that the method is unsuitable
+    for the company or its business model -- that is VALID_BUT_NOT_
+    APPLICABLE's claim, not NOT_VALID_FOR_CURRENT_FORECAST_PATH's.
+    """
+    codes = [f["code"] for f in MP.validate_claim(
+        text, P.STANDARD_OPERATING_COMPANY, V.NOT_VALID_FOR_CURRENT_FORECAST_PATH)]
+    assert "VALUATION_SCOPE_OVERGENERALIZED" in codes
+
+
+def test_a_correctly_scoped_forecast_path_description_is_not_flagged():
+    codes = [f["code"] for f in MP.validate_claim(
+        "The modeled forecast path does not support a valid perpetuity terminal value "
+        "in the bear scenario.",
+        P.STANDARD_OPERATING_COMPANY, V.NOT_VALID_FOR_CURRENT_FORECAST_PATH)]
+    assert "VALUATION_SCOPE_OVERGENERALIZED" not in codes
+
+
+def test_unsuitable_for_company_language_is_not_flagged_when_genuinely_not_applicable():
+    """The guard is scoped to the forecast-path status. When the method
+    genuinely does not apply to the business model, the SAME words are the
+    correct description -- `VALUATION_APPLICABILITY_MISSTATED` governs that
+    status instead (see the test above it)."""
+    codes = [f["code"] for f in MP.validate_claim(
+        "A standard discounted-cash-flow valuation does not apply to this business model.",
+        P.INSURER, V.VALID_BUT_NOT_APPLICABLE)]
+    assert "VALUATION_SCOPE_OVERGENERALIZED" not in codes
+
+
 def test_a_missing_valuation_is_not_a_company_risk():
     codes = [f["code"] for f in MP.validate_claim(
         "No DCF available means company risk is high.", P.INSURER)]

@@ -230,7 +230,14 @@ _SHARED_GUARDRAILS = (
     "all (it is withheld, not merely unreliable) — do not reference, estimate, or assume any "
     "bull/base/bear modeled value, valuation gap, or scenario spread; state plainly that "
     "valuation evidence is unavailable because the model failed validation, and base your "
-    "analysis on fundamentals/technicals/other available evidence instead.\n"
+    "analysis on fundamentals/technicals/other available evidence instead. 'dcf.validation_"
+    "reasons' names EXACTLY which scenario(s) failed (e.g. 'in scenario(s) bear') -- preserve "
+    "that scope. A scenario-specific negative terminal-year cash flow means the model is "
+    "working and one forecast path does not support a perpetuity; it does NOT mean the "
+    "discounted-cash-flow/FCFF method is 'unsuitable', 'not applicable', or 'does not apply' "
+    "to this company or its business model — that is a categorically different, stronger "
+    "claim this evidence does not support, and conflating the two will be removed by "
+    "automated screening.\n"
     "- A fundamental metric whose evidence value shows \"status\": \"not_meaningful\" (this "
     "happens to roe_ending_equity/roe_average_equity/debt_to_equity when shareholder "
     "equity is zero or negative) must NEVER be cited as a specific percentage/ratio or as "
@@ -722,6 +729,16 @@ _GROWTH_FREQUENCY_STUB_TEXT = (
     "[withheld: this passage described a growth rate using a period this analysis "
     "could not build, and was removed by automated screening]")
 
+# Phase H.33 live finding (COST): a scenario-scoped DCF forecast-path
+# failure (one bad terminal-year cash flow) generalized into a claim that
+# the valuation METHOD is unsuitable for the company -- a different,
+# stronger claim the evidence does not support. See
+# `finance.metric_policy`'s `_VALUATION_UNSUITABLE_FOR_COMPANY_CLAIM`.
+_VALUATION_SCOPE_STUB_TEXT = (
+    "[withheld: this passage generalized a scenario-specific valuation-model limitation "
+    "into a claim about the company or its business model, and was removed by automated "
+    "screening]")
+
 # Label -> replacement text. Falls back to `_SEMANTIC_STUB_TEXT` for every
 # existing SEMANTIC_MISUSE producer (business-model misuse, stale citation),
 # so this is additive and changes no existing wording.
@@ -729,6 +746,7 @@ _SEMANTIC_STUB_TEXT_BY_LABEL = {
     _INTERNAL_REFERENCE_LABEL: _INTERNAL_REFERENCE_STUB_TEXT,
     "GUIDANCE_PERIOD_MISSTATED": _GUIDANCE_HORIZON_STUB_TEXT,
     "GROWTH_FREQUENCY_MISMATCH": _GROWTH_FREQUENCY_STUB_TEXT,
+    "VALUATION_SCOPE_OVERGENERALIZED": _VALUATION_SCOPE_STUB_TEXT,
 }
 
 # Keyed by the FIELD NAME as it appears at the top level of a stage's
@@ -1165,6 +1183,9 @@ _BUSINESS_MODEL_RULE_IDS = {
     "GENERIC_RATIO_INTERPRETATION_NOT_SUPPORTED": "BM-002",
     "VALUATION_APPLICABILITY_MISSTATED": "BM-003",
     "VALUATION_LIMITATION_AS_COMPANY_RISK": "BM-004",
+    # BM-005 is "STALE_METRIC_CITATION", assigned directly in
+    # `_stale_citation_findings` rather than through this lookup.
+    "VALUATION_SCOPE_OVERGENERALIZED": "BM-006",
 }
 
 
