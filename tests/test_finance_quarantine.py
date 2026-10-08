@@ -38,7 +38,10 @@ H3_STRING = ("If you do not currently hold a position: AVOID. "
 def test_every_pattern_has_a_stable_id_and_a_severity():
     # 13 original + 3 added by Phase 4 (addressing-based fabrication).
     assert len(cp.RULES) == 21
-    assert len(cv.RULES) == 37
+    # 37 original + 17 added by Phase H.34 (generalized single-metric
+    # interpretation rulebook: liquidity/debt-servicing/leverage/growth/
+    # cash-generation/DCF-invalid overreach, independent of business model).
+    assert len(cv.RULES) == 54
     for rule in list(cp.RULES) + list(cv.RULES):
         assert rule.rule_id
         assert rule.severity in cp.Severity.ALL

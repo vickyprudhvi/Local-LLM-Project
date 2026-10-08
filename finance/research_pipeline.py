@@ -301,6 +301,33 @@ _SHARED_GUARDRAILS = (
     "their circumstances are, so any such sentence would be invented rather than "
     "analysed. Describe what the evidence shows and let the separate 'recommendation' "
     "field carry the characterization on its own.\n"
+    # Phase H.34: distilled from docs/external_skills/buffett-investment-
+    # framework/ (vendored design reference, pinned v0.1.0 -- see that
+    # directory's PROVENANCE.md) -- its evidence-boundary discipline only,
+    # never its investment philosophy, and never as a substitute for the
+    # deterministic backstop in finance/claim_validation.py /
+    # finance/metric_policy.py, which enforces this independently of whether
+    # you follow it.
+    "- A single metric never carries a compound judgment on its own. net_debt below zero "
+    "supports 'net cash position', not 'debt stress' or 'may constrain capital allocation'. "
+    "A current/quick/cash ratio above 1 supports 'current assets exceed current liabilities', "
+    "not 'strong liquidity' -- and one near or below 1 does not by itself support 'liquidity "
+    "stress' either. A low debt-to-equity ratio supports 'relatively low leverage', not 'no "
+    "debt-servicing risk' (that needs interest-coverage, maturity, liquidity, or covenant "
+    "evidence). Positive revenue growth supports 'revenue increased', never 'sustainable' or "
+    "'unsustainable' growth without decomposition evidence -- say the evidence does not "
+    "establish the drivers, rather than guessing which way it cuts. Positive free cash flow "
+    "supports 'positive free cash flow' with the number, never 'strong cash generation' "
+    "without an explicit threshold or comparison. Gross debt exceeding FCF, alone, does not "
+    "support a debt-servicing-risk conclusion. A negative terminal-year DCF cash flow supports "
+    "'this forecast path does not support a valid perpetuity terminal value', never 'the "
+    "company will experience cash-flow problems' or 'FCFF is unsuitable for this company'.\n"
+    "- Guidance for one metric never supports a claim about a different metric, even in the "
+    "same release -- CapEx guidance cannot support a revenue-growth claim; EPS guidance "
+    "cannot support a margin claim.\n"
+    "- When the evidence does not reach one of these permitted conclusions, say what is "
+    "missing and stop there. Do not fill the gap with a plausible-sounding financial story -- "
+    "an unresolved question stated plainly is a complete, correct answer.\n"
     "- Respond with ONLY a single JSON object matching the schema given. No prose "
     "before or after, no markdown code fences, no explanation of the schema.\n"
 )
@@ -1008,6 +1035,7 @@ def _validate_claim_fidelity(validated: dict, index) -> dict:
                 + _stale_citation_findings(validated, index)
                 + _internal_reference_findings(validated)
                 + _guidance_horizon_findings(validated, index)
+                + _guidance_metric_mismatch_findings(validated, index)
                 + _growth_frequency_findings(validated, index))
 
     # Phase H.5, Phase 2: OVERSTATEMENT findings quarantine their field; only
@@ -1322,6 +1350,31 @@ def _guidance_horizon_findings(validated, index) -> list:
         for label in scan_for_guidance_period_mismatch(text, guidance_metrics):
             findings.append(Finding(
                 rule_id=GUIDANCE_PERIOD_MISMATCH_RULE_ID, label=label,
+                severity=Severity.SEMANTIC_MISUSE, field_path=field_path,
+                matched_span=text[:60]))
+    return findings
+
+
+def _guidance_metric_mismatch_findings(validated, index) -> list:
+    """Phase H.34, section 10: CapEx guidance cannot support a revenue-growth
+    claim, and EPS guidance cannot support a margin claim. Same shape as
+    `_guidance_horizon_findings` immediately above -- metric identity rather
+    than period identity, same `guidance_metrics` reconstruction, same
+    per-field prose-only scan.
+    """
+    from finance.claim_validation import (
+        GUIDANCE_METRIC_MISMATCH_RULE_ID, scan_for_guidance_metric_mismatch)
+    from finance.content_policy import Finding, Severity, _is_prose_field, _walk_fields
+
+    guidance_metrics = _guidance_metrics_from_index(index)
+
+    findings = []
+    for field_path, text in _walk_fields(validated):
+        if not _is_prose_field(field_path):
+            continue
+        for label in scan_for_guidance_metric_mismatch(text, guidance_metrics):
+            findings.append(Finding(
+                rule_id=GUIDANCE_METRIC_MISMATCH_RULE_ID, label=label,
                 severity=Severity.SEMANTIC_MISUSE, field_path=field_path,
                 matched_span=text[:60]))
     return findings
@@ -2112,6 +2165,64 @@ def _require_recommendation_supported_by_readiness(
             f"confidence is {validated['confidence']:.2f}. A recommendation other than "
             f"'insufficient_evidence' on a structurally invalid analysis must be held at or "
             f"below {_NOT_READY_MAX_CONFIDENCE:.2f} confidence.")
+
+
+# Phase H.34, section 16: missing valuation evidence is a LIMITATION of this
+# analysis, never itself unfavorable evidence about the company -- it says
+# nothing about direction. `_require_recommendation_supported_by_readiness`
+# above already bounds CONFIDENCE and requires a stated limitation when
+# readiness is NOT_READY; it does not check what the recommendation's own
+# cited rationale actually points to, so a SELL/AVOID whose entire 'rationale'
+# cites only the valuation model being unavailable (never an actual
+# fundamental, technical, or guidance fact) passed every existing check. This
+# does NOT touch the recommendation POLICY (which values are allowed, how
+# readiness bounds confidence) -- it only requires the LLM's own chosen
+# directional recommendation to point at real company evidence, the same
+# "coherent with its own citations" class of check as every other guard in
+# this function group.
+_DIRECTIONAL_RECOMMENDATIONS = frozenset({"sell", "avoid"})
+# Evidence ids that describe the ANALYSIS (the valuation model's availability,
+# a degraded run, an omitted dataset), never a fact about the company itself.
+# Prefix-matched because every item under e.g. `valuation.*` or `dcf.
+# validation_*` shares this property -- see finance/evidence.py's valuation
+# evidence gate, which is the single place these ids are produced.
+_ANALYSIS_LIMITATION_EVIDENCE_PREFIXES = (
+    "valuation.", "dcf.validation_status", "dcf.validation_reasons",
+    "dcf.data_completeness", "dcf.valuation_freshness", "warning.",
+    "plan.omitted.", "business_model.valuation_method_status",
+)
+
+
+def _is_analysis_limitation_evidence_id(evidence_id: str) -> bool:
+    return any(evidence_id.startswith(prefix) for prefix in _ANALYSIS_LIMITATION_EVIDENCE_PREFIXES)
+
+
+def _require_bearish_recommendation_has_directional_evidence(
+        recommendation: str, validated: dict) -> None:
+    """A SELL/AVOID recommendation must cite at least one piece of actual
+    company evidence, not only the valuation model's unavailability.
+
+    Checks 'rationale' (the field this stage's schema designates for citing
+    the evidence behind the recommendation) rather than every field, because
+    'limiting_factors'/'key_uncertainties' legitimately cite nothing BUT
+    analysis limitations -- that is their whole job -- and scanning them
+    would reject the exact disclosure the readiness check above requires.
+    """
+    if recommendation not in _DIRECTIONAL_RECOMMENDATIONS:
+        return
+    rationale = validated.get("rationale") or []
+    cited_ids = [eid for entry in rationale for eid in (entry.get("evidence_ids") or [])]
+    if not cited_ids:
+        return  # a missing citation here is a pre-existing, separate schema failure
+    if all(_is_analysis_limitation_evidence_id(eid) for eid in cited_ids):
+        raise _Invalid(
+            f"{CONTENT_POLICY_VIOLATION_MARKER} recommendation {recommendation!r} is supported "
+            "entirely by 'rationale' evidence describing the valuation model's own availability "
+            "(e.g. 'valuation.status', 'dcf.validation_status') and names no actual fundamental, "
+            "technical, or guidance fact about the company. The unavailability of a valuation is "
+            "a limitation of this analysis, not unfavorable evidence about the business. Cite at "
+            "least one real evidence ID that supports the unfavorable direction, or choose "
+            "'insufficient_evidence' instead.")
 
 
 # Confidence ceiling when the valuation is knowingly built on stale inputs.
@@ -3019,6 +3130,9 @@ def _validate_final_synthesizer_output(raw, index, risk_output=None,
     # attempt as every other guard here.
     _require_recommendation_is_explained(recommendation, validated)
     _require_recommendation_supported_by_readiness(recommendation, validated, readiness_status)
+    # Phase H.34, section 16: coherence check, not a policy change -- see the
+    # function's own docstring.
+    _require_bearish_recommendation_has_directional_evidence(recommendation, validated)
     # Phase H.4 (section 18): a stale-input valuation caps confidence too.
     # Same shape as the readiness cap and for the same reason -- freshness
     # never picks the recommendation, it only bounds how firmly one can be

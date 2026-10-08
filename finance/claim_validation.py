@@ -327,11 +327,159 @@ _FUTURE_TENSE_TECHNICAL_PATTERNS = [
     (re.compile(r"\bpoised\s+(?:for|to)\b", re.IGNORECASE), "future-tense technical certainty (poised)"),
 ]
 
+# ---------------------------------------------------------------------------
+# Phase H.34 -- the generalized single-metric interpretation rulebook
+# ---------------------------------------------------------------------------
+#
+# finance/metric_policy.py already bans a handful of these same conclusions,
+# but ONLY for the specialized business models (bank/broker-dealer/insurer/
+# financial_institution) its `evaluate()` gates on -- an ordinary company's
+# "strong liquidity" from a current ratio over 1, or "no debt-servicing risk"
+# from a low debt-to-equity, or "unsustainable growth" from a positive
+# revenue-growth figure with no decomposition evidence, passed completely
+# unchecked. These patterns close that gap UNIVERSALLY, independent of
+# business model, the same way CV-1 through CV-6 already police superlatives/
+# causal-overreach/consensus/DCF-terminology regardless of business model.
+#
+# Deliberately the same "a single metric cannot carry a compound judgment"
+# shape throughout: the evidence may be cited and genuine, and the CONCLUSION
+# is still stronger than one number supports. None of these inspect the
+# metric's actual value (this module has never done free-text/evidence-value
+# matching -- see the docstring's "Deliberately NOT implemented" note); they
+# ban the CONCLUSION VOCABULARY itself, exactly like 'fortress' or 'guarantee'
+# above. A genuinely well-supported version of the same conclusion still has
+# to be phrased around the ban, which is the intended cost: say what the
+# evidence shows ("current assets exceed current liabilities by 1.9x") rather
+# than the compound judgment it alone cannot prove ("strong liquidity").
+_LIQUIDITY_STRENGTH_PATTERNS = [
+    (re.compile(r"\b(?:current|quick|cash)\s+ratio\b(?:[^.]|\.(?=\d)){0,90}?"
+               r"\b(?:strong|robust|healthy|solid|ample|comfortable)\s+liquidity\b",
+               re.IGNORECASE),
+     "unsupported liquidity-strength claim (current/quick/cash ratio)"),
+    (re.compile(r"\b(?:strong|robust|healthy|solid|ample|comfortable)\s+liquidity\b"
+               r"(?:[^.]|\.(?=\d)){0,60}?\b(?:current|quick|cash)\s+ratio\b", re.IGNORECASE),
+     "unsupported liquidity-strength claim (current/quick/cash ratio)"),
+]
+
+# General-case mirror of metric_policy.py's `_LIQUIDITY_CLAIM`, which only
+# fires for specialized business models. A current/quick/cash ratio near or
+# below 1 is common and unremarkable for many ordinary businesses too; the
+# ratio alone does not establish liquidity distress for them either.
+_LIQUIDITY_DISTRESS_PATTERNS = [
+    (re.compile(r"\b(?:current|quick|cash)\s+ratio\b(?:[^.]|\.(?=\d)){0,90}?"
+               r"\b(?:liquidity\s+(?:risk|stress|pressure|concern|weakness|constraint)|"
+               r"liquidity\s+is\s+(?:tight|weak|strained)|short[\s-]term\s+(?:liquidity|"
+               r"solvency)|unable\s+to\s+(?:meet|cover)|cannot\s+(?:meet|cover)|strain\w*)\b",
+               re.IGNORECASE),
+     "unsupported liquidity-distress claim (current/quick/cash ratio)"),
+    (re.compile(r"\b(?:liquidity\s+(?:risk|stress|pressure|concern|weakness)|"
+               r"short[\s-]term\s+liquidity)\b(?:[^.]|\.(?=\d)){0,60}?"
+               r"\b(?:current|quick|cash)\s+ratio\b", re.IGNORECASE),
+     "unsupported liquidity-distress claim (current/quick/cash ratio)"),
+]
+
+# Low leverage permits describing the leverage itself as low; it does not
+# establish the SEPARATE claim that debt service is safe -- that needs
+# interest-coverage, maturity-schedule, liquidity or covenant evidence, none
+# of which a debt-to-equity ratio carries.
+_DEBT_SERVICE_SAFETY_PATTERNS = [
+    (re.compile(r"\bno\s+debt[\s-]servicing\s+risk\b", re.IGNORECASE),
+     "unsupported debt-servicing-safety claim (no debt-servicing risk)"),
+    (re.compile(r"\bno\s+(?:risk\s+of\s+)?default\s+risk\b|\bno\s+risk\s+of\s+default\b",
+               re.IGNORECASE),
+     "unsupported debt-servicing-safety claim (no default risk)"),
+    (re.compile(r"\b(?:cannot|can't|won'?t|will\s+not)\s+(?:struggle|fail)\s+to\s+"
+               r"(?:service|repay|meet)\s+(?:its\s+)?debt\b", re.IGNORECASE),
+     "unsupported debt-servicing-safety claim (cannot struggle to service debt)"),
+]
+
+# The mirror direction: a net-cash position, a low debt-to-equity ratio, or
+# gross debt alone compared to FCF/earnings is routinely used to manufacture a
+# DISTRESS conclusion the same single metric cannot support either --
+# "high debt may constrain capital allocation" is exactly as unsupported as
+# "no debt-servicing risk" above, just pointed the other way. Debt-servicing/
+# leverage distress needs interest-coverage, maturity-schedule, liquidity,
+# covenant, or sustained-negative-FCF evidence -- see
+# finance/research_pipeline.py's risk_reviewer role prompt, which already
+# tells the model this; these patterns are the deterministic backstop that
+# was previously missing.
+_LEVERAGE_DISTRESS_PATTERNS = [
+    (re.compile(r"\bdebt\s+(?:stress|burden)\b", re.IGNORECASE),
+     "unsupported leverage-distress claim (debt stress/burden)"),
+    (re.compile(r"\bdebt\s+may\s+constrain\s+capital\s+allocation\b", re.IGNORECASE),
+     "unsupported leverage-distress claim (debt may constrain capital allocation)"),
+    (re.compile(r"\b(?:debt|leverage)\s+servicing\s+risk\b", re.IGNORECASE),
+     "unsupported leverage-distress claim (debt/leverage servicing risk)"),
+    (re.compile(r"\b(?:severe|significant|material|high)\s+(?:financial\s+)?distress\b"
+               r"(?:[^.]|\.(?=\d)){0,60}?\b(?:debt|leverage)\b"
+               r"|\b(?:debt|leverage)\b(?:[^.]|\.(?=\d)){0,60}?"
+               r"\b(?:severe|significant|material|high)\s+(?:financial\s+)?distress\b",
+               re.IGNORECASE),
+     "unsupported leverage-distress claim (financial distress)"),
+]
+
+# "Revenue increased" is a direct fact. "Sustainable"/"unsustainable" is a
+# compound judgment about the DRIVERS of that growth, which this system has
+# no decomposition evidence to support either way -- see finance/
+# research_pipeline.py's _VALUATION_LIMITATION_MARKERS for the narrower,
+# pre-existing version of this idea scoped only to risk_reviewer's key_risks
+# category; this is the general-purpose ban for bull/bear/synthesizer claims.
+_GROWTH_SUSTAINABILITY_PATTERNS = [
+    (re.compile(r"\b(?:un)?sustainable\s+(?:revenue\s+|sales\s+|earnings\s+)?growth\b",
+               re.IGNORECASE),
+     "unsupported growth-sustainability claim"),
+    (re.compile(r"\bgrowth\s+(?:is|looks|appears|seems|remains)\s+(?:not\s+)?"
+               r"(?:un)?sustainable\b", re.IGNORECASE),
+     "unsupported growth-sustainability claim"),
+]
+
+# General-case mirror of metric_policy.py's `_OWNER_CASH_CLAIM`, which only
+# fires for specialized business models. "Positive free cash flow" is a
+# direct fact; "strong"/"robust" cash generation is a threshold judgment this
+# system has no comparison basis for, for ANY business model.
+_CASH_GENERATION_STRENGTH_PATTERNS = [
+    (re.compile(r"\b(?:strong|robust|healthy|solid|ample)\b(?:[^.]|\.(?=\d)){0,40}?"
+               r"\b(?:free[\s-]cash[\s-]flow|fcf|cash[\s-]generation|cash[\s-]conversion)\b",
+               re.IGNORECASE),
+     "unsupported cash-generation-strength claim"),
+    (re.compile(r"\b(?:free[\s-]cash[\s-]flow|fcf|cash[\s-]generation)\b"
+               r"(?:[^.]|\.(?=\d)){0,60}?"
+               r"\b(?:demonstrat\w+|shows?|indicat\w+|reflects?)\s+(?:strong|robust|healthy|"
+               r"solid|ample)\b", re.IGNORECASE),
+     "unsupported cash-generation-strength claim"),
+]
+
+# A negative terminal-year FCFF / an invalid DCF means a perpetuity cannot be
+# built from THAT forecast path -- it is a property of the model, not an
+# observed fact about the company's future cash flows. Asserting the company
+# itself will run into cash-flow trouble, or that the FCFF METHOD is
+# unsuitable for it, is a categorically stronger claim with no basis in a
+# failed terminal-value calculation alone. finance/metric_policy.py already
+# bans the "method is unsuitable for this company" framing when the actual
+# status is NOT_VALID_FOR_CURRENT_FORECAST_PATH (`_VALUATION_UNSUITABLE_FOR_
+# COMPANY_CLAIM`) and research_pipeline.py's `_VALUATION_LIMITATION_MARKERS`
+# reclassifies a risk_reviewer finding's CATEGORY when the text mentions a
+# negative terminal value -- but neither stops a bull/bear/synthesizer claim
+# from asserting the company "will experience cash-flow deficits" outright,
+# which is this pattern's job.
+_DCF_INVALID_OVERREACH_PATTERNS = [
+    (re.compile(r"\b(?:the\s+)?compan(?:y|ies)\s+will\s+(?:experience|face|see)\s+"
+               r"(?:future\s+)?cash[\s-]flow\s+(?:deficits?|problems?|shortfalls?)\b",
+               re.IGNORECASE),
+     "unsupported DCF-invalid overreach (company will experience cash-flow problems)"),
+    (re.compile(r"\bfcff\s+(?:is\s+)?unsuitable\s+for\s+this\s+company\b", re.IGNORECASE),
+     "unsupported DCF-invalid overreach (FCFF unsuitable for this company)"),
+]
+
 _ALL_TEXT_PATTERNS = (
     _TECHNICAL_PREDICTION_PATTERNS +
     _SUPERLATIVE_PATTERNS + _CAUSAL_OVERREACH_PATTERNS
     + _CONSENSUS_LANGUAGE_PATTERNS + _FUTURE_TENSE_TECHNICAL_PATTERNS
     + _DCF_TERMINOLOGY_PATTERNS
+    + _LIQUIDITY_STRENGTH_PATTERNS + _LIQUIDITY_DISTRESS_PATTERNS
+    + _DEBT_SERVICE_SAFETY_PATTERNS + _LEVERAGE_DISTRESS_PATTERNS
+    + _GROWTH_SUSTAINABILITY_PATTERNS + _CASH_GENERATION_STRENGTH_PATTERNS
+    + _DCF_INVALID_OVERREACH_PATTERNS
 )
 
 # Phase H.5, Phase 2 -- stable rule ids.
@@ -356,6 +504,18 @@ _CLAIM_VALIDATION_RULE_GROUPS = (
     # existing rule stay put -- a renumbered id would corrupt stored
     # quarantine records and the aggregation that reads them.
     ("CV-6", _TECHNICAL_PREDICTION_PATTERNS),
+    # Phase H.34 -- the generalized, business-model-independent single-metric
+    # interpretation rulebook. New top-level group (ids CV-701..CV-7NN) rather
+    # than appending to an existing one, for the same "never renumber" reason.
+    # One combined list (not one registration per sub-list) because
+    # `_build_claim_rules` numbers a group's rules `{prefix}{index:02d}` --
+    # registering each named pattern list separately under its OWN prefix
+    # would concatenate rather than number (e.g. "CV-70101"), which is not
+    # the intended "CV-701, CV-702, ..." sequence.
+    ("CV-7", _LIQUIDITY_STRENGTH_PATTERNS + _LIQUIDITY_DISTRESS_PATTERNS
+     + _DEBT_SERVICE_SAFETY_PATTERNS + _LEVERAGE_DISTRESS_PATTERNS
+     + _GROWTH_SUSTAINABILITY_PATTERNS + _CASH_GENERATION_STRENGTH_PATTERNS
+     + _DCF_INVALID_OVERREACH_PATTERNS),
 )
 
 
@@ -430,10 +590,26 @@ _FUTURE_TENSE_LABEL = "future-tense technical certainty"
 # the disclaiming word actually present ('not supported') is an absence-style
 # marker, not a hedge-style one.
 _DISCLAIMER_EXEMPT_LABELS = frozenset({"unsupported superlative (guarantee)"})
+# Phase H.34: the generalized single-metric interpretation labels (CV-7xx)
+# are the SAME "judgment about how confidently a sentence asserts something"
+# class as 'unqualified causal claim' above, not a FABRICATION-style ban --
+# they get the identical disclaimer/hedge exemptions for the identical
+# reason: a passage DISCLAIMING or CRITIQUING one of these conclusions ("no
+# debt-servicing-risk claim is supported here", "assertions that free cash
+# flow 'provides ample liquidity' ... imply a causal guarantee" -- the exact
+# UNH shape above, now also tripping CV-701/702) is describing the banned
+# conclusion, not making it.
+_GENERALIZED_SINGLE_METRIC_LABEL_PREFIXES = (
+    "unsupported liquidity-strength claim", "unsupported liquidity-distress claim",
+    "unsupported debt-servicing-safety claim", "unsupported leverage-distress claim",
+    "unsupported growth-sustainability claim", "unsupported cash-generation-strength claim",
+    "unsupported DCF-invalid overreach",
+)
+
 _DISCLAIMER_EXEMPT_LABEL_PREFIXES = (
     "unqualified causal claim", "consensus-estimate language", _DCF_TERMINOLOGY_LABEL_PREFIX,
     _FUTURE_TENSE_LABEL,
-)
+) + _GENERALIZED_SINGLE_METRIC_LABEL_PREFIXES
 
 # UNH corrective patch: a THIRD live ticker's run showed a DIFFERENT category
 # from the disclaiming-absence one above -- CONDITIONAL/hypothetical framing,
@@ -489,7 +665,9 @@ _HEDGE_PROXIMITY_PATTERNS = (
 _HEDGE_EXEMPT_LABELS = frozenset({
     "unsupported superlative (guarantee)", "unsupported superlative (inevitable)",
 })
-_HEDGE_EXEMPT_LABEL_PREFIXES = ("unqualified causal claim", _DCF_TERMINOLOGY_LABEL_PREFIX)
+_HEDGE_EXEMPT_LABEL_PREFIXES = (
+    ("unqualified causal claim", _DCF_TERMINOLOGY_LABEL_PREFIX)
+    + _GENERALIZED_SINGLE_METRIC_LABEL_PREFIXES)
 
 
 def _is_disclaimed(text: str) -> bool:
@@ -801,6 +979,114 @@ def scan_for_guidance_period_mismatch(text, guidance_metrics) -> List[str]:
             f"fiscal year, but the guidance on file targets {', '.join(sorted(shorter))}. "
             "A three-month outlook stated as a twelve-month commitment is a different "
             "claim about the company, not a rounding of the same one.")
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# A claim may not attribute guidance on one metric to a different metric
+# ---------------------------------------------------------------------------
+#
+# Phase H.34, section 10 ("guidance"): CapEx guidance cannot support a
+# revenue-growth claim, and EPS guidance cannot support a margin claim -- the
+# guided metric and the claimed metric have to be the SAME metric, not merely
+# both present in the same guidance release. Mirrors
+# `scan_for_guidance_period_mismatch` above, for metric identity instead of
+# period identity, and uses the SAME `guidance_metrics` dict that function
+# already receives (see finance/research_pipeline.py::
+# _guidance_metrics_from_index) -- its keys are the evidence ids themselves
+# (`dcf.guidance.<name>.<period_slug>.current`), which already carry the
+# guided metric's canonical name as their third dotted segment, so no new
+# field or call site needs to be threaded through.
+
+GUIDANCE_METRIC_MISMATCH = "GUIDANCE_METRIC_MISMATCH"
+GUIDANCE_METRIC_MISMATCH_RULE_ID = "CV-610"
+
+_GUIDANCE_EVIDENCE_ID_RE = re.compile(r"^dcf\.guidance\.([a-z0-9_]+)\.")
+
+# Ordered so a compound phrase ("revenue growth", "operating margin", "free
+# cash flow") is tried before the bare word it CONTAINS ("revenue", "margin",
+# "cash flow") would otherwise claim the match first. Vocabulary matches the
+# row names finance/metric_policy.py's guidance-relevance tables already use
+# (`_STANDARD_GUIDANCE_ROWS`/`RELEVANT_GUIDANCE_ROWS`), so a metric name here
+# and a metric name there can never disagree about what to call the same row.
+_GUIDANCE_METRIC_VOCAB = (
+    ("revenue_growth", re.compile(
+        r"(?i)\brevenue\s+growth\b|\bsales\s+growth\b|\btop[\s-]line\s+growth\b")),
+    ("free_cash_flow", re.compile(r"(?i)\bfree\s+cash\s+flow\b|\bfcf\b")),
+    ("operating_cash_flow", re.compile(r"(?i)\boperating\s+cash\s+flow\b")),
+    ("operating_margin", re.compile(r"(?i)\boperating\s+margin\b")),
+    ("gross_margin", re.compile(r"(?i)\bgross\s+margin\b")),
+    ("eps", re.compile(r"(?i)\beps\b|\bearnings[\s-]per[\s-]share\b")),
+    ("tax_rate", re.compile(r"(?i)\btax\s+rate\b")),
+    ("capex", re.compile(r"(?i)\bcapex\b|\bcapital\s+expenditures?\b")),
+    ("shares", re.compile(
+        r"(?i)\bshare\s+count\b|\bshares?\s+outstanding\b|\bbuybacks?\b|\bshare\s+repurchases?\b")),
+    ("leverage", re.compile(r"(?i)\bleverage\b|\bdebt[\s-]to[\s-]equity\b")),
+    ("revenue", re.compile(r"(?i)\brevenue\b|\bsales\b|\btop[\s-]line\b")),
+)
+
+
+def _guidance_metric_names(guidance_metrics) -> Set[str]:
+    """The canonical metric names actually present in the guidance.
+
+    `guidance_metrics` has two shapes in actual use, both accepted here: the
+    production dict built by finance/research_pipeline.py::
+    _guidance_metrics_from_index, keyed by the full evidence id (`dcf.
+    guidance.<name>.<period_slug>.current`), carrying no separate "name"
+    field -- the name is parsed out of the key; and the shape this project's
+    own tests build directly (see tests/test_finance_claim_and_condition_
+    boundaries.py's `_Q1_GUIDANCE`), keyed by the bare metric name, whose
+    entries carry an explicit "name" field. An entry's own "name" field wins
+    when present, since it is the more direct signal.
+    """
+    names: Set[str] = set()
+    for key, entry in (guidance_metrics or {}).items():
+        name = entry.get("name") if isinstance(entry, dict) else None
+        if not name:
+            match = _GUIDANCE_EVIDENCE_ID_RE.match(key) if isinstance(key, str) else None
+            if match:
+                name = match.group(1)
+            elif isinstance(key, str) and "." not in key:
+                name = key
+        if name:
+            names.add(name)
+    return names
+
+
+def scan_for_guidance_metric_mismatch(text, guidance_metrics) -> List[str]:
+    """Does this claim attribute guidance to a metric nobody guided?
+
+    Returns a finding only when the claim's own text names a metric keyword
+    (e.g. "revenue growth") whose canonical name is NOT among the metrics
+    actually guided -- including when nothing at all was guided, which makes
+    every attribution a fabrication by the same rule. A sentence that
+    disclaims the absence of guidance for that metric ("no capex guidance is
+    available") is exempt, same disclaimer vocabulary as the rest of this
+    module.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return []
+    if not _GUIDANCE_ATTRIBUTION.search(text):
+        return []
+    available = _guidance_metric_names(guidance_metrics)
+
+    findings: List[str] = []
+    claimed_already = set()
+    for metric_name, pattern in _GUIDANCE_METRIC_VOCAB:
+        if metric_name in claimed_already or not pattern.search(text):
+            continue
+        claimed_already.add(metric_name)
+        if metric_name in available:
+            continue
+        if _is_disclaimed(text):
+            continue
+        guided = (", ".join(sorted(n.replace("_", " ") for n in available))
+                  if available else "no metric")
+        findings.append(
+            f"{GUIDANCE_METRIC_MISMATCH}: the claim attributes guidance to "
+            f"{metric_name.replace('_', ' ')}, but the guidance on file covers {guided}. "
+            "Guidance on one metric does not establish anything about a different metric, "
+            "even when both appear in the same release.")
     return findings
 
 
