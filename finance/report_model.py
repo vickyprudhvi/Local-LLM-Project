@@ -557,13 +557,26 @@ def _build_valuation_basis(compact: dict) -> ValuationBasis:
         # "Unavailable" asserts the company published nothing. What is known
         # is that the extractor found nothing, which is a weaker claim and
         # the only one the evidence supports.
+        #
+        # Phase H.32: source-aware. "0 earnings releases examined" used to
+        # read as "no guidance anywhere" even when the current 10-Q/10-K's
+        # own MD&A item was never looked at -- a source-coverage gap, not a
+        # genuine absence of guidance.
         examined = compact.get("guidance_releases_examined")
-        if examined:
+        periodic_examined = compact.get("guidance_periodic_filings_examined")
+        if examined or periodic_examined:
+            sources = []
+            if examined:
+                sources.append(f"{examined} SEC earnings release{'s' if examined != 1 else ''}")
+            if periodic_examined:
+                sources.append(
+                    f"{periodic_examined} current periodic filing"
+                    f"{'s' if periodic_examined != 1 else ''} (10-Q/10-K MD&A)")
             guidance_lines.append(
-                f"Management guidance: none extracted ({examined} SEC earnings release"
-                f"{'s' if examined != 1 else ''} examined)")
-        elif examined == 0:
-            guidance_lines.append("Management guidance: no SEC earnings release found")
+                f"Management guidance: none extracted ({' and '.join(sources)} examined)")
+        elif examined == 0 and (periodic_examined == 0 or periodic_examined is None):
+            guidance_lines.append("Management guidance: no SEC earnings release or current "
+                                  "periodic filing found")
         else:
             guidance_lines.append("Management guidance: not retrieved")
 
@@ -678,7 +691,16 @@ def _build_valuation(compact: dict, valuation_status: str) -> ValuationView:
     if dcf.get("available") and not publishable             and valuation_status != ValuationStatus.LIMITED:
         model_invalid_status = valuation_status
         model_invalid_explanation = STATUS_EXPLANATION.get(valuation_status)
-        model_invalid_reasons = tuple(dcf.get("validation_reasons") or ())
+        # Phase H.33: this list is deterministic-engine text (finance/dcf.py),
+        # never model output, so it was never routed through the same
+        # content check every LLM-authored bullet list in this file is held
+        # to. The engine itself never produces a blank reason today, but
+        # rendering it unchecked, straight from the dict, is the exact
+        # bypass pattern this phase was asked to rule out -- `carries_content`
+        # is the one place "is this a real bullet" is decided, and nothing
+        # that becomes a rendered bullet should skip it.
+        model_invalid_reasons = tuple(
+            r for r in (dcf.get("validation_reasons") or ()) if _carries_content(r))
 
     unavailable_reason = None
     if not dcf.get("available"):
@@ -891,7 +913,18 @@ def _build_research_view(compact, pipeline_result, pipeline_status, readiness,
         # §16: `min_items` counts entries that SURVIVE filtering. A blank
         # string is not a condition, and a report that prints one has
         # published an empty claim.
-        items = tuple(i for i in (output.get(key) or []) if str(i).strip())[:cap]
+        #
+        # Phase H.33: this used to be `if str(i).strip()` -- a narrower,
+        # ad hoc rule that only caught a literally blank string and missed
+        # the placeholder vocabulary ("N/A", "none", "not applicable", ...)
+        # `finance.content_policy.carries_content` exists specifically to
+        # reject. Upstream `_string_list` validation already filters these
+        # fields the same way, so this re-check is normally redundant -- but
+        # a re-check that silently uses a WEAKER rule than the one it is
+        # supposed to be backing up is itself the failure mode
+        # `content_policy.py`'s own module docstring describes.
+        items = tuple(i for i in (output.get(key) or [])
+                      if _carries_content(str(i)))[:cap]
         if items:
             groups.append((label, items))
 

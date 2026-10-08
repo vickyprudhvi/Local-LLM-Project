@@ -193,6 +193,40 @@ _YEAR_BAND = re.compile(
 
 _HALF_BAND = re.compile(r"(?i)\b(?:six\s+months?|half[\s-]year|first\s+half)\s+(?:ended|ending)\b")
 
+# A 52/53-week fiscal year is a standard retail/consumer convention (Costco,
+# Walmart, Target, TJX, Kroger and many others), not a monthly or quarterly
+# calendar. "16 Weeks Ended" / "52 Weeks Ended" named no vocabulary this
+# module recognized, so `_bands_above` dropped the band entirely and
+# `_columns_from` fell back to its "no band = balance sheet = instant"
+# default -- misclassifying every income-statement and cash-flow column as
+# INSTANT and rejecting every flow fact (revenue, net income, operating cash
+# flow) as FLOW_INSTANT_MISMATCH. A live Costco earnings release exposed
+# this; a 12/12/12/16-week or 13/13/13/13-week fiscal year is common across
+# the sector, so the count is read generically rather than from a fixed word
+# list the way months/quarters are -- there is no small closed vocabulary of
+# "how many weeks is a quarter" the way there is for months.
+_WEEKS_BAND = re.compile(r"(?i)\b(\d{1,2})\s*(?:-|\s)?weeks?\s+(?:ended|ending|period)\b")
+
+
+def _weeks_to_frequency(weeks: int) -> str:
+    """A week count to the domain's frequency vocabulary, by RANGE rather
+    than exact value -- different retailers' quarters run 12, 13, 14 or 16
+    weeks depending on their own 4-4-5/4-4-4+1 fiscal calendar, and none of
+    that variation changes what the column IS (a single fiscal quarter).
+    Outside every recognized range the count is UNKNOWN, same as an
+    unrecognized month/quarter count.
+    """
+    if 48 <= weeks <= 54:
+        return sem.PeriodFrequency.ANNUAL
+    if 36 <= weeks <= 43:
+        return sem.PeriodFrequency.YTD_9M
+    if 23 <= weeks <= 30:
+        return sem.PeriodFrequency.YTD_6M
+    if 10 <= weeks <= 17:
+        return sem.PeriodFrequency.QUARTER
+    return sem.PeriodFrequency.UNKNOWN
+
+
 _WORD_COUNTS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
                 "nine": 9, "ten": 10, "twelve": 12, "first": 1, "second": 2,
                 "third": 3, "fourth": 4,
@@ -306,6 +340,9 @@ def band_frequency(label: str) -> str:
         return sem.PeriodFrequency.YTD_6M
     if _SINGLE_QUARTER_BAND.search(text):
         return sem.PeriodFrequency.QUARTER
+    match = _WEEKS_BAND.search(text)
+    if match:
+        return _weeks_to_frequency(int(match.group(1)))
     return sem.PeriodFrequency.UNKNOWN
 
 

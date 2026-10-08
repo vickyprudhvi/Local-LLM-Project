@@ -498,6 +498,50 @@ QUARTER_AND_YTD_RELEASE = release(
 Q3_QUARTER_REVENUE = 1_310.0 * MILLIONS
 Q3_YTD_REVENUE = 4_010.0 * MILLIONS
 
+# ---------------------------------------------------------------------------
+# K. WEEK-counted fiscal periods -- a live Costco finding
+# ---------------------------------------------------------------------------
+#
+# Retail/consumer issuers with a 52/53-week fiscal year (Costco, Walmart,
+# Target, and others) state their periods as "N Weeks Ended", never as
+# months or quarters. A live Costco release had this exact shape: the
+# income statement reported BOTH the 16-week quarter and the 52-week year
+# (sharing the same end date, same ambiguity `QUARTER_AND_YTD_RELEASE`
+# exercises above), while the cash-flow statement reported ONLY the
+# 52-week year -- no quarterly cash-flow column at all, a real and common
+# convention. A field with no competing duration must not be discarded
+# because a DIFFERENT statement in the same release also reports a quarter.
+WEEKS_BASED_RELEASE = release(
+    "Example Retailer Reports Fourth Quarter and Fiscal Year Results",
+    statement_table(
+        "CONSOLIDATED STATEMENTS OF INCOME (dollars in millions)",
+        [Q4_END, Q4_PRIOR_END, Q4_END, Q4_PRIOR_END],
+        [("Total revenue", [_m(Q4["revenue"]), _m(Q4["revenue"] * PRIOR_FACTOR),
+                            _m(FY["revenue"]), _m(FY["revenue"] * PRIOR_FACTOR)]),
+         ("Operating income", [_m(Q4["operating_income"]), _m(Q4["operating_income"] * PRIOR_FACTOR),
+                               _m(FY["operating_income"]), _m(FY["operating_income"] * PRIOR_FACTOR)]),
+         ("Net income", [_m(Q4["net_income"]), _m(Q4["net_income"] * PRIOR_FACTOR),
+                         _m(FY["net_income"]), _m(FY["net_income"] * PRIOR_FACTOR)])],
+        bands=[("16 Weeks Ended", 2), ("52 Weeks Ended", 2)]),
+    statement_table(
+        "CONSOLIDATED BALANCE SHEETS (amounts in millions)",
+        [Q4_END, Q4_PRIOR_END],
+        [("Cash and cash equivalents", [_m(Q4["cash_and_cash_equivalents"]), _m(690.0)]),
+         ("Total assets", [_m(Q4["assets"]), _m(5_700.0)]),
+         ("Total stockholders' equity", [_m(Q4["stockholders_equity"]), _m(2_650.0)])]),
+    statement_table(
+        "CONDENSED CONSOLIDATED STATEMENTS OF CASH FLOWS (amounts in millions)",
+        [Q4_END, Q4_PRIOR_END],
+        [("Net cash provided by operating activities",
+          [_m(FY["operating_cash_flow"]), _m(FY["operating_cash_flow"] * PRIOR_FACTOR)]),
+         ("Purchases of property and equipment",
+          [_m(FY["capital_expenditure"]), _m(FY["capital_expenditure"] * PRIOR_FACTOR)])],
+        bands=[("52 Weeks Ended", 2)]))
+
+WEEKS_QUARTER_REVENUE = Q4["revenue"] * MILLIONS
+WEEKS_ANNUAL_REVENUE = FY["revenue"] * MILLIONS
+WEEKS_ANNUAL_OPERATING_CASH_FLOW = FY["operating_cash_flow"] * MILLIONS
+
 # H. a foreign private issuer's interim results, filed on a 6-K under IFRS
 FOREIGN_ISSUER_RELEASE = release(
     "Example International plc Announces Results for the Half Year Ended 30 June 2026",

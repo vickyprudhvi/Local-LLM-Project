@@ -180,15 +180,27 @@ def test_an_unidentifiable_securities_filing_claims_nothing():
 
 
 def test_a_debt_offering_is_identified_as_debt_not_dilution():
+    """Phase H.32, section 7: the TYPE is still debt-shaped from the item
+    code alone (matching the gated V2 reader's own ground truth, which keeps
+    a committed-but-undrawn facility typed ISSUER_DEBT_ISSUANCE too) -- but
+    `find_post_balance_sheet_events` never reads the filing body, so it has
+    no evidence a dollar moved. `affects_debt` and the description must not
+    assert funded debt on the bare item code alone; see
+    `tests/test_finance_financing_event_funding.py` for the funded-evidence
+    cases that DO still produce "an issuance of debt".
+    """
     events = SB.find_post_balance_sheet_events(
         _submissions([("8-K", "2.03", "2026-08-01")]),
         balance_sheet_date="2026-06-30", valuation_date="2026-08-17")
     assert len(events) == 1
     event = events[0]
     assert event.event_type == SB.PostBalanceSheetEventType.ISSUER_DEBT_ISSUANCE
-    assert event.impact["affects_debt"] is True
+    assert event.impact["affects_debt"] is False
     assert event.impact["potential_dilution"] is False
-    assert "debt" in event.description
+    assert event.funded is None
+    assert "debt" not in event.description
+    assert "issued" not in event.description
+    assert "established" in event.description
 
 
 def test_an_insider_sale_changes_nothing_about_the_issuer():

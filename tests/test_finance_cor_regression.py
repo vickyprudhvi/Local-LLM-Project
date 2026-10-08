@@ -304,7 +304,11 @@ _RISK_COR = json.dumps({
                  "cash flow."),
          "severity": "medium",
          "evidence_cited": ["current.debt_to_equity", "current.net_debt", "fundamental.debt_to_fcf"]},
-        {"risk": "The current ratio is below 1.0, indicating comparatively tight short-term liquidity.",
+        # Phase H.34: the current ratio alone does not establish a liquidity-
+        # distress conclusion (finance/claim_validation.py's new CV-703/704
+        # rules) -- stated as the bear researcher's own parallel claim already
+        # does, as the fact alone.
+        {"risk": "The current ratio is approximately 0.93, below 1.0.",
          "severity": "medium", "evidence_cited": ["current.current_ratio"]},
         {"risk": "Operating margins are thin relative to revenue.",
          "severity": "low", "evidence_cited": ["current.operating_margin"]},

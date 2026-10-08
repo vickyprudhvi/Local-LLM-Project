@@ -545,3 +545,63 @@ def test_empty_citation_list_is_valid_but_cites_nothing():
     ok, unknown = validate_evidence_citations([], index)
     assert ok is True
     assert unknown == []
+
+
+# ---------------------------------------------------------------------------
+# Phase H.33 live finding (COST). The "current.revenue_growth" evidence item
+# was built from the bare date range alone ("Current revenue growth
+# (2026-02-16..2026-05-10)"), dropping the explicit period-KIND qualifier
+# `finance/canonical.py` already computed (`current_growth_label`,
+# "latest quarter YoY"). A model reading only a ~3-month span with no word
+# beside it has nothing stopping it from calling the figure "TTM" in prose.
+# ---------------------------------------------------------------------------
+
+def _payload_with_current_revenue_growth(current_growth_label="latest quarter YoY"):
+    payload = dict(MINIMAL_PAYLOAD)
+    payload["canonical_evidence"] = {
+        "current": {
+            "revenue_growth": {
+                "key": "revenue_growth", "value": 0.1158,
+                "period": "2026-02-16..2026-05-10", "period_type": "DERIVED",
+                "definition": ("latest reported quarter over the same quarter a year "
+                              f"earlier ({current_growth_label})"),
+            }
+        },
+        "current_growth_kind": "LATEST_QUARTER_YOY_GROWTH",
+        "current_growth_label": current_growth_label,
+    }
+    return payload
+
+
+def test_current_growth_evidence_label_names_the_period_kind_explicitly():
+    index = build_evidence_index(_payload_with_current_revenue_growth())
+    item = index["current.revenue_growth"]
+    assert "latest quarter YoY" in item.label
+    assert "latest quarter YoY" in item.derivation
+
+
+def test_current_growth_evidence_label_reflects_a_different_growth_kind():
+    index = build_evidence_index(_payload_with_current_revenue_growth("TTM YoY"))
+    item = index["current.revenue_growth"]
+    assert "TTM YoY" in item.label
+    assert "latest quarter YoY" not in item.label
+
+
+def test_a_current_metric_with_no_growth_label_still_gets_its_definition_surfaced():
+    """Every `canonical.current.*` metric, not only revenue_growth, should
+    surface its own `definition` text when present -- the fix is general to
+    the evidence-building loop, not special-cased to one metric name."""
+    payload = dict(MINIMAL_PAYLOAD)
+    payload["canonical_evidence"] = {
+        "current": {
+            "operating_margin": {
+                "key": "operating_margin", "value": 0.18,
+                "period": "2026-05-10", "period_type": "instant",
+                "definition": "operating income divided by revenue for the trailing "
+                              "twelve months",
+            }
+        },
+    }
+    index = build_evidence_index(payload)
+    item = index["current.operating_margin"]
+    assert "operating income divided by revenue" in item.derivation

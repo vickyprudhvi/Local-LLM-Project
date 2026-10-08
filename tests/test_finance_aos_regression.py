@@ -614,7 +614,10 @@ def test_an_annual_balance_sheet_is_labelled_as_a_fiscal_year_end():
 
 @pytest.mark.parametrize("examined,expected", [
     (None, "Management guidance: not retrieved"),
-    (0, "Management guidance: no SEC earnings release found"),
+    # Phase H.32: with no `guidance_periodic_filings_examined` key at all
+    # (simulating pre-H.32 facts / periodic coverage never having run), the
+    # wording says so rather than implying only earnings releases exist.
+    (0, "Management guidance: no SEC earnings release or current periodic filing found"),
     (1, "Management guidance: none extracted (1 SEC earnings release examined)"),
     (3, "Management guidance: none extracted (3 SEC earnings releases examined)"),
 ])

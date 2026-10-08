@@ -246,6 +246,31 @@ def test_a_floor_is_captured_as_a_minimum_not_a_midpoint():
     assert fcf.low == fcf.high == pytest.approx(18.0)
 
 
+def test_in_excess_of_is_captured_as_a_minimum_not_a_midpoint():
+    """Phase H.32 live finding (TSLA real 10-Q): "we currently expect our
+    capital expenditures to be in excess of $25 billion in 2026" named none
+    of the floor phrases this module previously recognized ("at least",
+    "N+", "or more"), so it fell through to the bare-figure fallback and was
+    recorded as an APPROXIMATE point -- reading a stated MINIMUM as a
+    midpoint forecast, the exact error this floor machinery exists to
+    prevent. "In excess of" states the same claim as "at least".
+    """
+    release = _extract(
+        "We currently expect our capital expenditures to be in excess of "
+        "$25 billion in 2026, driven by our AI initiatives.")
+    capex = release.metrics["capital_expenditure"]
+    assert capex.bound_type == G.GuidanceBound.AT_LEAST
+    assert capex.low == capex.high == pytest.approx(25.0)
+
+
+def test_more_than_is_captured_as_a_minimum_not_a_midpoint():
+    release = _extract(
+        "The Company expects full-year 2026 revenue of more than $100 billion.")
+    revenue = release.metrics["revenue"]
+    assert revenue.bound_type == G.GuidanceBound.AT_LEAST
+    assert revenue.low == revenue.high == pytest.approx(100.0)
+
+
 def test_a_number_far_from_the_metric_name_is_not_claimed_as_its_floor():
     """"free cash flow* through 2028, its plans to return $45 billion+ to
     shareholders" is a capital-return plan, not free-cash-flow guidance."""

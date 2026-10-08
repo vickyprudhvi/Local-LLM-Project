@@ -128,7 +128,98 @@ def test_g_the_report_model_still_refuses_the_same_boilerplate_if_it_ever_arrive
                          "Not applicable at this time.")),))
 
 
-@pytest.mark.parametrize("blank", ["", "   ", ".", "N/A"])
+# ---------------------------------------------------------------------------
+# Item (COST-era phase, condition groups). A live COST investigation found
+# `_build_research_view`'s "Limiting factors"/"Upgrade conditions"/
+# "Downgrade conditions"/"Reassessment triggers" groups re-implementing this
+# same content check ad hoc (`if str(i).strip()`) instead of calling
+# `finance.content_policy.carries_content` -- the exact recurrence pattern
+# this file's own history (items above) already documents twice. The weaker
+# check correctly rejects a literal blank but, unlike `carries_content`,
+# accepts placeholder vocabulary ("N/A", "none", "not applicable", ...).
+# ---------------------------------------------------------------------------
+
+def _pipeline_with_final_output(output):
+    from finance.research_pipeline import ResearchPipelineResult, StageCheckpoint, StageStatus
+    return ResearchPipelineResult(
+        available=True,
+        checkpoints=[StageCheckpoint(stage="final_investment_synthesizer",
+                                     status=StageStatus.COMPLETED, output=output)])
+
+
+def _final_output(**overrides):
+    base = {
+        "confidence": 0.5,
+        "research_stance": "neutral",
+        "valuation_view": "approximately_fair",
+        "overall_risk": "moderate",
+        "recommendation": "hold",
+        "primary_reason": "A plain evidence-grounded reason.",
+        "limiting_factors": ["A real limiting factor about guidance."],
+        "conditions_that_strengthen_the_view": [],
+        "conditions_that_weaken_the_view": [],
+        "reassessment_triggers": [],
+    }
+    base.update(overrides)
+    return base
+
+
+@pytest.mark.parametrize("placeholder", ["N/A", "n/a", "none", "not applicable", "TBD", "-"])
+def test_a_placeholder_reassessment_trigger_does_not_reach_the_research_view(placeholder):
+    from finance.report_model import _build_research_view
+
+    pipeline = _pipeline_with_final_output(_final_output(
+        reassessment_triggers=["A real trigger: new guidance is published.", placeholder]))
+    view = _build_research_view({}, pipeline, "COMPLETE", {"status": "READY"}, None)
+    triggers = next((items for label, items in view.condition_groups
+                     if label == "Reassessment triggers"), ())
+    assert placeholder not in triggers
+    assert "A real trigger: new guidance is published." in triggers
+
+
+def test_a_placeholder_only_condition_group_is_dropped_entirely():
+    from finance.report_model import _build_research_view
+
+    pipeline = _pipeline_with_final_output(_final_output(
+        conditions_that_strengthen_the_view=["N/A"]))
+    view = _build_research_view({}, pipeline, "COMPLETE", {"status": "READY"}, None)
+    labels = [label for label, _items in view.condition_groups]
+    assert "Upgrade conditions" not in labels
+
+
+def test_real_conditions_still_survive_the_research_view():
+    from finance.report_model import _build_research_view
+
+    pipeline = _pipeline_with_final_output(_final_output(
+        conditions_that_weaken_the_view=["Margin compression beyond 2 points."]))
+    view = _build_research_view({}, pipeline, "COMPLETE", {"status": "READY"}, None)
+    downgrade = next((items for label, items in view.condition_groups
+                      if label == "Downgrade conditions"), ())
+    assert downgrade == ("Margin compression beyond 2 points.",)
+
+
+# ---------------------------------------------------------------------------
+# `model_invalid_reasons` -- deterministic DCF-engine text, rendered with no
+# content check at all (`tuple(dcf.get("validation_reasons") or ())`). The
+# engine never produces a blank reason today, but a bullet list rendered
+# straight from a dict with no check is the same bypass shape, just with a
+# currently-safe producer on the other end.
+# ---------------------------------------------------------------------------
+
+def test_blank_dcf_validation_reasons_are_filtered_from_model_invalid_reasons():
+    from finance.dcf_packet import ValuationStatus
+    from finance.report_model import _build_valuation
+
+    dcf = {"available": True,
+          "validation_reasons": ["DCF_NEGATIVE_TERMINAL_FCFF: negative terminal-year FCFF "
+                                 "in scenario(s) bear.", "", "   "]}
+    view = _build_valuation({"dcf": dcf, "quote": {"price": 100.0}},
+                            ValuationStatus.FORECAST_PATH_INVALID)
+    assert view.model_invalid_reasons == (
+        "DCF_NEGATIVE_TERMINAL_FCFF: negative terminal-year FCFF in scenario(s) bear.",)
+
+
+@pytest.mark.parametrize("blank", ["", "  ", ".", "N/A"])
 def test_a_blank_risk_fails_the_risk_reviewer_schema(blank):
     raw = {
         "key_risks": [{"risk": blank, "severity": "high",

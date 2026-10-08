@@ -253,3 +253,94 @@ def select_relevant_item_blocks(text: str, relevant_items: Sequence[str],
     if max_blocks is not None:
         blocks = blocks[:max_blocks]
     return blocks
+
+
+# ---------------------------------------------------------------------------
+# 4. MD&A section selection for periodic filings (10-Q/10-K) -- Phase H.32
+#    section 1-4: current management guidance may appear outside the
+#    earnings-release exhibit, most commonly in the periodic filing's own
+#    MD&A item. `_ITEM_HEADING` above requires the 8-K's decimal sub-item
+#    format ("Item 2.03") and deliberately does not match a 10-Q/10-K's
+#    bare-number item headings ("Item 2", "Item 7") -- reusing it here would
+#    risk 8-K sub-item text matching a periodic filing's own cross-references
+#    to ITS items. This is a SEPARATE, narrowly-scoped pattern for exactly
+#    one purpose: finding the MD&A item and nothing else in the filing, most
+#    importantly never Item 1A (Risk Factors), which sits textually
+#    adjacent to it in a 10-K and must never be fed to the guidance reader.
+# ---------------------------------------------------------------------------
+
+# The SEC's own mandated title (Regulation S-K Item 303) for the MD&A item --
+# "Item 2" in a 10-Q, "Item 7" in a 10-K. Matched on the FULL TITLE WORDING,
+# not the bare item number, because the item NUMBER alone ("Item 2") also
+# names a different section in a 10-K (Properties) and recurs across a
+# 10-Q's Part I and Part II -- the title is what SEC rules make this exact
+# section state verbatim at its own heading, so matching it is recognising
+# document STRUCTURE, not interpreting content (same KEEP-class discipline
+# `_ITEM_HEADING` above already uses for 8-K item codes).
+_MDA_HEADING = re.compile(
+    r"(?i)\bItem\s+\d{1,2}[A-Z]?\.?\s*"
+    r"Management'?s?\s+Discussion\s+and\s+Analysis\s+of\s+Financial\s+Condition\s+"
+    r"and\s+Results\s+of\s+Operations\b")
+
+# Full, SEC-mandated titles of the items that conventionally follow MD&A.
+# Matched the same way (full title, not bare number) so an in-prose
+# cross-reference like "see Item 7A" -- which never repeats the complete
+# official title immediately after the item number -- cannot be mistaken
+# for the section's own heading and truncate the MD&A block early.
+_NEXT_MAJOR_SECTION_TITLE = re.compile(
+    r"(?i)\bItem\s+\d{1,2}[A-Z]?\.?\s*(?:"
+    r"Quantitative\s+and\s+Qualitative\s+Disclosures\s+About\s+Market\s+Risk"
+    r"|Controls\s+and\s+Procedures"
+    r"|Financial\s+Statements(?:\s+and\s+Supplementary\s+Data)?"
+    r"|Legal\s+Proceedings"
+    r"|Risk\s+Factors"
+    r"|Unregistered\s+Sales\s+of\s+Equity\s+Securities"
+    r"|Defaults\s+Upon\s+Senior\s+Securities"
+    r"|Mine\s+Safety\s+Disclosures"
+    r"|Other\s+Information"
+    r"|Exhibits(?:\s+and\s+Financial\s+Statement\s+Schedules)?"
+    r")\b")
+
+
+def select_mda_section(text: str, max_chars: Optional[int] = None) -> Optional[ItemBlock]:
+    """The MD&A item block of a 10-Q/10-K, structurally bounded -- or None
+    if the filing's own heading structure cannot be found.
+
+    Bounded at the end by the NEXT recognised major item title (never a bare
+    item number, to avoid an in-text cross-reference ending the block early)
+    or the end of the document. `max_chars` truncates the block at its own
+    end, the same discipline `select_relevant_item_blocks` already uses.
+
+    Phase H.32 live finding (TSLA): EVERY real 10-Q/10-K opens with a Table
+    of Contents that lists the MD&A item's own title again, with only a page
+    number between it and the NEXT item's title -- so the FIRST occurrence
+    of the MD&A heading is routinely the TOC entry, not the body, and
+    bounding from there produced a body of a few dozen characters while the
+    real, multi-thousand-character MD&A sat much later in the document. Not
+    a TSLA-specific condition: a TOC is a universal 10-Q/10-K structural
+    convention, so the first-match assumption was wrong for every filer, not
+    just this one. Fixed by taking whichever occurrence of the heading
+    produces the LARGEST span before the next major item title -- the TOC
+    entry's span is always tiny (a title and a page number), while the body
+    section's span is the section itself. No length threshold is tuned: the
+    comparison is relative, between the filing's own candidate spans.
+    """
+    matches = list(_MDA_HEADING.finditer(text))
+    if not matches:
+        return None
+    best_match, best_end = None, None
+    for match in matches:
+        following = _NEXT_MAJOR_SECTION_TITLE.search(text, match.end())
+        end = following.start() if following is not None else len(text)
+        if best_match is None or (end - match.start()) > (best_end - best_match.start()):
+            best_match, best_end = match, end
+    match, end = best_match, best_end
+    start = match.start()
+    body = text[start:end].strip()
+    if not body:
+        return None
+    if max_chars is not None and len(body) > max_chars:
+        body = body[:max_chars]
+        end = start + len(body)
+    return ItemBlock(item_code="MDA", heading=match.group(0).strip(),
+                     text=body, start=start, end=end)

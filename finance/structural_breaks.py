@@ -576,6 +576,72 @@ _ITEM_EVENT_TYPES = (
     ("3.02", PostBalanceSheetEventType.ISSUER_EQUITY_ISSUANCE),
 )
 
+# ---------------------------------------------------------------------------
+# Phase H.32, section 7-9 — funded vs. merely committed
+# ---------------------------------------------------------------------------
+#
+# THE BUG THIS FIXES. Item 2.03 ("Creation of a Direct Financial Obligation")
+# is filed identically whether a company draws $2B in cash or merely signs a
+# five-year revolver it has not touched. A live issuer's undrawn credit
+# facility -- the filing said in so many words that no loans were outstanding
+# -- was rendered as "an issuance of debt by the company" on that item code
+# alone. The item code proves an obligation-creating agreement exists; it
+# proves nothing about whether a dollar moved.
+#
+# This mirrors, at the metadata-only layer this module operates on, the rule
+# `finance/documents/event_schema.py` already states for the gated V2 reader:
+# "`funded` is a claim requiring its own evidence, never an inference from
+# the event TYPE." `classify_security_event`'s event_type output is left
+# untouched here (ISSUER_DEBT_ISSUANCE still names the KIND of instrument,
+# exactly as the V2 ground truth keeps it for a committed-but-undrawn
+# facility) -- what changes is that `describe_event` and `event_impact` now
+# take a separate, evidence-grounded `funded` tri-state (True / False / None
+# for "not established") rather than assuming True for every debt-shaped
+# event unconditionally.
+#
+# `find_post_balance_sheet_events` never reads the filing body (by design,
+# see its own docstring), so in practice `funded` is almost always None here
+# -- the SEC's own short item-code label is never itself proof of a draw.
+# None is treated the same as False: a capacity-neutral description, and
+# `affects_debt=False`, until SOME evidence says otherwise. This is the
+# conservative default section 7 requires, not a guess that happens to be
+# less alarming.
+_FUNDED_EVIDENCE_LANGUAGE = re.compile(
+    r"(?i)\b(?:drew|borrowed|drawdown|draw-down|drawn\s+(?:the\s+)?(?:full\s+)?\$|"
+    r"(?:issued\s+and\s+sold|sold\s+and\s+issued)|"
+    r"issued\s+(?:\$[\d,.]+|notes|shares|bonds|securities)|"
+    r"received\s+(?:net\s+)?proceeds|net\s+proceeds\s+(?:of|were)|"
+    r"closed\s+the\s+(?:offering|sale|transaction)|"
+    r"completed\s+the\s+(?:offering|issuance)|"
+    r"amounts?\s+(?:are\s+)?outstanding|\bfunded\b)\b")
+
+# Explicit "nothing has moved" language wins over any funded-sounding word
+# found nearby -- a filing routinely uses "borrowed" or "draw" while stating
+# that no draw has actually occurred ("no amounts have been drawn").
+_UNFUNDED_EVIDENCE_LANGUAGE = re.compile(
+    r"(?i)\bno\s+(?:amounts?|loans?|borrowings?)\s+(?:have\s+been\s+|were\s+|are\s+"
+    r"(?:currently\s+)?)?(?:drawn|outstanding)\b|"
+    r"\bundrawn\b|\bno\s+(?:current\s+)?plans?\s+to\s+draw\b|"
+    r"\bavailable(?:\s+for)?\s+(?:future\s+)?borrowing\b")
+
+
+def _detect_funded_evidence(haystack: str) -> Optional[bool]:
+    """Whether THIS event's own evidence confirms funds actually moved.
+
+    True only on affirmative funded language; False when the filing itself
+    says nothing was drawn (which must block a funded reading even if
+    funded-sounding words appear elsewhere in the same text); None -- the
+    common case for a bare item code -- when neither is established, which
+    callers must treat as "not funded" rather than "unknown, so assume yes".
+    """
+    if not haystack:
+        return None
+    if _UNFUNDED_EVIDENCE_LANGUAGE.search(haystack):
+        return False
+    if _FUNDED_EVIDENCE_LANGUAGE.search(haystack):
+        return True
+    return None
+
 # Forms whose very existence names the event.
 _FORM_EVENT_TYPES = {
     # A Form 144 is notice of a proposed sale of RESTRICTED stock by an
@@ -633,11 +699,33 @@ def classify_security_event(form: str, items: str, description: str = "",
     return PostBalanceSheetEventType.UNKNOWN, 0.2
 
 
-def event_impact(event_type: str) -> dict:
-    """Section 24's deterministic impact flags for one event type."""
-    return dict(_EVENT_IMPACT.get(event_type, _EVENT_IMPACT[
-        PostBalanceSheetEventType.UNKNOWN]))
+def event_impact(event_type: str, funded: Optional[bool] = None) -> dict:
+    """Section 24's deterministic impact flags for one event type.
 
+    Phase H.32, section 7: for a debt-shaped event, the static per-TYPE table
+    says what CAN be affected; whether current funded debt actually is still
+    needs its own evidence. `funded is not True` (the unestablished case
+    included) clears `affects_debt`/`affects_cash`/`affects_enterprise_value_
+    bridge` -- capacity is not a cash flow and not a balance-sheet change --
+    while leaving `requires_reassessment` set, because a new facility is
+    still worth a reader's attention even when it adds no funded debt.
+    """
+    impact = dict(_EVENT_IMPACT.get(event_type, _EVENT_IMPACT[
+        PostBalanceSheetEventType.UNKNOWN]))
+    if event_type == PostBalanceSheetEventType.ISSUER_DEBT_ISSUANCE and funded is not True:
+        impact["affects_debt"] = False
+        impact["affects_cash"] = False
+        impact["affects_enterprise_value_bridge"] = False
+    return impact
+
+
+# Phase H.32, section 8: valid wording for a debt-shaped event that is not
+# established as funded. Never "issued debt" / "increased debt by $X" --
+# those are claims about cash moving, and this path has no evidence of that.
+_FINANCING_COMMITMENT_DESCRIPTION = (
+    "the company established a new credit facility or other financing "
+    "arrangement; this filing does not establish that any amount has been "
+    "drawn, borrowed, or is currently outstanding")
 
 _EVENT_DESCRIPTIONS = {
     PostBalanceSheetEventType.ISSUER_EQUITY_ISSUANCE:
@@ -665,7 +753,15 @@ _EVENT_DESCRIPTIONS = {
 }
 
 
-def describe_event(event_type: str) -> str:
+def describe_event(event_type: str, funded: Optional[bool] = None) -> str:
+    """Prose for one classified event. Section 8: a debt-shaped event whose
+    own evidence does not confirm funding is described as capacity, never as
+    debt issued -- `funded is not True` covers both an explicit "undrawn"
+    finding and the ordinary case where nothing establishes funding either
+    way.
+    """
+    if event_type == PostBalanceSheetEventType.ISSUER_DEBT_ISSUANCE and funded is not True:
+        return _FINANCING_COMMITMENT_DESCRIPTION
     return _EVENT_DESCRIPTIONS.get(event_type, _EVENT_DESCRIPTIONS[
         PostBalanceSheetEventType.UNKNOWN])
 
@@ -682,12 +778,17 @@ class PostBalanceSheetEvent:
     event_type: str = PostBalanceSheetEventType.UNKNOWN
     confidence: float = 0.0
     impact: dict = field(default_factory=dict)
+    # Phase H.32: tri-state, evidence-grounded (see `_detect_funded_evidence`).
+    # None means "not established", which `describe_event`/`event_impact`
+    # both treat the same as False -- never as an unknown that defaults to
+    # funded.
+    funded: Optional[bool] = None
 
     def to_dict(self) -> dict:
         return {"filed": self.filed, "form": self.form, "items": self.items,
                 "description": self.description, "accession": self.accession,
                 "event_type": self.event_type, "confidence": self.confidence,
-                "impact": dict(self.impact)}
+                "impact": dict(self.impact), "funded": self.funded}
 
     @property
     def implies_dilution(self) -> bool:
@@ -738,18 +839,20 @@ def find_post_balance_sheet_events(submissions: Optional[dict],
             description = "; ".join(matched)
             event_type, confidence = classify_security_event(
                 form, item_text, description)
+            funded = _detect_funded_evidence(description)
             out.append(PostBalanceSheetEvent(
                 filed=filed, form=form, items=item_text.strip(),
-                description=f"{describe_event(event_type)} ({description})",
+                description=f"{describe_event(event_type, funded)} ({description})",
                 accession=accession, event_type=event_type, confidence=confidence,
-                impact=event_impact(event_type)))
+                impact=event_impact(event_type, funded), funded=funded))
         elif form in _CAPITAL_MARKETS_FORMS:
             event_type, confidence = classify_security_event(form, "", "")
+            funded = _detect_funded_evidence("")
             out.append(PostBalanceSheetEvent(
                 filed=filed, form=form, items="",
-                description=describe_event(event_type),
+                description=describe_event(event_type, funded),
                 accession=accession, event_type=event_type, confidence=confidence,
-                impact=event_impact(event_type)))
+                impact=event_impact(event_type, funded), funded=funded))
         if len(out) >= limit:
             break
     return out
