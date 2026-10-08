@@ -168,12 +168,39 @@ def same_duration(left: str, right: str) -> bool:
     guidance figure may legitimately be compared against a trailing-twelve-
     month actual. QUARTER and TTM do not, which is the comparison that
     produced a -73% growth rate.
+
+    Same LENGTH is necessary but not sufficient for that annual-vs-TTM case:
+    the trailing window still has to be the issuer's PRIOR comparable
+    period, not one that overlaps the period being guided -- see
+    `periods_overlap` and its caller in `_check_growth`.
     """
     left_months = duration_months(left)
     right_months = duration_months(right)
     if left_months is None or right_months is None:
         return False
     return left_months == right_months
+
+
+def periods_overlap(left_start: Optional[str], left_end: Optional[str],
+                    right_start: Optional[str], right_end: Optional[str]) -> bool:
+    """Do two [start, end] calendar windows share any time?
+
+    ISO 'YYYY-MM-DD' strings compare correctly as plain strings, so no date
+    parsing is needed. STRICT inequalities, deliberately: two annual periods
+    that are truly adjacent share only the single boundary instant (one
+    ends the day the next begins), and that boundary touch is the ordinary,
+    CORRECT case -- FY2025 ending 2025-12-28 and FY2026 beginning 2025-12-28
+    are prior-year and current-year, not an overlap. A `<=` here would
+    reject every legitimate adjacent-period comparison this function exists
+    to allow.
+
+    Returns False (no finding either way) whenever any bound is missing --
+    silence is the right answer when there is nothing to compare, not a
+    guess that two unstated ranges happen not to overlap.
+    """
+    if not (left_start and left_end and right_start and right_end):
+        return False
+    return left_start < right_end and right_start < left_end
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +423,19 @@ INCOMPATIBLE_ACCOUNTING_BASIS = "INCOMPATIBLE_ACCOUNTING_BASIS"
 INCOMPATIBLE_FLOW_INSTANT = "INCOMPATIBLE_FLOW_INSTANT"
 INCOMPATIBLE_FCF_DEFINITION = "INCOMPATIBLE_FCF_DEFINITION"
 
+# Phase H.33 live finding (JNJ): FY2026 revenue guidance ($101.1B) divided by
+# trailing-twelve-month revenue ending Q2 FY2026 ($97.93B) produced 3.2%
+# growth -- both sides are twelve-month windows (`same_duration` passes) and
+# neither shares a (fiscal_year, fiscal_quarter) with the other, so nothing
+# existing caught it. But the TTM (2025-06-30..2026-06-28) is not FY2026's
+# comparable prior period -- it OVERLAPS FY2026 itself (it already contains
+# Q1 and Q2 of FY2026), so dividing by it answers a different question than
+# "how much will the company grow this year". This is the general rule the
+# single same-fiscal-year check above does not cover: it only catches the
+# exact-same-period case, never a PARTIAL overlap between a trailing window
+# and the period being guided.
+OVERLAPPING_COMPARISON_PERIODS = "OVERLAPPING_COMPARISON_PERIODS"
+
 # Not a failure: a legitimate statement that two figures are different
 # things and were never meant to agree. Section 13 -- a current share count
 # and a weighted-average one differ BY CONSTRUCTION, and reporting that as a
@@ -601,6 +641,22 @@ def _check_growth(left: SemanticFact, right: SemanticFact) -> Compatibility:
                    f"{left.label()} and {right.label()} are different quarters of the year; "
                    "a sequential quarter-on-quarter change is not a year-over-year growth "
                    "rate.")
+
+    # Phase H.33 (JNJ): the general case the exact-same-period check above
+    # does not cover. FY2026 guidance and a trailing-twelve-month actual
+    # ending inside FY2026 are not the same (fiscal_year, fiscal_quarter)
+    # pair -- the TTM carries no fiscal_year at all here -- so that check
+    # never fires, and both sides are still "twelve months" so `same_
+    # duration` passes. Only the actual CALENDAR windows show that the TTM
+    # already contains two quarters of the year being guided. Checked only
+    # when both sides carry real dates, so every existing caller that never
+    # set them is completely unaffected.
+    if periods_overlap(left.start_date, left.end_date, right.start_date, right.end_date):
+        return _no(operation, OVERLAPPING_COMPARISON_PERIODS,
+                   f"{left.label()} ({left.start_date}..{left.end_date}) and {right.label()} "
+                   f"({right.start_date}..{right.end_date}) cover overlapping time; a trailing "
+                   "or year-to-date window that already reaches into the period being "
+                   "guided is not a prior-year comparison, whatever its labelled frequency.")
 
     if (left.accounting_basis != right.accounting_basis
             and AccountingBasis.UNKNOWN not in (left.accounting_basis,

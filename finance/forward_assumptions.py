@@ -40,7 +40,7 @@ materially from stated guidance has to carry an explicit justification, and
 if it does not, the guidance-anchored value is used instead.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import tools.config as config
@@ -669,6 +669,35 @@ def _annual_growth_bases(company_facts):
     return bases
 
 
+def _inferred_forward_annual_window(company_facts):
+    """(start, end) a CURRENT fiscal-year guidance figure implies, or
+    (None, None) when it cannot be inferred.
+
+    Phase H.33: guidance carries no start/end of its own -- the period has
+    not happened yet, so nothing is "reported" for it -- but an overlap
+    check needs calendar bounds on BOTH sides to mean anything (see
+    `finance.semantics.periods_overlap`). The guided year begins exactly
+    where the issuer's latest REPORTED annual period ends (JNJ's FY2026
+    guidance follows FY2025's close on 2025-12-28) and runs about twelve
+    months from there. Approximate on purpose: a few days of slack around
+    the true fiscal year end cannot change whether a trailing window a full
+    quarter or more off that boundary overlaps it.
+    """
+    import datetime as _dt
+
+    from finance import period_facts as pf_module
+
+    annual = [p for p in pf_module.annual_periods(company_facts, "revenue") if p.value]
+    if not annual or not getattr(annual[-1], "end", None):
+        return None, None
+    start = annual[-1].end
+    try:
+        end = (_dt.date.fromisoformat(start) + _dt.timedelta(days=366)).isoformat()
+    except ValueError:
+        return None, None
+    return start, end
+
+
 def _apply_absolute_revenue_guidance(evidence, entry, company_facts):
     """Turn a guided revenue LEVEL into a growth rate, or refuse to.
 
@@ -740,6 +769,18 @@ def _apply_absolute_revenue_guidance(evidence, entry, company_facts):
         #
         # Both are twelve months, so both pass `compatible_for(GROWTH, ...)`
         # for the same reason; neither is assumed, each is checked.
+        #
+        # Phase H.33 (JNJ): the TTM candidate passing that check is exactly
+        # the bug -- it is twelve months, but when it ends INSIDE the year
+        # being guided (ending Q2 FY2026 against FY2026 guidance) it is not
+        # FY2026's prior comparable period, it is a window that already
+        # contains two quarters of FY2026 itself. `guided` carries no
+        # calendar bounds of its own (the period has not happened yet), so
+        # an overlap check needs them inferred from the issuer's own
+        # reporting cadence before the loop can see the conflict.
+        window_start, window_end = _inferred_forward_annual_window(company_facts)
+        if window_start:
+            guided = replace(guided, start_date=window_start, end_date=window_end)
         for base_value, base_frequency, base_start, base_end, base_definition in \
                 _annual_growth_bases(company_facts):
             base = sem.SemanticFact(
