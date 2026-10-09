@@ -1870,7 +1870,23 @@ def _dcf_inputs_from_facts(symbol, facts, forecast_years):
         # difference between a debt-free company and one whose debt was
         # unknown. Absence stays absent; the packet refuses on it.
         total_debt = state.total_debt.value
-        cash_and_cash_equivalents = state.value("cash_and_cash_equivalents") or 0.0
+        # Phase H.36, section 2: the SAME rule as `total_debt` immediately
+        # above, now applied to cash -- a missing `cash_and_cash_equivalents`
+        # (no component reported on the current balance sheet, e.g. an
+        # issuer whose current XBRL tagging doesn't carry this concept on its
+        # own) is not the same fact as a reported zero, and defaulting it to
+        # 0.0 here produced a net_debt bit-identical to gross total_debt with
+        # no signal anywhere that cash was never actually netted out (found
+        # live: CF Industries' 2026-06-30 10-Q does not tag
+        # CashAndCashEquivalentsAtCarryingValue; the last period that did was
+        # 2019-12-31, correctly marked stale/unused by finance/freshness.py,
+        # but silently treated as $0 here). Preserved as None; `net_debt`
+        # becomes genuinely unavailable below and in `_packet_values`, and
+        # `net_debt` is already a REQUIRED_INPUTS member in
+        # finance/dcf_packet.py, so "the packet refuses on it" exactly as it
+        # already does for a missing total_debt -- the SAME existing
+        # mechanism, not a new one.
+        cash_and_cash_equivalents = state.value("cash_and_cash_equivalents")
         short_term_investments = state.value("short_term_investments") or 0.0
         preferred_equity = state.value("preferred_equity") or 0.0
         minority_interest = state.value("minority_interest") or 0.0
@@ -1886,7 +1902,9 @@ def _dcf_inputs_from_facts(symbol, facts, forecast_years):
         # means "no debt component was reported", not "this company has none",
         # and the two must not render as the same number in an equity bridge.
         total_debt = balance_values.get("total_debt")
-        cash_and_cash_equivalents = balance_values.get("cash_and_cash_equivalents") or 0.0
+        # Phase H.36, section 2: same rule as `total_debt` on this line --
+        # see the SEC-path comment above for why `or 0.0` here is the defect.
+        cash_and_cash_equivalents = balance_values.get("cash_and_cash_equivalents")
         short_term_investments = balance_values.get("short_term_investments") or 0.0
         balance_sheet_as_of = balance[0].get("fiscal_date") if balance else None
 
@@ -1906,17 +1924,32 @@ def _dcf_inputs_from_facts(symbol, facts, forecast_years):
     net_debt_reconciliation = None
     if state is not None and state.net_debt_detail and total_debt is not None:
         from finance import net_debt as net_debt_module
-        expected = total_debt - cash_and_cash_equivalents - eligible_sti
         recalculated = state.net_debt_detail.get("net_debt")
+        # Phase H.36, section 2: `cash_and_cash_equivalents` can now be None
+        # (see above) -- `expected` cannot be computed without it, and that
+        # is itself the finding, not a reason to skip straight to "reconciled".
+        if cash_and_cash_equivalents is None:
+            expected = None
+            reconciled = False
+        else:
+            expected = total_debt - cash_and_cash_equivalents - eligible_sti
+            # Phase H.36: this previously read `recalculated is None or ...`,
+            # treating "the authoritative recalculation is unavailable" as
+            # automatically reconciled -- backwards in every case, not only
+            # a missing-cash one. `recalculated` (finance/net_debt.py::
+            # compute_net_debt) is None exactly when net debt genuinely could
+            # not be established, which is precisely the case that must NOT
+            # be reported as reconciled.
+            reconciled = (recalculated is not None
+                         and abs(expected - recalculated)
+                         <= max(abs(expected) * net_debt_module
+                                .RECONCILIATION_RELATIVE_TOLERANCE,
+                                net_debt_module.RECONCILIATION_ABSOLUTE_FLOOR))
         net_debt_reconciliation = {
             "policy": policy,
             "dcf_net_debt": expected,
             "recalculated_net_debt": recalculated,
-            "reconciled": (recalculated is None
-                           or abs(expected - recalculated)
-                           <= max(abs(expected) * net_debt_module
-                                  .RECONCILIATION_RELATIVE_TOLERANCE,
-                                  net_debt_module.RECONCILIATION_ABSOLUTE_FLOOR)),
+            "reconciled": reconciled,
             "components": (state.net_debt_detail.get("components") or {}),
             "evidence_ids": ((state.net_debt_detail.get("components") or {})
                              .get("evidence_ids") or {}),
@@ -2023,9 +2056,20 @@ def _packet_values(symbol: str, facts: dict, dcf_inputs: dict,
     basis = facts.get("dcf_financial_basis") or {}
     reconciliation = basis.get("net_debt_reconciliation") or {}
     evidence_ids = reconciliation.get("evidence_ids")
-    net_debt = ((dcf_inputs.get("total_debt") or 0.0)
-                - (dcf_inputs.get("cash_and_cash_equivalents") or 0.0)
-                - (dcf_inputs.get("eligible_short_term_investments") or 0.0))
+    # Phase H.36, section 2: the SAME "absence stays absent" rule as
+    # `_dcf_inputs_from_facts` above (Part 16's fix for total_debt, now
+    # extended to cash here too) -- `or 0.0` on either operand would make a
+    # genuinely-unreported cash balance indistinguishable from a reported
+    # zero, producing a net_debt bit-identical to gross total_debt. `net_debt`
+    # is a REQUIRED_INPUTS member in finance/dcf_packet.py, so leaving it None
+    # here makes the packet refuse through that EXISTING mechanism rather than
+    # silently substituting gross debt.
+    _net_debt_total_debt = dcf_inputs.get("total_debt")
+    _net_debt_cash = dcf_inputs.get("cash_and_cash_equivalents")
+    net_debt = (
+        (_net_debt_total_debt - _net_debt_cash
+         - (dcf_inputs.get("eligible_short_term_investments") or 0.0))
+        if (_net_debt_total_debt is not None and _net_debt_cash is not None) else None)
     return {
         "financial_base": basis.get("base_revenue_basis"),
         "revenue": dcf_inputs.get("base_revenue"),
@@ -3557,11 +3601,25 @@ def _freshness_readiness_signals(facts: dict) -> Tuple[List[str], List[str]]:
     basis = facts.get("dcf_financial_basis") or {}
     reconciliation = basis.get("net_debt_reconciliation") or {}
     if reconciliation and reconciliation.get("reconciled") is False:
-        blocking.append(
-            f"Net debt used by the valuation ({reconciliation.get('dcf_net_debt'):,.0f}) does "
-            f"not reconcile with the figure recalculated from the selected balance-sheet "
-            f"components ({reconciliation.get('recalculated_net_debt'):,.0f}) under the "
-            f"{reconciliation.get('policy')!r} policy; the equity bridge cannot be relied on.")
+        dcf_net_debt = reconciliation.get("dcf_net_debt")
+        recalculated_net_debt = reconciliation.get("recalculated_net_debt")
+        if dcf_net_debt is None or recalculated_net_debt is None:
+            # Phase H.36, section 2: `reconciled: False` now also covers "a
+            # required component (e.g. cash_and_cash_equivalents) was not
+            # reported at all," not only "two derivations disagree beyond
+            # tolerance" -- these need their own message, since neither
+            # figure is a number to format in this case.
+            blocking.append(
+                "Net debt could not be established: a required balance-sheet component "
+                f"(see the {reconciliation.get('policy')!r} policy) was not reported for the "
+                "current period, so gross debt cannot be netted against cash. The equity "
+                "bridge cannot be relied on.")
+        else:
+            blocking.append(
+                f"Net debt used by the valuation ({dcf_net_debt:,.0f}) does "
+                f"not reconcile with the figure recalculated from the selected balance-sheet "
+                f"components ({recalculated_net_debt:,.0f}) under the "
+                f"{reconciliation.get('policy')!r} policy; the equity bridge cannot be relied on.")
     elif (state.get("net_debt_detail") or {}).get("reconciled") is False:
         limiting.append(
             "Net debt could not be fully reconciled against the issuer's own reported debt "

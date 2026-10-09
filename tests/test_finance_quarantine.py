@@ -41,8 +41,12 @@ def test_every_pattern_has_a_stable_id_and_a_severity():
     # 37 original + 17 added by Phase H.34 (generalized single-metric
     # interpretation rulebook: liquidity/debt-servicing/leverage/growth/
     # cash-generation/DCF-invalid overreach, independent of business model)
-    # + 1 added by Phase H.35 (negative modeled equity != calculation error).
-    assert len(cv.RULES) == 55
+    # + 1 added by Phase H.35 (negative modeled equity != calculation error)
+    # + 3 added by Phase H.36 (debt-servicing pressure/difficulty wording and
+    # bare financial-distress wording -- both now evidence-category-gated via
+    # finance/research_pipeline.py::_debt_service_exempt_findings -- plus the
+    # ambiguous "most recent complete financial statements" freshness ban).
+    assert len(cv.RULES) == 58
     for rule in list(cp.RULES) + list(cv.RULES):
         assert rule.rule_id
         assert rule.severity in cp.Severity.ALL

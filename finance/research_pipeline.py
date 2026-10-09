@@ -1053,7 +1053,18 @@ def _validate_claim_fidelity(validated: dict, index, extra_findings=()) -> dict:
                 + _internal_reference_findings(validated)
                 + _guidance_horizon_findings(validated, index)
                 + _guidance_metric_mismatch_findings(validated, index)
-                + _growth_frequency_findings(validated, index))
+                + _growth_frequency_findings(validated, index)
+                + _net_debt_identity_findings(validated)
+                + _fcf_basis_mismatch_findings(validated))
+    # Phase H.36, sections 9-10: a debt-service/financial-distress CONCLUSION
+    # is banned by default (finance/claim_validation.py's CV-708..711) but
+    # may be EARNED with qualifying evidence -- category-based eligibility,
+    # not a phrase-specific exception. Must run AFTER every finding above is
+    # collected (it needs the full candidate list) and BEFORE quarantine is
+    # applied (an exempted finding must never reach it).
+    exempt = _debt_service_exempt_findings(findings, validated)
+    if exempt:
+        findings = [f for f in findings if (f.rule_id, f.field_path) not in exempt]
 
     # Phase H.5, Phase 2: OVERSTATEMENT findings quarantine their field; only
     # FABRICATION (and overstatement on a FAIL-policy field) still fails the
@@ -1445,6 +1456,176 @@ def _growth_frequency_findings(validated, index) -> list:
                 severity=Severity.SEMANTIC_MISUSE, field_path=field_path,
                 matched_span=text[:60]))
             break
+    return findings
+
+
+# Phase H.36, sections 9-10: the only evidence-id SUFFIX this system
+# currently computes that qualifies a debt-service/financial-distress
+# conclusion. Maturity-schedule, covenant-terms, refinancing-pressure and
+# explicit-issuer-disclosure categories have no evidence-id representation
+# anywhere in finance/evidence.py today -- there is nothing for a model to
+# cite that would make those specific categories supportable, so they are
+# simply absent from this list rather than faked with a placeholder entry.
+# Add a suffix here WHEN (not before) this system actually retrieves/
+# computes that category's evidence -- this is deliberately a category
+# allowlist, never a phrase-specific exception.
+_DEBT_SERVICE_QUALIFYING_EVIDENCE_SUFFIXES = ("interest_coverage",)
+# Every rule id in finance/claim_validation.py's _LEVERAGE_DISTRESS_PATTERNS
+# group (CV-708..CV-713 as of Phase H.36) -- the whole group, not a
+# hand-picked subset. A pattern added to that group later needs its id added
+# here too (rule ids are stable/assigned, never auto-discoverable from this
+# module without importing the pattern list itself).
+_DEBT_SERVICE_FAMILY_RULE_IDS = frozenset(
+    {"CV-708", "CV-709", "CV-710", "CV-711", "CV-712", "CV-713"})
+# Matches the ONLY field-path shapes this pipeline's claim-bearing lists
+# produce (see finance/content_policy.py::_walk_fields): "<list>[<i>].<leaf>".
+_LIST_ITEM_FIELD_PATH = re.compile(r"^(\w+)\[(\d+)\]\.(\w+)$")
+# Different stages name their evidence-citation sibling field differently
+# (bull/bear claims and the synthesizer's rationale use "evidence_ids",
+# risk_reviewer's key_risks uses "evidence_cited") -- both are checked rather
+# than threading a per-stage field-name map through this generic function.
+_EVIDENCE_SIBLING_KEYS = ("evidence_ids", "evidence_cited")
+
+
+def _sibling_evidence_ids(validated: dict, field_path: str) -> Optional[list]:
+    """The evidence-citation list living next to the claim text at
+    `field_path` ("claims[1].claim" -> `validated["claims"][1]["evidence_ids"]`
+    or `["evidence_cited"]`), or None when the path doesn't match one of this
+    pipeline's claim-bearing list shapes at all (a bare top-level string
+    field has no sibling list to check, which is different from a list item
+    that simply cited nothing).
+    """
+    match = _LIST_ITEM_FIELD_PATH.match(field_path or "")
+    if not match:
+        return None
+    list_name, index_str, _leaf = match.groups()
+    items = validated.get(list_name)
+    index = int(index_str)
+    if not isinstance(items, list) or index >= len(items) or not isinstance(items[index], dict):
+        return None
+    cited = []
+    for key in _EVIDENCE_SIBLING_KEYS:
+        value = items[index].get(key)
+        if isinstance(value, list):
+            cited.extend(value)
+    return cited
+
+
+def _debt_service_exempt_findings(findings, validated) -> set:
+    """Which (rule_id, field_path) debt-service-family findings cite
+    qualifying evidence in their OWN claim, and should therefore be dropped
+    before quarantine -- the conclusion earns its place with real evidence
+    instead of being banned outright, independent of exactly how it is
+    worded (category-based eligibility, not a phrase-specific exception).
+    """
+    exempt = set()
+    for finding in findings:
+        if finding.rule_id not in _DEBT_SERVICE_FAMILY_RULE_IDS:
+            continue
+        cited = _sibling_evidence_ids(validated, finding.field_path)
+        if cited is None:
+            continue
+        qualifies = any(
+            isinstance(eid, str)
+            and any(eid.endswith(suffix) for suffix in _DEBT_SERVICE_QUALIFYING_EVIDENCE_SUFFIXES)
+            for eid in cited)
+        if qualifies:
+            exempt.add((finding.rule_id, finding.field_path))
+    return exempt
+
+
+# Phase H.36, sections 2-3: "net debt" is a specific calculation (gross debt
+# netted against cash/eligible marketable securities -- finance/net_debt.py),
+# never interchangeable with gross/total/long-term debt even when a claim's
+# own number happens to equal one of them (exactly the live finding this
+# phase traces: a company whose current balance sheet does not report cash
+# separately had its net_debt silently computed as bit-identical to total
+# debt). A claim that SAYS "net debt" must cite net-debt evidence; citing
+# only a gross/total/long-term-debt evidence id for it is describing a
+# different metric under the wrong name.
+NET_DEBT_IDENTITY_MISMATCH = "NET_DEBT_IDENTITY_MISMATCH"
+NET_DEBT_IDENTITY_MISMATCH_RULE_ID = "CV-613"
+_NET_DEBT_MENTION = re.compile(r"\bnet\s+debt\b", re.IGNORECASE)
+_NET_DEBT_QUALIFYING_SUFFIXES = ("net_debt", "net_debt_to_fcf")
+# Section 2's own permitted wording ("net_debt = unavailable. Do not
+# substitute gross debt.") has no evidence id to cite -- finance/evidence.py
+# never indexes a null-valued metric at all (see `_add`'s "nothing to cite
+# when the underlying fact is absent"), so a genuinely-unavailable net debt
+# can never clear the evidence-citation bar below. Disclaiming language is
+# exempt for exactly that reason, same disclaimer-recognizes-absence pattern
+# finance/claim_validation.py already uses throughout.
+_NET_DEBT_DISCLAIMER = re.compile(
+    r"(?i)\bunavailable\b|\bnot\s+(?:reported|available|established)\b|"
+    r"\bcould\s+not\s+be\s+established\b|\bdoes\s+not\s+report\b")
+
+
+def _net_debt_identity_findings(validated: dict) -> list:
+    from finance.content_policy import Finding, Severity, _is_prose_field, _walk_fields
+
+    findings = []
+    for field_path, text in _walk_fields(validated):
+        if not _is_prose_field(field_path) or not _NET_DEBT_MENTION.search(text):
+            continue
+        if _NET_DEBT_DISCLAIMER.search(text):
+            continue
+        cited = _sibling_evidence_ids(validated, field_path)
+        if cited is None:
+            # No sibling citation list at this path shape (e.g. a bare
+            # top-level prose field) -- nothing to check against here; the
+            # pre-existing bare evidence-ID citation requirement elsewhere in
+            # this pipeline is the backstop for those fields.
+            continue
+        has_net_debt_evidence = any(
+            isinstance(eid, str) and any(eid.endswith(s) for s in _NET_DEBT_QUALIFYING_SUFFIXES)
+            for eid in cited)
+        if has_net_debt_evidence:
+            continue
+        findings.append(Finding(
+            rule_id=NET_DEBT_IDENTITY_MISMATCH_RULE_ID, label=NET_DEBT_IDENTITY_MISMATCH,
+            severity=Severity.SEMANTIC_MISUSE, field_path=field_path, matched_span=text[:60]))
+    return findings
+
+
+# Phase H.36, sections 4-5: a debt/FCF-style ratio (fundamental.debt_to_fcf,
+# fundamental.net_debt_to_fcf) is always computed from the ANNUAL fundamental.
+# free_cash_flow figure (finance/metrics.py's own formula), never the
+# trailing-twelve-month current.free_cash_flow -- confirmed live (CF
+# Industries): TTM FCF is $1.91B, the FY FCF debt_to_fcf is actually built
+# from is $1.80B, a genuinely different number over a genuinely different
+# period. A claim citing BOTH a fundamental.*_to_fcf ratio AND a current FCF
+# figure together is citing two different FCF bases as though they describe
+# one number. Structural (evidence-id co-citation), not textual, so it does
+# not depend on parsing a dollar figure out of free text -- this module has
+# never attempted that (see finance/claim_validation.py's own "deliberately
+# NOT implemented" note on numeric matching).
+FCF_BASIS_MISMATCH = "FCF_BASIS_MISMATCH"
+FCF_BASIS_MISMATCH_RULE_ID = "CV-614"
+_FCF_RATIO_EVIDENCE_SUFFIXES = ("debt_to_fcf", "net_debt_to_fcf")
+_CURRENT_FCF_EVIDENCE_SUFFIXES = ("free_cash_flow", "simple_fcf")
+
+
+def _fcf_basis_mismatch_findings(validated: dict) -> list:
+    from finance.content_policy import Finding, Severity, _is_prose_field, _walk_fields
+
+    findings = []
+    for field_path, text in _walk_fields(validated):
+        if not _is_prose_field(field_path):
+            continue
+        cited = _sibling_evidence_ids(validated, field_path)
+        if not cited:
+            continue
+        has_fundamental_ratio = any(
+            isinstance(eid, str) and eid.startswith("fundamental.")
+            and any(eid.endswith(s) for s in _FCF_RATIO_EVIDENCE_SUFFIXES)
+            for eid in cited)
+        has_current_fcf = any(
+            isinstance(eid, str) and eid.startswith("current.")
+            and any(eid.endswith(s) for s in _CURRENT_FCF_EVIDENCE_SUFFIXES)
+            for eid in cited)
+        if has_fundamental_ratio and has_current_fcf:
+            findings.append(Finding(
+                rule_id=FCF_BASIS_MISMATCH_RULE_ID, label=FCF_BASIS_MISMATCH,
+                severity=Severity.SEMANTIC_MISUSE, field_path=field_path, matched_span=text[:60]))
     return findings
 
 
@@ -2629,6 +2810,24 @@ _SHORTFALL_AGAINST_TARGET = re.compile(
     r"below|under)\b[^.]{0,40}?"
     r"\b(?:guidance|outlook|target|consensus|expectations?|forecast)\b")
 
+# Phase H.36, section 12 -- the live bug this traces: "uncertain revenue
+# growth drivers" classified FAVOURABLE, not merely UNCLASSIFIED-and-left-in-
+# place (the narrower defect section 12's routing fix alone would have
+# addressed). Root cause: `_INCREASE_WORDS` matches the BARE SUBSTRING "grow"
+# (`clause.find(w)`, not a word-boundary regex), and "growth" contains "grow"
+# as its own prefix -- so any clause mentioning the NOUN "growth" is read as
+# asserting the VERB "grow" (movement "up"), regardless of what the rest of
+# the sentence actually says about it. "Growth drivers remain uncertain" has
+# no claim that growth is happening, increasing, or doing anything at all; it
+# is a statement that the DRIVERS are unknown. Checked BEFORE subject-aware
+# scoring (which is exactly the stage that misreads it) for the same reason
+# `_NEGATED_DIRECTION` is checked early: the thing being overridden runs
+# later and would answer the wrong question first.
+_UNCERTAINTY_OVERRIDE = re.compile(
+    r"(?i)\b(?:remains?|stays?|is|are)\s+uncertain\b|\buncertain(?:ty)?\b|"
+    r"\bunclear\b|\bunknown\b|\bnot\s+(?:yet\s+)?established\b|"
+    r"\bdoes\s+not\s+establish\b|\bdo\s+not\s+establish\b")
+
 
 def classify_condition_direction(text: str) -> str:
     """FAVORABLE / UNFAVORABLE / BIDIRECTIONAL / UNCLASSIFIED for one
@@ -2652,6 +2851,11 @@ def classify_condition_direction(text: str) -> str:
     lowered = text.lower()
     if any(marker in lowered for marker in _BIDIRECTIONAL_MARKERS):
         return CONDITION_BIDIRECTIONAL
+    # See `_UNCERTAINTY_OVERRIDE`'s own comment: must run before the
+    # subject-aware scorer, which is the stage that misreads "growth" (the
+    # noun) as "grow" (the verb, increasing) via substring matching.
+    if _UNCERTAINTY_OVERRIDE.search(text):
+        return CONDITION_UNCLASSIFIED
 
     # Checked BEFORE the subject-aware scorer, because the scorer reads the
     # direction word this negates and would answer the opposite question.
@@ -3058,6 +3262,21 @@ def route_conditions_by_direction(validated: dict) -> dict:
     rule elsewhere protects a bucket from losing its last entry; it must not
     protect a downgrade filed as an upgrade, because an empty Upgrade
     Conditions list is honest and a wrong one is not.
+
+    Phase H.36, section 12: an UNCLASSIFIED condition -- no deterministic
+    favorable/unfavorable signal at all, e.g. "growth drivers remain
+    uncertain" -- used to stay wherever the model filed it, on the theory
+    that a heuristic with no clear answer should not override a plausible
+    reading. Observed live: that is exactly "inferring a favorable direction
+    from section placement," which this phase explicitly forbids -- an
+    uncertainty statement is not evidence the view got STRONGER merely
+    because it was written under Upgrade Conditions. UNCLASSIFIED now routes
+    to `reassessment_triggers` from EITHER directional bucket, the same
+    destination a BIDIRECTIONAL condition already used -- both say "this
+    could move the view either way," which is a more honest home for an
+    unclassifiable condition than a false certainty on either side. A
+    condition that starts in `reassessment_triggers` and classifies
+    UNCLASSIFIED is unaffected -- it was already in the right place.
     """
     validated = dict(validated)
     routed = {key: [] for key in _CONDITION_BUCKETS.values()}
@@ -3073,8 +3292,12 @@ def route_conditions_by_direction(validated: dict) -> dict:
             if is_circular_price_condition(condition):
                 continue
             actual = classify_condition_direction(condition)
-            destination = (source_key if actual in (CONDITION_UNCLASSIFIED, expected)
-                          else _CONDITION_BUCKETS[actual])
+            if actual == expected:
+                destination = source_key
+            elif actual == CONDITION_UNCLASSIFIED:
+                destination = "reassessment_triggers"
+            else:
+                destination = _CONDITION_BUCKETS[actual]
             if condition not in routed[destination]:
                 routed[destination].append(condition)
     for key, items in routed.items():

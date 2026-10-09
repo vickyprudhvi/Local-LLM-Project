@@ -280,9 +280,17 @@ _CONSENSUS_LANGUAGE_PATTERNS = [
 #  claim and must not slip past a whitespace-only separator (same fix as
 #  finance/content_policy.py's price-target pattern, H.4 corrective patch).
 _DCF_TERMINOLOGY_PATTERNS = [
-    (re.compile(r"\bintrinsic[\s-]+values?\b", re.IGNORECASE),
+    # Phase H.36, section 14: `\bintrinsic[\s-]+values?\b` only tolerated a
+    # hyphen/whitespace between "intrinsic" and "value" -- "intrinsic MODEL
+    # value" (found in a live final-synthesis run) has an intervening word
+    # and slipped through entirely. `(?:\w+\s+){0,1}` allows exactly ONE
+    # intervening word (covers "intrinsic model/equity/company/business/
+    # share/stock value") without matching unrelated prose where "intrinsic"
+    # and "value" merely appear a few words apart in different clauses (that
+    # needs 2+ intervening words and stays unmatched).
+    (re.compile(r"\bintrinsic[\s-]+(?:\w+[\s-]+){0,1}values?\b", re.IGNORECASE),
      "unsupported DCF terminology (intrinsic value -- use 'base/bull/bear modeled value')"),
-    (re.compile(r"\bauthoritative[\s-]+(?:intrinsic[\s-]+)?values?\b", re.IGNORECASE),
+    (re.compile(r"\bauthoritative[\s-]+(?:\w+[\s-]+){0,1}values?\b", re.IGNORECASE),
      "unsupported DCF terminology (authoritative value -- no DCF scenario outranks another)"),
     (re.compile(r"\bfair[\s-]+value[\s-]+targets?\b", re.IGNORECASE),
      "unsupported DCF terminology (fair-value target -- use 'modeled value')"),
@@ -410,10 +418,31 @@ _LEVERAGE_DISTRESS_PATTERNS = [
      "unsupported leverage-distress claim (debt may constrain capital allocation)"),
     (re.compile(r"\b(?:debt|leverage)\s+servicing\s+risk\b", re.IGNORECASE),
      "unsupported leverage-distress claim (debt/leverage servicing risk)"),
+    # Phase H.36, section 9: the spec's own example phrasings -- "debt-
+    # servicing pressure"/"debt-service difficulty"/"debt could become
+    # difficult to service" -- none matched the pre-existing patterns above
+    # (which only covered the word "risk", not "pressure"/"difficulty"/the
+    # "difficult to service" construction). Found via a live gap, not
+    # invented speculatively: finance/research_pipeline.py's
+    # `_debt_service_exempt_findings` lets any of these through when
+    # qualifying evidence (currently: interest_coverage) is cited -- see
+    # that function's own docstring.
+    (re.compile(r"\bdebt[\s-]servic(?:e|ing)\s+(?:pressure|difficult(?:y)?)\b", re.IGNORECASE),
+     "unsupported leverage-distress claim (debt-servicing pressure/difficulty)"),
+    (re.compile(r"\bdebt\s+(?:could|may|might)\s+become\s+difficult\s+to\s+service\b",
+               re.IGNORECASE),
+     "unsupported leverage-distress claim (debt could become difficult to service)"),
     (re.compile(r"\b(?:severe|significant|material|high)\s+(?:financial\s+)?distress\b"
                r"(?:[^.]|\.(?=\d)){0,60}?\b(?:debt|leverage)\b"
                r"|\b(?:debt|leverage)\b(?:[^.]|\.(?=\d)){0,60}?"
-               r"\b(?:severe|significant|material|high)\s+(?:financial\s+)?distress\b",
+               r"\b(?:severe|significant|material|high)\s+(?:financial\s+)?distress\b"
+               # Phase H.36: also the BARE phrase tied to debt/leverage with
+               # no intensifier -- "the company could face financial
+               # distress" is exactly as unsupported without qualifying
+               # evidence as the intensified form, and section 9 lists plain
+               # "financial distress" as one of the phrases requiring it.
+               r"|\bfinancial\s+distress\b(?:[^.]|\.(?=\d)){0,60}?\b(?:debt|leverage)\b"
+               r"|\b(?:debt|leverage)\b(?:[^.]|\.(?=\d)){0,60}?\bfinancial\s+distress\b",
                re.IGNORECASE),
      "unsupported leverage-distress claim (financial distress)"),
 ]
@@ -483,6 +512,33 @@ _DCF_INVALID_OVERREACH_PATTERNS = [
      "unsupported DCF-invalid overreach (negative modeled equity called a calculation error)"),
 ]
 
+# ---------------------------------------------------------------------------
+# Phase H.36, sections 6-8 -- freshness wording must say WHICH period family
+# ---------------------------------------------------------------------------
+#
+# "The most recent complete financial statements are from 2019-12-31" is the
+# exact overgeneralization this phase traces: a narrow, per-concept fact (one
+# balance-sheet line item's last-tagged date, correctly marked stale and
+# unused -- see finance/freshness.py) read back as a claim about the ENTIRE,
+# CURRENT statement set. No reproducible code path was found that leaks the
+# stale date itself into evidence a research stage can see (finance/
+# evidence.py never indexes a per-concept `dcf.input.*` derivation), so this
+# is the wording-level backstop section 7 asks for either way: the ambiguous
+# phrase itself -- not saying whether "complete financial statements" means
+# the latest ANNUAL filing or the latest QUARTERLY one -- is what lets EITHER
+# an annual anchor or a single stale concept get generalized into a claim
+# about statements that are, in fact, current. The qualified alternatives
+# ("latest annual financial statements", "latest quarterly financial
+# statements", "latest reported financial statements") say which period
+# family is meant and are not banned.
+_AMBIGUOUS_FRESHNESS_PATTERNS = [
+    (re.compile(r"\b(?:most\s+recent|latest)\s+complete\s+"
+               r"(?!annual\b|quarterly\b|reported\b)financial\s+statements?\b",
+               re.IGNORECASE),
+     "ambiguous freshness claim (most recent/latest complete financial statements -- "
+     "say annual or quarterly)"),
+]
+
 _ALL_TEXT_PATTERNS = (
     _TECHNICAL_PREDICTION_PATTERNS +
     _SUPERLATIVE_PATTERNS + _CAUSAL_OVERREACH_PATTERNS
@@ -491,7 +547,7 @@ _ALL_TEXT_PATTERNS = (
     + _LIQUIDITY_STRENGTH_PATTERNS + _LIQUIDITY_DISTRESS_PATTERNS
     + _DEBT_SERVICE_SAFETY_PATTERNS + _LEVERAGE_DISTRESS_PATTERNS
     + _GROWTH_SUSTAINABILITY_PATTERNS + _CASH_GENERATION_STRENGTH_PATTERNS
-    + _DCF_INVALID_OVERREACH_PATTERNS
+    + _DCF_INVALID_OVERREACH_PATTERNS + _AMBIGUOUS_FRESHNESS_PATTERNS
 )
 
 # Phase H.5, Phase 2 -- stable rule ids.
@@ -528,6 +584,9 @@ _CLAIM_VALIDATION_RULE_GROUPS = (
      + _DEBT_SERVICE_SAFETY_PATTERNS + _LEVERAGE_DISTRESS_PATTERNS
      + _GROWTH_SUSTAINABILITY_PATTERNS + _CASH_GENERATION_STRENGTH_PATTERNS
      + _DCF_INVALID_OVERREACH_PATTERNS),
+    # Phase H.36 -- freshness-wording ambiguity, its own group for the same
+    # "never renumber an existing id" reason as every group above.
+    ("CV-8", _AMBIGUOUS_FRESHNESS_PATTERNS),
 )
 
 
