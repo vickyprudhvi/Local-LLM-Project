@@ -469,6 +469,18 @@ _DCF_INVALID_OVERREACH_PATTERNS = [
      "unsupported DCF-invalid overreach (company will experience cash-flow problems)"),
     (re.compile(r"\bfcff\s+(?:is\s+)?unsuitable\s+for\s+this\s+company\b", re.IGNORECASE),
      "unsupported DCF-invalid overreach (FCFF unsuitable for this company)"),
+    # Phase H.35, section 14: a negative MODELED equity value is a valid, if
+    # unfavorable, model output under its stated assumptions -- not evidence
+    # the arithmetic broke. Calling it a "calculation error" is itself an
+    # unsupported claim UNLESS the deterministic validator reported one (that
+    # is a fact this module cannot see from text alone, so the ban is
+    # unconditional -- the correct wording names a validator-reported error
+    # via 'dcf.validation_status', never asserts one from the raw value).
+    (re.compile(r"\bnegative\s+(?:modeled\s+)?equity\b(?:[^.]|\.(?=\d)){0,60}?"
+               r"\bcalculation\s+error\b"
+               r"|\bcalculation\s+error\b(?:[^.]|\.(?=\d)){0,60}?"
+               r"\bnegative\s+(?:modeled\s+)?equity\b", re.IGNORECASE),
+     "unsupported DCF-invalid overreach (negative modeled equity called a calculation error)"),
 ]
 
 _ALL_TEXT_PATTERNS = (

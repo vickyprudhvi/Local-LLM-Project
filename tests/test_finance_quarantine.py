@@ -40,8 +40,9 @@ def test_every_pattern_has_a_stable_id_and_a_severity():
     assert len(cp.RULES) == 21
     # 37 original + 17 added by Phase H.34 (generalized single-metric
     # interpretation rulebook: liquidity/debt-servicing/leverage/growth/
-    # cash-generation/DCF-invalid overreach, independent of business model).
-    assert len(cv.RULES) == 54
+    # cash-generation/DCF-invalid overreach, independent of business model)
+    # + 1 added by Phase H.35 (negative modeled equity != calculation error).
+    assert len(cv.RULES) == 55
     for rule in list(cp.RULES) + list(cv.RULES):
         assert rule.rule_id
         assert rule.severity in cp.Severity.ALL

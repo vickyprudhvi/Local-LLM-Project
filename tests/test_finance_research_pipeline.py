@@ -71,6 +71,14 @@ PAYLOAD = {
 
 INDEX = build_evidence_index(PAYLOAD)
 
+# Phase H.35: every prompt-builder now takes the runtime skill text as a
+# required argument (finance/skill_loader.py loads the real file at
+# skills/financial-evidence-analysis/SKILL.md during an actual pipeline run).
+# These are unit tests of prompt ASSEMBLY, not of the skill's own content, so
+# a short marker string stands in -- test_finance_h35_runtime_skill.py checks
+# the real file loads and is actually what gets injected end to end.
+_TEST_SKILL_TEXT = "SKILL TEXT MARKER: evidence-bounded reasoning discipline."
+
 EV1 = "quote.price"
 EV2 = "dcf.net_debt"
 EV3 = "valuation_gap.direction"
@@ -929,7 +937,7 @@ def test_risk_reviewer_prompt_instructs_against_debt_to_equity_in_isolation():
     (unlike a prohibited word), so the prompt text itself is what this test
     verifies."""
     research_manager_output = json.loads(_research_manager_response())
-    system, _user = rp._risk_reviewer_prompt("EVIDENCE", research_manager_output)
+    system, _user = rp._risk_reviewer_prompt("EVIDENCE", research_manager_output, _TEST_SKILL_TEXT)
     assert "debt_to_equity" in system
     assert "ALONE" in system or "alone" in system
     for term in ("net_debt", "current_ratio", "operating cash flow"):
@@ -945,7 +953,7 @@ def test_risk_reviewer_prompt_addresses_not_meaningful_roe_and_debt_to_equity():
     and must point it at the same broader leverage metrics as the
     debt_to_equity-alone guidance above."""
     research_manager_output = json.loads(_research_manager_response())
-    system, _user = rp._risk_reviewer_prompt("EVIDENCE", research_manager_output)
+    system, _user = rp._risk_reviewer_prompt("EVIDENCE", research_manager_output, _TEST_SKILL_TEXT)
     assert "not_meaningful" in system
     assert "not itself evidence" in system.lower() or "not evidence of" in system.lower()
     for term in ("total_debt", "net_debt", "debt_to_fcf", "current_ratio", "operating_cash_flow"):
@@ -956,7 +964,7 @@ def test_shared_guardrails_forbid_dcf_terminology_and_not_meaningful_misuse():
     """Every stage shares one guardrail block (goal 2 + goal 1) -- checked
     once here rather than once per stage, since _stage_prompt embeds
     _SHARED_GUARDRAILS identically into all six."""
-    system, _user = rp._researcher_prompt("bull", "EVIDENCE")
+    system, _user = rp._researcher_prompt("bull", "EVIDENCE", _TEST_SKILL_TEXT)
     for phrase in ("intrinsic value", "authoritative value", "price target",
                   "fair-value target", "consensus value", "not_meaningful"):
         assert phrase in system
@@ -999,7 +1007,7 @@ def test_researcher_prompt_evidence_text_includes_dcf_assumption_items():
     index = build_evidence_index(_dcf_payload_with_assumptions())
     assert "dcf.assumption.revenue_growth.base" in index
     evidence_text = render_evidence_index(index)
-    _system, user = rp._researcher_prompt("bull", evidence_text)
+    _system, user = rp._researcher_prompt("bull", evidence_text, _TEST_SKILL_TEXT)
     assert "dcf.assumption.revenue_growth.base" in user
     assert "dcf.assumption.revenue_growth.bull" in user
 
@@ -1022,7 +1030,7 @@ def test_research_manager_prompt_shows_differing_assumptions_across_scenarios():
     index = build_evidence_index(_dcf_payload_with_assumptions())
     evidence_text = render_evidence_index(index)
     bull_out, bear_out = json.loads(_bull_response()), json.loads(_bear_response())
-    _system, user = rp._research_manager_prompt(evidence_text, bull_out, bear_out, None)
+    _system, user = rp._research_manager_prompt(evidence_text, bull_out, bear_out, None, _TEST_SKILL_TEXT)
     assert "dcf.assumption.revenue_growth.bull: " in user and "0.13" in user
     assert "dcf.assumption.revenue_growth.bear: " in user and "0.05" in user
     assert "scenario=bull" in user and "scenario=bear" in user
@@ -1576,7 +1584,8 @@ def test_final_synthesizer_repairs_an_insufficient_data_stance_end_to_end():
 def test_final_synthesizer_schema_text_mentions_model_invalid_and_inconclusive():
     system, _user = rp._final_synthesizer_prompt("EVIDENCE", {
         "evidence_balance": "mixed", "balanced_assessment": "x"}, {"key_risks": [],
-                                                                    "data_quality_concerns": []})
+                                                                    "data_quality_concerns": []},
+        _TEST_SKILL_TEXT)
     assert "model_invalid" in system
     assert "inconclusive" in system
     assert "dcf.validation_status" in system

@@ -86,9 +86,21 @@ import tools.config as config
 from finance.canonical import conflicting_historical_citations
 from finance.content_policy import contains_internal_reference  # noqa: F401
 from finance.evidence import EvidenceItem, render_evidence_index, validate_evidence_citations
+from finance.skill_loader import try_load_runtime_skill
 
 PIPELINE_VERSION = "research_pipeline_v1"
 TRADINGAGENTS_REVIEWED_COMMIT = "a33fd4c0f134485a43553a2c23a63cb14adbd88f"
+
+# The complete, ordered set of LLM-calling stages -- every one of them is
+# "interpretive" in the sense section 3 means (none of them touch finance/
+# dcf.py, finance/metrics.py, or any other deterministic calculation; see
+# this module's own docstring). Used both to build the fail-closed SKIPPED
+# checkpoint set when the runtime skill cannot be loaded, and as the
+# authoritative stage-name list tests check against.
+_ALL_STAGE_NAMES = (
+    "bull_researcher", "bear_researcher", "rebuttal_round", "research_manager",
+    "risk_reviewer", "final_investment_synthesizer",
+)
 
 _CONFIDENCE_LEVELS = ("low", "medium", "high")
 
@@ -301,40 +313,36 @@ _SHARED_GUARDRAILS = (
     "their circumstances are, so any such sentence would be invented rather than "
     "analysed. Describe what the evidence shows and let the separate 'recommendation' "
     "field carry the characterization on its own.\n"
-    # Phase H.34: distilled from docs/external_skills/buffett-investment-
-    # framework/ (vendored design reference, pinned v0.1.0 -- see that
-    # directory's PROVENANCE.md) -- its evidence-boundary discipline only,
-    # never its investment philosophy, and never as a substitute for the
-    # deterministic backstop in finance/claim_validation.py /
-    # finance/metric_policy.py, which enforces this independently of whether
-    # you follow it.
-    "- A single metric never carries a compound judgment on its own. net_debt below zero "
-    "supports 'net cash position', not 'debt stress' or 'may constrain capital allocation'. "
-    "A current/quick/cash ratio above 1 supports 'current assets exceed current liabilities', "
-    "not 'strong liquidity' -- and one near or below 1 does not by itself support 'liquidity "
-    "stress' either. A low debt-to-equity ratio supports 'relatively low leverage', not 'no "
-    "debt-servicing risk' (that needs interest-coverage, maturity, liquidity, or covenant "
-    "evidence). Positive revenue growth supports 'revenue increased', never 'sustainable' or "
-    "'unsustainable' growth without decomposition evidence -- say the evidence does not "
-    "establish the drivers, rather than guessing which way it cuts. Positive free cash flow "
-    "supports 'positive free cash flow' with the number, never 'strong cash generation' "
-    "without an explicit threshold or comparison. Gross debt exceeding FCF, alone, does not "
-    "support a debt-servicing-risk conclusion. A negative terminal-year DCF cash flow supports "
-    "'this forecast path does not support a valid perpetuity terminal value', never 'the "
-    "company will experience cash-flow problems' or 'FCFF is unsuitable for this company'.\n"
-    "- Guidance for one metric never supports a claim about a different metric, even in the "
-    "same release -- CapEx guidance cannot support a revenue-growth claim; EPS guidance "
-    "cannot support a margin claim.\n"
-    "- When the evidence does not reach one of these permitted conclusions, say what is "
-    "missing and stop there. Do not fill the gap with a plausible-sounding financial story -- "
-    "an unresolved question stated plainly is a complete, correct answer.\n"
     "- Respond with ONLY a single JSON object matching the schema given. No prose "
     "before or after, no markdown code fences, no explanation of the schema.\n"
 )
+# Phase H.35, section 25: the detailed single-metric interpretation rulebook
+# (net_debt/current_ratio/debt_to_equity/growth/FCF/guidance/DCF permitted-vs-
+# banned conclusions) used to be duplicated here as a Python string literal
+# (Phase H.34). It now lives in exactly ONE place -- skills/financial-
+# evidence-analysis/SKILL.md, the actual runtime skill `_stage_prompt` loads
+# and injects below -- so `_SHARED_GUARDRAILS` holds only the truly universal,
+# mechanical invariants (no tools/network, cite real evidence ids, never
+# recalculate, the four kinds-of-number rule, never address the reader,
+# JSON-only output) that apply regardless of which interpretation rules are
+# in force this run.
 
 
-def _stage_prompt(role_instructions, schema_instructions, evidence_text, extra_context=""):
-    system = f"{role_instructions}\n\n{_SHARED_GUARDRAILS}\n{schema_instructions}"
+def _stage_prompt(role_instructions, schema_instructions, evidence_text, skill_text,
+                  extra_context=""):
+    """Assemble one stage's (system, user) prompt pair.
+
+    `skill_text` is the full, verbatim content of `skills/financial-evidence-
+    analysis/SKILL.md` (see finance/skill_loader.py) -- a REQUIRED positional
+    argument, not an optional extra, so a caller cannot forget it and silently
+    run a stage without the discipline it carries. `run_research_pipeline`
+    loads it exactly once per run and fails the whole interpretive pipeline
+    closed (section 23) before any stage prompt is ever built if it is
+    missing -- by the time this function runs, `skill_text` is always real
+    content.
+    """
+    system = (f"{role_instructions}\n\n{_SHARED_GUARDRAILS}\n"
+             f"{skill_text}\n\n{schema_instructions}")
     user = f"EVIDENCE INDEX:\n{evidence_text}\n"
     if extra_context:
         user += f"\n{extra_context}\n"
@@ -961,10 +969,18 @@ def _redact_span(text: str, span: str) -> str:
     return text.replace(span, _REDACTION)
 
 
-def _validate_claim_fidelity(validated: dict, index) -> dict:
+def _validate_claim_fidelity(validated: dict, index, extra_findings=()) -> dict:
     """Deterministic backstop (Phase H.3 corrective patch, Problem 5): citing
     a REAL evidence ID (finance/evidence.py) does not stop a model from
     OVERSTATING what that evidence shows in the surrounding free text --
+
+    `extra_findings` (Phase H.35): pre-built Findings from a caller-specific
+    check this function has no way to run itself -- e.g. `_validate_
+    researcher_output`'s bull/bear claim-direction mismatch, which needs to
+    know which SIDE is being validated, a piece of context this generic,
+    stage-agnostic function never receives. Merged into the same findings
+    list and run through the identical quarantine machinery as every check
+    below; defaults to empty so every existing call site is unaffected.
     "industry-leading ROE" and "fortress balance sheet" were both observed
     live, each citing a real evidence ID for an unremarkable metric. Applied
     to the validated output of EVERY stage (not only the
@@ -1031,6 +1047,7 @@ def _validate_claim_fidelity(validated: dict, index) -> dict:
     # sentence is replaced by a withheld marker while the element -- and the
     # stage -- survives.
     findings = (findings
+                + list(extra_findings)
                 + _business_model_claim_findings(validated, index)
                 + _stale_citation_findings(validated, index)
                 + _internal_reference_findings(validated)
@@ -1107,7 +1124,7 @@ def _validate_claim_fidelity(validated: dict, index) -> dict:
 # Stage 1-2: independent bull / bear researcher
 # ---------------------------------------------------------------------------
 
-def _researcher_prompt(side, evidence_text):
+def _researcher_prompt(side, evidence_text, skill_text):
     # Phase H.3 corrective patch (Problem 7): "compelling investment case",
     # "compelling short case", "upside/downside target", "buy opportunity",
     # "sell signal" and similar promotional/action-oriented phrasing are
@@ -1185,7 +1202,7 @@ def _researcher_prompt(side, evidence_text):
         "risk_offset = a factor that may offset a risk (never framed as proof of safety); "
         "catalyst = a specific, evidence-grounded potential future driver."
     )
-    return _stage_prompt(role, schema, evidence_text)
+    return _stage_prompt(role, schema, evidence_text, skill_text)
 
 
 def _business_model_policy_from_index(index):
@@ -1469,6 +1486,66 @@ def _internal_reference_findings(validated) -> list:
     return findings
 
 
+CLAIM_DIRECTION_MISMATCH = "CLAIM_DIRECTION_MISMATCH"
+CLAIM_DIRECTION_MISMATCH_RULE_ID = "CV-611"
+
+# Phase H.35, sections 15-16: a Bull Case claim whose OWN directional language
+# is unfavourable (or a Bear Case claim whose language is favourable) is a
+# clear contradiction between what the claim says and which side it was filed
+# under -- "Revenue increased 1.4%" cannot populate the Bear Case merely
+# because the model chose to put it there.
+#
+# Reuses `classify_condition_direction` -- the existing, already-tested,
+# subject-aware classifier built for upgrade/downgrade conditions -- rather
+# than a second classifier (section 8: "reuse existing project models where
+# possible, do not create a parallel evidence architecture"). Deliberately as
+# narrow as that classifier's own stated scope ("catch clear contradictions,
+# not adjudicate every phrasing"): a claim classified UNCLASSIFIED (no
+# explicit up/down language at all -- a scenario-value comparison, a
+# qualitative risk-offset observation, a plain level with no movement word)
+# is NOT rejected here. The stronger rule the spec also describes -- "a bare
+# neutral fact needs an explicit favourable comparison to count as bullish"
+# -- would require real semantic judgment this module has never attempted
+# (see finance/claim_validation.py's own "deliberately NOT implemented" note
+# on numeric/semantic matching) and risks mass false positives against
+# legitimate claim shapes that carry no up/down vocabulary at all. Only the
+# unambiguous, OPPOSITE-direction case is caught.
+_OPPOSING_CLAIM_DIRECTION = {"bull": "UNFAVORABLE", "bear": "FAVORABLE"}
+
+
+def _claim_direction_findings(validated: dict, side: str) -> list:
+    from finance.content_policy import Finding, Severity
+
+    opposing = _OPPOSING_CLAIM_DIRECTION.get(side)
+    if opposing is None:
+        return []
+    findings = []
+    for i, claim in enumerate(validated.get("claims") or []):
+        text = claim.get("claim") if isinstance(claim, dict) else None
+        if not isinstance(text, str) or not text.strip():
+            continue
+        # `classify_condition_direction`'s bag-of-words fallback reads
+        # "exceeds"/"above" as unconditionally favourable, which is right for
+        # an operating metric and WRONG for a price-versus-value comparison --
+        # "the price exceeds the modeled value" is a BEARISH (overvaluation)
+        # claim, correctly filed under Bear Case, that the classifier has no
+        # subject-aware vocabulary for (price/valuation is not in
+        # `_HIGHER_IS_BETTER`, deliberately -- "price exceeds the 200-day
+        # moving average" is a neutral technical observation, not a value
+        # judgment). Reuses the SAME `_PRICE_TERMS` vocabulary `is_circular_
+        # price_condition` already uses for exactly this "price language
+        # needs different handling" reason, rather than teaching the shared
+        # classifier price semantics it was never designed to carry.
+        if any(term in text.lower() for term in _PRICE_TERMS):
+            continue
+        if classify_condition_direction(text) == opposing:
+            findings.append(Finding(
+                rule_id=CLAIM_DIRECTION_MISMATCH_RULE_ID, label=CLAIM_DIRECTION_MISMATCH,
+                severity=Severity.SEMANTIC_MISUSE, field_path=f"claims[{i}].claim",
+                matched_span=text[:60]))
+    return findings
+
+
 def _validate_researcher_output(raw, index, side) -> dict:
     if not isinstance(raw, dict):
         raise _Invalid("response was not a JSON object")
@@ -1479,14 +1556,15 @@ def _validate_researcher_output(raw, index, side) -> dict:
         "confidence": _cap_confidence_enum_for_omissions(
             _enum_field(raw, "confidence", _CONFIDENCE_LEVELS), index),
     }
-    return _validate_claim_fidelity(validated, index)
+    return _validate_claim_fidelity(
+        validated, index, extra_findings=_claim_direction_findings(validated, side))
 
 
 # ---------------------------------------------------------------------------
 # Stage 3: ONE bounded rebuttal round (both sides, one call)
 # ---------------------------------------------------------------------------
 
-def _rebuttal_prompt(evidence_text, bull_output, bear_output):
+def _rebuttal_prompt(evidence_text, bull_output, bear_output, skill_text):
     role = (
         "You are facilitating exactly ONE bounded rebuttal round between the Bull "
         "and Bear Researchers below. This is the ONLY rebuttal round — do not "
@@ -1517,7 +1595,7 @@ def _rebuttal_prompt(evidence_text, bull_output, bear_output):
         + f"\n\nBEAR CASE:\nThesis: {bear_output['thesis']}\n"
         + "\n".join(f"- {c['claim']}" for c in bear_output["claims"])
     )
-    return _stage_prompt(role, schema, evidence_text, extra_context=extra)
+    return _stage_prompt(role, schema, evidence_text, skill_text, extra_context=extra)
 
 
 def _validate_rebuttal_output(raw, index) -> dict:
@@ -1550,7 +1628,7 @@ def _validate_rebuttal_output(raw, index) -> dict:
 # authoritative.
 # ---------------------------------------------------------------------------
 
-def _research_manager_prompt(evidence_text, bull_output, bear_output, rebuttal_output):
+def _research_manager_prompt(evidence_text, bull_output, bear_output, rebuttal_output, skill_text):
     role = (
         "You are the Research Manager. Compare the bull case, the bear case, and the "
         "rebuttal round below PURELY on evidence strength and data quality. You are "
@@ -1588,7 +1666,7 @@ def _research_manager_prompt(evidence_text, bull_output, bear_output, rebuttal_o
     if rebuttal_output:
         extra += (f"\n\nREBUTTAL ROUND:\nBull rebuttal: {rebuttal_output['bull_rebuttal']['response']}"
                   f"\nBear rebuttal: {rebuttal_output['bear_rebuttal']['response']}")
-    return _stage_prompt(role, schema, evidence_text, extra_context=extra)
+    return _stage_prompt(role, schema, evidence_text, skill_text, extra_context=extra)
 
 
 def _validate_research_manager_output(raw, index) -> dict:
@@ -1616,7 +1694,7 @@ def _validate_research_manager_output(raw, index) -> dict:
 # Stage 5: Risk Reviewer (unified — NOT a 3-way debate over a trade proposal)
 # ---------------------------------------------------------------------------
 
-def _risk_reviewer_prompt(evidence_text, research_manager_output):
+def _risk_reviewer_prompt(evidence_text, research_manager_output, skill_text):
     role = (
         "You are the Risk Reviewer. Review the Research Manager's reconciled view "
         "below and identify the specific risks to this analysis and to the "
@@ -1664,7 +1742,7 @@ def _risk_reviewer_prompt(evidence_text, research_manager_output):
     extra = (f"RESEARCH MANAGER ASSESSMENT:\nEvidence balance: "
             f"{research_manager_output['evidence_balance']}\n"
             f"{research_manager_output['balanced_assessment']}")
-    return _stage_prompt(role, schema, evidence_text, extra_context=extra)
+    return _stage_prompt(role, schema, evidence_text, skill_text, extra_context=extra)
 
 
 _RISK_SEVERITY_ORDER = ("low", "medium", "high", "very_high")
@@ -1947,7 +2025,7 @@ def _dcf_validation_failed(index) -> bool:
     return _dcf_validation_status_from_index(index) in _DCF_INVALID_VALIDATION_STATUSES
 
 
-def _final_synthesizer_prompt(evidence_text, research_manager_output, risk_output):
+def _final_synthesizer_prompt(evidence_text, research_manager_output, risk_output, skill_text):
     role = (
         # NOTE: this must keep starting with "You are the FinalInvestmentSynthesizer" --
         # that prefix is how the pipeline's own stage routing and every test
@@ -2069,7 +2147,7 @@ def _final_synthesizer_prompt(evidence_text, research_manager_output, risk_outpu
             f"{research_manager_output['balanced_assessment']}\n\n"
             f"RISK REVIEWER: {len(risk_output['key_risks'])} key risk(s) identified; "
             f"data quality concerns: {risk_output['data_quality_concerns']}")
-    return _stage_prompt(role, schema, evidence_text, extra_context=extra)
+    return _stage_prompt(role, schema, evidence_text, skill_text, extra_context=extra)
 
 
 def _rationale_list(d, key, index, min_items=1, max_items=6):
@@ -2383,12 +2461,23 @@ _INCREASE_WORDS = ("increase", "increasing", "rise", "rises", "rising", "grow",
                    # revenue is good and accelerating cash burn is not, and
                    # scoring it as unconditionally favourable is what filed a
                    # worsening burn under upgrade conditions.
-                   "accelerat", "extend", "lengthen", "improves to")
+                   "accelerat", "extend", "lengthen", "improves to",
+                   # Phase H.35: irregular past-tense forms, added so a
+                   # PAST-TENSE factual claim ("Revenue grew 9.3% year over
+                   # year", "Shares rose", "The modeled value exceeded...")
+                   # scores exactly like its present-tense form already does
+                   # -- "grew" does not contain "grow" as a substring the way
+                   # "increased" contains "increase", so it was silently
+                   # invisible to this list even though revenue growing is
+                   # exactly the same favourable movement either way.
+                   "grew", "grown", "rose", "risen")
 _DECREASE_WORDS = ("decrease", "decreasing", "decline", "declines", "declining",
                    "fall", "falls", "falling", "drop", "drops", "dropping",
                    "lower", "below", "under ", "contract", "contracts",
                    "contracting", "shrink", "narrows", "reduces", "reduced",
-                   "reduction")
+                   "reduction",
+                   # Phase H.35: the decrease-side irregular past tenses.
+                   "fell", "fallen", "shrank", "shrunk")
 
 # Conditions are compound: "X declines while Y remains stable". Each clause is
 # scored on its own so one neutral clause cannot cancel a clear one.
@@ -3567,6 +3656,24 @@ def run_research_pipeline(evidence_index: Dict[str, EvidenceItem], ask_local_fn,
     def index_lookup(_raw):
         return evidence_index
 
+    # Phase H.35, section 23: the runtime financial-evidence-analysis skill
+    # is a prerequisite for EVERY interpretive stage, checked once, up front
+    # -- not a per-stage fallback. A local LLM reasoning about this evidence
+    # WITHOUT the skill's interpretation discipline is not a degraded version
+    # of this pipeline, it is a different, unreviewed one; failing the whole
+    # interpretive pipeline closed here is the fail-closed behavior section
+    # 23 asks for. Deterministic finance calculations (DCF, metrics, guidance
+    # extraction, actualization) never call this function at all and are
+    # completely unaffected by this check succeeding or failing.
+    skill_text = try_load_runtime_skill()
+    if skill_text is None:
+        reason = ("the runtime financial-evidence-analysis skill "
+                  f"(skills/financial-evidence-analysis/SKILL.md) could not be loaded")
+        return ResearchPipelineResult(
+            available=False,
+            checkpoints=[_skipped(name, reason) for name in _ALL_STAGE_NAMES],
+            evidence_index_size=len(evidence_index))
+
     # -- 1-2: independent bull and bear researchers -- each gets the SAME
     # one-repair-attempt treatment as the final synthesizer (COR corrective
     # patch, Phase 5-6): a content-policy/claim-fidelity violation here is
@@ -3578,13 +3685,13 @@ def run_research_pipeline(evidence_index: Dict[str, EvidenceItem], ask_local_fn,
     # rebuttal_round was the last holdout, on the mistaken belief it had
     # never been observed tripping this scan live -- see this module's own
     # docstring and `_validate_claim_fidelity`'s).
-    bull_system, bull_user = _researcher_prompt("bull", evidence_text)
+    bull_system, bull_user = _researcher_prompt("bull", evidence_text, skill_text)
     bull_checkpoint = _run_stage_with_content_policy_repair(
         "bull_researcher", bull_system, bull_user,
         lambda raw: _validate_researcher_output(raw, evidence_index, "bull"), ask_local_fn)
     checkpoints.append(bull_checkpoint)
 
-    bear_system, bear_user = _researcher_prompt("bear", evidence_text)
+    bear_system, bear_user = _researcher_prompt("bear", evidence_text, skill_text)
     bear_checkpoint = _run_stage_with_content_policy_repair(
         "bear_researcher", bear_system, bear_user,
         lambda raw: _validate_researcher_output(raw, evidence_index, "bear"), ask_local_fn)
@@ -3597,7 +3704,7 @@ def run_research_pipeline(evidence_index: Dict[str, EvidenceItem], ask_local_fn,
     rebuttal_output = None
     if bull_ok and bear_ok:
         rb_system, rb_user = _rebuttal_prompt(evidence_text, bull_checkpoint.output,
-                                              bear_checkpoint.output)
+                                              bear_checkpoint.output, skill_text)
         rebuttal_checkpoint = _run_stage_with_content_policy_repair(
             "rebuttal_round", rb_system, rb_user,
             lambda raw: _validate_rebuttal_output(raw, evidence_index), ask_local_fn)
@@ -3612,7 +3719,8 @@ def run_research_pipeline(evidence_index: Dict[str, EvidenceItem], ask_local_fn,
     if bull_ok or bear_ok:
         rm_system, rm_user = _research_manager_prompt(
             evidence_text, bull_checkpoint.output or {"thesis": "(unavailable)", "claims": []},
-            bear_checkpoint.output or {"thesis": "(unavailable)", "claims": []}, rebuttal_output)
+            bear_checkpoint.output or {"thesis": "(unavailable)", "claims": []}, rebuttal_output,
+            skill_text)
         # COR corrective patch, live verification: research_manager's own
         # free-text reconciliation (balanced_assessment, shared_findings, ...)
         # faces the SAME content-policy exposure as bull/bear -- observed
@@ -3632,7 +3740,7 @@ def run_research_pipeline(evidence_index: Dict[str, EvidenceItem], ask_local_fn,
 
     # -- 5: risk reviewer (needs research manager) --
     if rm_ok:
-        rr_system, rr_user = _risk_reviewer_prompt(evidence_text, rm_checkpoint.output)
+        rr_system, rr_user = _risk_reviewer_prompt(evidence_text, rm_checkpoint.output, skill_text)
         # Same reasoning as research_manager above: risk_reviewer's 'risk'/
         # 'data_quality_concerns' free-text fields face identical exposure,
         # and this is the last stage standing between a completed
@@ -3649,7 +3757,7 @@ def run_research_pipeline(evidence_index: Dict[str, EvidenceItem], ask_local_fn,
     # -- 6: FinalInvestmentSynthesizer (needs research manager + risk reviewer) --
     if rm_ok and risk_ok:
         fs_system, fs_user = _final_synthesizer_prompt(
-            evidence_text, rm_checkpoint.output, risk_checkpoint.output)
+            evidence_text, rm_checkpoint.output, risk_checkpoint.output, skill_text)
         final_checkpoint = _run_stage_with_content_policy_repair(
             "final_investment_synthesizer", fs_system, fs_user,
             # MLI corrective patch: the risk_reviewer's validated output is

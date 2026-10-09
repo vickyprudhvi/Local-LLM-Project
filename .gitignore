@@ -10,16 +10,11 @@ __pycache__/
 .pytest_cache/
 ptt_capture.wav
 vad_capture.wav
-# Local Claude Code state (plan.md, settings.local.json, scheduled_tasks.lock,
-# etc.) stays ignored by default; the project-owned financial-evidence-
-# analysis skill is explicitly re-included so it travels with the repo. `.*`
-# (not a bare `.claude/`) is required for the `!` negations below to take
-# effect -- git never descends into an excluded directory to evaluate
-# negations for paths inside it.
-.claude/*
-!.claude/skills/
-!.claude/skills/financial-evidence-analysis/
-!.claude/skills/financial-evidence-analysis/**
+# Local Claude Code state (plan.md, settings.local.json, scheduled_tasks.lock).
+# Phase H.35: the project-owned runtime skill moved to skills/financial-
+# evidence-analysis/SKILL.md (tracked, not under .claude/) as the single
+# source of truth, so the carve-out this directory previously needed is gone.
+.claude/
 credentials.json
 token.json
 # MCP test workspace: keep the seed file, ignore anything written during runs/tests
