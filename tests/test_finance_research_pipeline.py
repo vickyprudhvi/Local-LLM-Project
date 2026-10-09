@@ -1292,20 +1292,24 @@ def test_rebuttal_round_context_actually_contains_both_thesis_texts():
     assert "Valuation looks stretched." in user_text  # bear thesis
 
 
-def test_only_bull_and_bear_run_when_evidence_index_is_empty():
-    """No scenarios/evidence available at all -- researchers still run (they
-    can note the absence) but nothing downstream is fabricated when there is
-    truly nothing to reconcile.
-
-    Both researchers are FAILED here because they are required to cite >=1
-    evidence ID and the index is empty -- proving they cannot cite something
-    that isn't there even under a degenerate input.
+def test_no_stage_runs_when_evidence_index_is_empty():
+    """Phase H.37, sections 5/11: CanonicalResearchEvidence is a precondition
+    for the whole pipeline, checked BEFORE any stage runs -- not something
+    left to be discovered when a stage's own citation requirement rejects an
+    empty index after already calling the local LLM. Every stage is SKIPPED
+    with the precondition reason, and the LLM is never called at all (a prior
+    version of this test documented the weaker behavior -- run anyway, rely
+    on citation validation to fail it closed afterward -- which this phase
+    deliberately strengthens).
     """
+    calls = []
     empty_index = {}
-    result = rp.run_research_pipeline(empty_index, make_ask_local())
-    assert result.by_stage("bull_researcher").status == rp.StageStatus.FAILED
-    assert result.by_stage("bear_researcher").status == rp.StageStatus.FAILED
+    result = rp.run_research_pipeline(empty_index, make_ask_local(record=calls))
+    assert result.by_stage("bull_researcher").status == rp.StageStatus.SKIPPED
+    assert result.by_stage("bear_researcher").status == rp.StageStatus.SKIPPED
+    assert result.by_stage("bull_researcher").error == rp.SKILL_PRECONDITION_NOT_MET
     assert result.available is False
+    assert calls == []  # no LLM call happened at all
 
 
 # ---- architectural guarantees: no network, no deterministic-calculation coupling ----

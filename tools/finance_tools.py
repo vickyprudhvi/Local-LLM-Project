@@ -868,7 +868,19 @@ class DcfModelTool(BaseTool):
         "sensitivity table. You must supply every assumption; nothing is guessed. "
         "Terminal growth must be below WACC. This tool performs the authoritative "
         "arithmetic - never compute the valuation yourself, and never alter its "
-        "output afterward."
+        "output afterward. "
+        "Phase H.37: every numeric input (base_revenue, total_debt, "
+        "cash_and_cash_equivalents, diluted_shares, etc.) must come from a dataset "
+        "actually retrieved THIS turn (finance.income_statement, finance.balance_sheet, "
+        "finance.stock_quote, or the equivalent) or from the user's own explicit "
+        "hypothetical ('what if revenue were $10B') — never from your own memory, "
+        "training data, or a recollection of this company's financials. For a request "
+        "to analyze, value, or research a specific named company as a whole (not a "
+        "narrow 'what if' on a figure already in hand), do not assemble a valuation "
+        "from this tool plus the market-data tools yourself; a full-stock-analysis "
+        "request for a named ticker is handled by the canonical FullStockAnalysis "
+        "workflow before it ever reaches tool selection, and this tool existing does "
+        "not mean you should re-derive an equivalent result by calling it directly."
     )
     input_schema = {
         "type": "object",

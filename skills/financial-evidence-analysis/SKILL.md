@@ -24,6 +24,35 @@ correctly the first time; it does not replace validation, and correctness of
 the published report never depends on this file loading successfully — see
 "If this skill cannot be loaded" at the end.
 
+## Input precondition (Phase H.37)
+
+**This skill requires that `CanonicalResearchEvidence` already exists** — the
+evidence index built by `finance/evidence.py::build_evidence_index` from a
+completed deterministic pipeline run (SEC/market retrieval, actualization,
+DCF, metrics). It is injected only into `finance/research_pipeline.py`'s six
+interpretive stages (bull researcher, bear researcher, rebuttal round,
+research manager, risk reviewer, final investment synthesizer), each of
+which already receives that evidence index as its one and only source of
+facts before this file is ever read.
+
+This skill is **not** a stock-analysis engine, a data source, or a DCF
+engine, and it must never be treated as one:
+
+- It does not perform "a stock analysis," "a valuation," "research on a
+  ticker," or "company fundamentals" on its own — it interprets evidence
+  that something else already produced.
+- It never independently creates revenue, earnings, cash flow, debt, net
+  debt, guidance, share counts, market price, valuation inputs, DCF values,
+  technical indicators, or peer comparisons. Every one of those must already
+  be in the evidence index before this file is loaded.
+- If canonical evidence is absent, this skill does not get invoked at all —
+  there is no code path that loads it outside the six stages above, each of
+  which already requires a built evidence index to run. If a caller outside
+  that boundary ever attempts to use this skill's discipline without first
+  producing canonical evidence, the correct outcome is `UNRESOLVED` /
+  `SKILL_PRECONDITION_NOT_MET` — never a standalone report assembled from
+  this file's own reasoning.
+
 ## The one rule everything else follows
 
 **You may explain verified financial facts. You may not invent new financial

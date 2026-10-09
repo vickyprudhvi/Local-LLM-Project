@@ -102,6 +102,15 @@ _ALL_STAGE_NAMES = (
     "risk_reviewer", "final_investment_synthesizer",
 )
 
+# Phase H.37, sections 5/11: the SKIPPED reason when `run_research_pipeline`
+# is called with no CanonicalResearchEvidence at all. Named so a caller or a
+# test can match on the REASON, not just on `available is False` (which a
+# missing-skill failure also produces, for a different cause).
+SKILL_PRECONDITION_NOT_MET = (
+    "CanonicalResearchEvidence is required before the financial-evidence-"
+    "analysis skill may be used -- this run supplied no evidence index at all."
+)
+
 _CONFIDENCE_LEVELS = ("low", "medium", "high")
 
 # Phase H.3 corrective patch, Problem 1: prefixes a validation error raised
@@ -3873,6 +3882,23 @@ def run_research_pipeline(evidence_index: Dict[str, EvidenceItem], ask_local_fn,
     failed is recorded SKIPPED with why, never silently omitted and never fed
     a fabricated stand-in for the missing input.
     """
+    # Phase H.37, sections 5/11/28: CanonicalResearchEvidence is a
+    # PRECONDITION for this whole pipeline (and, through it, for the runtime
+    # skill), not an assumption nothing ever checks. Calling this function
+    # with no evidence at all is exactly the shape of "use the financial
+    # skill as a standalone stock-analysis engine with nothing to interpret"
+    # that this phase exists to make impossible -- fail closed here, the
+    # same SKIPPED-with-why shape as a missing skill file, rather than
+    # letting an empty evidence index reach `render_evidence_index` (which
+    # assumes a real mapping) or a stage prompt (which would then ask the
+    # local LLM to interpret nothing).
+    if not evidence_index:
+        return ResearchPipelineResult(
+            available=False,
+            checkpoints=[_skipped(name, SKILL_PRECONDITION_NOT_MET)
+                        for name in _ALL_STAGE_NAMES],
+            evidence_index_size=0)
+
     checkpoints: List[StageCheckpoint] = []
     evidence_text = render_evidence_index(evidence_index)
 

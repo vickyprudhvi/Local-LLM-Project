@@ -850,9 +850,22 @@ def _maybe_run_full_stock_analysis(user_text):
     )
     try:
         result = finance_workflow.run_full_stock_analysis(tool_loop.EXECUTOR, symbol)
+        return finance_workflow.synthesize_report(result, ask_local_raw, report_detail=report_detail)
     except ToolValidationError as e:  # e.g. STOCK_ANALYSIS_ENABLED=false, bad symbol
         return str(e), dict(_ZERO_METRICS)
-    return finance_workflow.synthesize_report(result, ask_local_raw, report_detail=report_detail)
+    except Exception as e:  # noqa: BLE001
+        # Phase H.37, section 10/4: once a stock-analysis request is detected,
+        # it must never fall through to the generic tool loop (where a local
+        # LLM could assemble a free-form answer from memory/invented data) --
+        # not even when something inside the canonical pipeline breaks in a
+        # way `run_full_stock_analysis`'s own extensive internal handling
+        # (quota exhaustion, provider failures, entitlement errors -- all
+        # already return a controlled result, never raise) did not
+        # anticipate. The failure is reported plainly instead of silently
+        # becoming a different, unreviewed answer path.
+        console.print(f"[red]stock analysis: unexpected failure for {symbol!r}: {e}[/red]")
+        return (f"Stock analysis for {symbol} is unavailable right now (an internal error "
+               f"occurred while running the analysis). Please try again."), dict(_ZERO_METRICS)
 
 
 def _process_local_request_with_capability_selection(manager, runtime_manager, user_text, prompt, history,

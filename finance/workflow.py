@@ -164,11 +164,42 @@ _FULL_ANALYSIS_TRIGGER_RE = re.compile(
     # "VZ analysis" / "analysis of VZ" / "an analysis on VZ"
     r"|\banalysis\b"
     r"|\bdeep[\s-]dive\b"
-    r"|\bresearch\b[^.?!\n]{0,30}\b(?:stock|shares?|company|ticker)\b"
-    r"|\bdcf\s+(?:model|valuation|analysis)\b"
+    # Phase H.37: "research VZ" (bare, no trailing noun) is a real gap this
+    # phase traces -- the pre-existing pattern below required "stock/shares/
+    # company/ticker" to follow "research" within 30 characters, which never
+    # matches the plainest phrasing of all. Safe to broaden to bare
+    # "research" (and "should I research X") because the TICKER-TOKEN gate
+    # immediately after this match is the real backstop: "research" with no
+    # uppercase ticker-shaped token present (e.g. an ordinary sentence about
+    # researching a topic) still returns None exactly as before.
+    r"|\bresearch\b"
+    # Bare "dcf" (was anchored to "dcf model/valuation/analysis", which
+    # missed "a DCF for VZ" / "DCF on VZ" entirely) -- "DCF" is itself in
+    # _NON_TICKER_ACRONYMS, so "What is DCF?" (no OTHER ticker-shaped token)
+    # still correctly returns None; only a genuine "DCF ... TICKER" request
+    # clears the gate.
+    r"|\bdcf\b"
     r"|\bintrinsic\s+value\b"
     r"|\bvaluation\b"
-    r"|\bmarket\s+price\b[^.?!\n]{0,60}\bintrinsic\b",
+    r"|\bmarket\s+price\b[^.?!\n]{0,60}\bintrinsic\b"
+    # Phase H.37: bull/bear case, risk analysis, investment thesis, and a
+    # bare request for "a recommendation" are all company-specific
+    # financial-interpretation requests this detector previously missed
+    # entirely -- none of the patterns above cover them, and each was in the
+    # phase's own confirmed-gap list ("Bull and bear case for NKE", "Give me
+    # risks for VZ").
+    r"|\bbull\s+case\b|\bbear\s+case\b"
+    r"|\brisk\s+analysis\b|\brisks?\s+(?:for|of|on)\b"
+    r"|\binvestment\s+thesis\b"
+    r"|\b(?:a|the)\s+recommendation\b"
+    # "How is MSFT stock?" -- named explicitly in this phase's own example
+    # list. Deliberately narrower than "how is X doing/performing": a
+    # pre-existing test (test_ambiguous_company_questions_still_do_not_
+    # trigger_a_full_analysis) protects "how is VZ doing" as intentionally
+    # TOO casual/ambiguous to justify an expensive six-stage pipeline, and
+    # that design choice stays -- only the literal word "stock" (or
+    # "shares") after "how is X" is unambiguous enough to add.
+    r"|\bhow\s+is\b[^.?!\n]{0,20}\b(?:stock|shares?)\b",
     re.IGNORECASE,
 )
 
@@ -189,7 +220,14 @@ _ADVICE_TRIGGER_RE = re.compile(
     r"|\bis\s+\S+\s+(?:still\s+)?(?:a\s+)?(?:good\s+|bad\s+|strong\s+)?(?:buy|sell)\b"
     r"|\bbuy\s+or\s+sell\b"
     r"|\bbuy,?\s+hold,?\s+or\s+sell\b"
-    r"|\bworth\s+buying\b",
+    r"|\bworth\s+buying\b"
+    # Phase H.37: "Is COST overvalued?" is a valuation-direction question in
+    # exactly the same shape as "is X a good buy" -- the pre-existing
+    # patterns only covered buy/sell/hold/avoid vocabulary, missing the
+    # equally common overvalued/undervalued framing entirely.
+    r"|\bis\s+\S+\s+(?:still\s+)?over[\s-]?valued\b"
+    r"|\bis\s+\S+\s+(?:still\s+)?under[\s-]?valued\b"
+    r"|\bover[\s-]?valued\s+or\s+under[\s-]?valued\b",
     re.IGNORECASE,
 )
 
